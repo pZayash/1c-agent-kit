@@ -1,0 +1,6 @@
+# Скопировать в корень потребителя как .gitmodules после submodule add.
+# url — заменить на origin 1c-agent-kit (реальный clone URL, не локальный путь).
+
+[submodule "harness"]
+	path = harness
+	url = https://github.com/pZayash/1c-agent-kit.git

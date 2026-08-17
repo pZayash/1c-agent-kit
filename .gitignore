@@ -1,0 +1,17 @@
+.DS_Store
+Thumbs.db
+*.swp
+.tmp/
+node_modules/
+
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+.secret*
+*.key
+*.pem
+.idea/
+.vscode/
+*.log

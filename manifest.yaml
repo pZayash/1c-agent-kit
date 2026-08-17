@@ -1,0 +1,23 @@
+# Опции развёртывания kit в проект-потребитель.
+# v1: файлы опций лежат здесь; compose/qmd/slots не поднимать «сразу».
+
+name: 1c-agent-kit
+submodule_path: harness
+
+layout:
+  default: vanessa          # src/cf, src/cfe
+  legacy: conf-symlinks     # conf/ + cfe.xml/ + src/* symlinks
+
+options:
+  qmd:
+    default: optional
+  sandbox:
+    default: optional       # файлы в kit; docker compose — вручную
+  agent_slots:
+    default: optional       # JWT e2e — хвост; не блокер v1
+  openspec:
+    default: optional
+  rlm_tools_bsl:
+    default: optional       # глобальная служба, не blob kit
+  mcp:
+    default: separate       # first-install: .cfe + LoadCfg, не XML dump 2.21
