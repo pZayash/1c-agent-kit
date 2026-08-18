@@ -40,8 +40,21 @@ mailbox пилота). Правка — здесь, потом Promote (commit �
 `tools/sandbox/` и `.cursor/cli.json` — в потребителе. Пилот КПСР: addendum
 `docs/ai/git-workflow-kpsr.md` (не в kit).
 
+## Срез 2c (2026-08-18)
+
+| Файл | Зачем |
+| --- | --- |
+| [specs/form-dsl-spec.md](specs/form-dsl-spec.md) | Form JSON DSL |
+| [specs/meta-dsl-spec.md](specs/meta-dsl-spec.md) | Meta JSON DSL |
+| [specs/skd-dsl-spec.md](specs/skd-dsl-spec.md) | SKD JSON DSL |
+| [specs/mxl-dsl-spec.md](specs/mxl-dsl-spec.md) | MXL JSON DSL |
+| [specs/role-dsl-spec.md](specs/role-dsl-spec.md) | Role JSON DSL |
+
+Скиллы `*-compile` — в `.cursor/skills/` потребителя. web/build/autotest — ещё
+в потребителе.
+
 ## Пока в репо потребителя
 
 `code-standards`, `object-conventions`, печать, MCP, слоты, OpenSpec,
-DSL-спеки (`*-dsl-spec.md`, web/build/autotest), `tools/`, skills. Следующий
-срез — **2c** (DSL).
+`web-spec` / `build-spec` / autotest, `tools/`, skills. Следующий срез —
+**3** (`code-standards` после выноса `яя_`-dialect).

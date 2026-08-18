@@ -163,5 +163,15 @@
 
 ## 7. DSL-спецификации (компактный формат ввода)
 
-Meta/Form/SKD/MXL/Role DSL — в репо **потребителя** (`docs/ai/specs/*-dsl-spec.md`),
-не в kit. Скиллы `meta-*`, `form-*`, `skd-*`, `mxl-*`, `role-*` — там же.
+JSON-DSL компилируется скиллами потребителя (`meta-*`, `form-*`, `skd-*`,
+`mxl-*`, `role-*` в `.cursor/skills/`). Спеки формата — в kit:
+
+| DSL | Спецификация |
+| --- | --- |
+| Meta | [specs/meta-dsl-spec.md](specs/meta-dsl-spec.md) |
+| Form | [specs/form-dsl-spec.md](specs/form-dsl-spec.md) |
+| SKD | [specs/skd-dsl-spec.md](specs/skd-dsl-spec.md) |
+| MXL | [specs/mxl-dsl-spec.md](specs/mxl-dsl-spec.md) |
+| Role | [specs/role-dsl-spec.md](specs/role-dsl-spec.md) |
+
+web/build/autotest-сценарии — в репо потребителя (не этот срез).
