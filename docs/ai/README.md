@@ -50,11 +50,18 @@ mailbox пилота). Правка — здесь, потом Promote (commit �
 | [specs/mxl-dsl-spec.md](specs/mxl-dsl-spec.md) | MXL JSON DSL |
 | [specs/role-dsl-spec.md](specs/role-dsl-spec.md) | Role JSON DSL |
 
-Скиллы `*-compile` — в `.cursor/skills/` потребителя. web/build/autotest — ещё
-в потребителе.
+Скиллы `*-compile` — в `.cursor/skills/` потребителя.
+
+web/build/autotest:
+
+| Файл | Зачем |
+| --- | --- |
+| [specs/web-spec.md](specs/web-spec.md) | Apache, default.vrd, wsap24 |
+| [specs/build-spec.md](specs/build-spec.md) | пакетный `1cv8.exe` |
+| [specs/epf-erf-autotest-scenario-spec.md](specs/epf-erf-autotest-scenario-spec.md) | `autotest.scenario.json` |
 
 ## Пока в репо потребителя
 
 `code-standards`, `object-conventions`, печать, MCP, слоты, OpenSpec,
-`web-spec` / `build-spec` / autotest, `tools/`, skills. Следующий срез —
-**3** (`code-standards` после выноса `яя_`-dialect).
+`tools/`, skills. Следующий срез — **3** (`code-standards` после выноса
+`яя_`-dialect).

@@ -173,5 +173,6 @@ JSON-DSL компилируется скиллами потребителя (`me
 | SKD | [specs/skd-dsl-spec.md](specs/skd-dsl-spec.md) |
 | MXL | [specs/mxl-dsl-spec.md](specs/mxl-dsl-spec.md) |
 | Role | [specs/role-dsl-spec.md](specs/role-dsl-spec.md) |
-
-web/build/autotest-сценарии — в репо потребителя (не этот срез).
+| Web (Apache / vrd) | [specs/web-spec.md](specs/web-spec.md) |
+| Пакетный 1cv8 | [specs/build-spec.md](specs/build-spec.md) |
+| EPF/ERF autotest | [specs/epf-erf-autotest-scenario-spec.md](specs/epf-erf-autotest-scenario-spec.md) |
