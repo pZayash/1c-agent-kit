@@ -68,7 +68,15 @@ web/build/autotest:
 
 Пилот КПСР: addendum `docs/ai/code-standards-kpsr.md` (`яя_`, `+кпср`/`№%`, журнал).
 
+## Срез 3b (2026-08-18)
+
+| Файл | Зачем |
+| --- | --- |
+| [object-conventions.md](object-conventions.md) | префикс/формы/XML-квалификаторы, нав-ссылки |
+| [logging-strategy.md](logging-strategy.md) | когда логировать, уровни, `Попытка/Исключение` |
+
+Пилот: `object-conventions-kpsr.md`, `logging-strategy-kpsr.md`.
+
 ## Пока в репо потребителя
 
-`object-conventions`, печать, MCP, слоты, OpenSpec, `tools/`, skills.
-`object-conventions` почти целиком `яя_` — не этот срез.
+Печать, MCP, слоты, OpenSpec, `tools/`, skills.
