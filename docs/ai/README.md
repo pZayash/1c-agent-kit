@@ -29,7 +29,19 @@ mailbox пилота). Правка — здесь, потом Promote (commit �
 
 В пилоте на старых путях `docs/ai/<имя>.md` — заглушка со ссылкой сюда.
 
+## Срез 2b (2026-08-18)
+
+| Файл | Зачем |
+| --- | --- |
+| [sandbox.md](sandbox.md) | Docker-песочница, `run.sh` |
+| [agent-command-allowlist.md](agent-command-allowlist.md) | allowlist Cursor/Claude |
+| [git-workflow.md](git-workflow.md) | общие правила git для агентов |
+
+`tools/sandbox/` и `.cursor/cli.json` — в потребителе. Пилот КПСР: addendum
+`docs/ai/git-workflow-kpsr.md` (не в kit).
+
 ## Пока в репо потребителя
 
 `code-standards`, `object-conventions`, печать, MCP, слоты, OpenSpec,
-DSL-спеки (`*-dsl-spec.md`), `tools/`, skills. Перенос — следующие срезы.
+DSL-спеки (`*-dsl-spec.md`, web/build/autotest), `tools/`, skills. Следующий
+срез — **2c** (DSL).
