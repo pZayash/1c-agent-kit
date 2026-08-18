@@ -60,8 +60,15 @@ web/build/autotest:
 | [specs/build-spec.md](specs/build-spec.md) | пакетный `1cv8.exe` |
 | [specs/epf-erf-autotest-scenario-spec.md](specs/epf-erf-autotest-scenario-spec.md) | `autotest.scenario.json` |
 
+## Срез 3 (2026-08-18)
+
+| Файл | Зачем |
+| --- | --- |
+| [code-standards.md](code-standards.md) | BSL: формат, запросы, perf/correctness, UI-сообщения |
+
+Пилот КПСР: addendum `docs/ai/code-standards-kpsr.md` (`яя_`, `+кпср`/`№%`, журнал).
+
 ## Пока в репо потребителя
 
-`code-standards`, `object-conventions`, печать, MCP, слоты, OpenSpec,
-`tools/`, skills. Следующий срез — **3** (`code-standards` после выноса
-`яя_`-dialect).
+`object-conventions`, печать, MCP, слоты, OpenSpec, `tools/`, skills.
+`object-conventions` почти целиком `яя_` — не этот срез.
