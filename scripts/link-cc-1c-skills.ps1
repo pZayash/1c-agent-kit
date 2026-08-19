@@ -14,6 +14,10 @@
 
 .PARAMETER DryRun
   Print planned links only.
+
+.PARAMETER ReplaceCopies
+  If .cursor/skills/<name> is a real directory (not junction), delete it and
+  create a junction. Default: on. LOCAL names are never touched.
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -24,7 +28,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$LocalManifest,
 
-    [switch]$DryRun
+    [switch]$DryRun,
+
+    [switch]$NoReplaceCopies
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,19 +62,37 @@ Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {
     $link = Join-Path $cursorSkills $name
     $target = $_.FullName
     if ($DryRun) {
-        Write-Host "WOULD LINK: $link -> $target"
+        if (Test-Path $link) {
+            $item = Get-Item -LiteralPath $link -Force
+            $isReparse = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            if (-not $isReparse) {
+                Write-Host "WOULD REPLACE COPY: $link -> $target"
+            } else {
+                Write-Host "WOULD RELINK: $link -> $target"
+            }
+        } else {
+            Write-Host "WOULD LINK: $link -> $target"
+        }
         return
     }
     if (Test-Path $link) {
         $item = Get-Item -LiteralPath $link -Force
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        $isReparse = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        if ($isReparse) {
             Remove-Item -LiteralPath $link -Force
+        } elseif ($NoReplaceCopies) {
+            Write-Error "Exists and not junction: $link (omit -NoReplaceCopies or add to LOCAL)"
+            return
         } else {
-            throw "Exists and not junction: $link (remove or add to LOCAL manifest)"
+            Write-Host "REPLACE COPY: $name"
+            Remove-Item -LiteralPath $link -Recurse -Force
         }
     }
     cmd /c "mklink /J `"$link`" `"$target`""
-    if ($LASTEXITCODE -ne 0) { throw "mklink failed for $name" }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "mklink failed for $name"
+        return
+    }
     Write-Host "LINK: $name"
 }
 
