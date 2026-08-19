@@ -4,6 +4,8 @@ Thumbs.db
 .tmp/
 node_modules/
 
+tools/cc-1c-skills/
+.tmp/
 .env
 .env.*
 !.env.example
