@@ -26,6 +26,25 @@ bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills
 - Срез 1: без `web-test` в kit (форк потребителя остаётся LOCAL).
 - meta-* XML-патчи: `tools/cc-1c-skills-sync/overlays/` + `apply-meta-xml-patches.py`.
 
+## Cursor overlay (срез A)
+
+Универсальные rules/commands/skills (не cc-1c) — [cursor/](cursor/).
+Канон `harness-promote`: [cursor/skills/harness-promote/](cursor/skills/harness-promote/).
+
+**Потребитель** после cc-1c link:
+
+```bash
+DRY_RUN=1 bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-overlay.txt
+bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-overlay.txt
+```
+
+- Skills: `mklink /J`. Rules/commands: **file** `mklink` (Windows Developer Mode).
+  Нет права — скрипт копирует файл и пишет WARN.
+- Не джойнить весь `.cursor/rules/` (LOCAL `bsl-check.mdc` остаётся файлом).
+- `mcp.json` / `cli.json` — не в kit.
+
+Порядок bootstrap второго ПК: `git submodule update --init` → `link-cc-1c-skills` → `link-cursor-overlay` → Reload Window.
+
 ## Подключение в проект (ещё не делать на пилоте автоматически)
 
 ```bash

@@ -1,0 +1,62 @@
+---
+description: How to add or edit Cursor rules in our project
+globs:
+alwaysApply: false
+---
+
+# Cursor Rules Location
+
+Universal rules (kit overlay): edit `harness/cursor/rules/*.mdc`, then Promote.
+Consumer `.cursor/rules/<name>.mdc` is a file symlink (or copy fallback).
+
+Project-only rules: real files in consumer `.cursor/rules/` (not in kit).
+Do not junction the whole `rules/` directory.
+
+How to add a **consumer-local** rule:
+
+1. Place the file in PROJECT_ROOT/.cursor/rules/:
+
+    ```text
+    .cursor/rules/
+    ├── your-rule-name.mdc
+    ├── another-rule.mdc
+    └── ...
+    ```
+
+2. Follow the naming convention:
+    - Use kebab-case for filenames
+    - Always use .mdc extension
+    - Make names descriptive of the rule's purpose
+
+3. Directory structure:
+
+    ```text
+    PROJECT_ROOT/
+    ├── .cursor/
+    │   └── rules/
+    │       ├── your-rule-name.mdc
+    │       └── ...
+    └── ...
+    ```
+
+4. Never place rule files:
+    - In the project root
+    - In subdirectories outside .cursor/rules
+    - In any other location
+
+5. Cursor rules have the following structure:
+
+```mdc
+---
+description: Short description of the rule's purpose
+globs: optional/path/pattern/**/*
+alwaysApply: false
+---
+# Rule Title
+
+Main content explaining the rule with markdown formatting.
+
+1. Step-by-step instructions
+2. Code examples
+3. Guidelines
+```
