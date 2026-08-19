@@ -1,13 +1,13 @@
 # LOCAL skills — шаблон для нового потребителя kit
 # Скопируйте в tools/cc-1c-skills-sync/local-skills.txt и дополните.
-# Навыки из harness/skills/cc-1c/ с именем здесь НЕ получают junction.
+# cc-1c junction: harness/skills/cc-1c/
+# Overlay A+B: harness/cursor/skills/ (link-cursor-overlay)
 
 web-test
-load-changed-files
-bsl-check
-explore
-openspec-propose
-openspec-apply-change
-openspec-archive-change
 sandbox
-harness-promote
+evolve
+print-deploy-external
+print-export-to-file
+vendor-merge-check
+diarize
+merge-audit

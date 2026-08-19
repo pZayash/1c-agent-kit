@@ -26,10 +26,14 @@ bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills
 - Срез 1: без `web-test` в kit (форк потребителя остаётся LOCAL).
 - meta-* XML-патчи: `tools/cc-1c-skills-sync/overlays/` + `apply-meta-xml-patches.py`.
 
-## Cursor overlay (срез A)
+## Cursor overlay (срез A + B)
 
 Универсальные rules/commands/skills (не cc-1c) — [cursor/](cursor/).
 Канон `harness-promote`: [cursor/skills/harness-promote/](cursor/skills/harness-promote/).
+
+**Срез A:** caveman, openspec-*, explore, xlsx, …  
+**Срез B (workflow):** handoff, close-chat, load-changed-files, bsl-check,
+architect-apply, mailbox, review, review-request.
 
 **Потребитель** после cc-1c link:
 
@@ -39,13 +43,30 @@ bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-over
 ```
 
 - Skills: `mklink /J`. Rules/commands: **file** `mklink` (Windows Developer Mode).
-  Нет права — скрипт копирует файл и пишет WARN.
-- Не джойнить весь `.cursor/rules/` (LOCAL `bsl-check.mdc` остаётся файлом).
-- `mcp.json` / `cli.json` — не в kit.
+- `sandbox` skill, `web-test` — LOCAL у потребителя.
 
-Порядок bootstrap второго ПК: `git submodule update --init` → `link-cc-1c-skills` → `link-cursor-overlay` → Reload Window.
+## Workflow tools (срез B)
 
-## Подключение в проект (ещё не делать на пилоте автоматически)
+`tools/mailbox`, `tools/bsl-check`, `tools/sandbox`, `tools/load-changed-files`,
+`tools/git-partial-stage.py` — в [tools/](tools/). Load engine:
+`tools/load-changed-files/load-changed-files.sh`; корень потребителя — wrapper.
+
+**Потребитель** после overlay link:
+
+```bash
+DRY_RUN=1 bash harness/scripts/link-kit-tools.sh . tools/cc-1c-skills-sync/local-tools.txt
+bash harness/scripts/link-kit-tools.sh . tools/cc-1c-skills-sync/local-tools.txt
+```
+
+- BSLLS binary не в git: `bash tools/bsl-check/update-bsl-language-server.sh` после clone.
+- Env-шаблон: [templates/env.example](templates/env.example).
+- Доки: [docs/ai/agent-task-bus.md](docs/ai/agent-task-bus.md),
+  [docs/ai/load-config-to-dev.md](docs/ai/load-config-to-dev.md).
+
+Порядок bootstrap второго ПК: `git submodule update --init` → `link-cc-1c-skills`
+→ `link-cursor-overlay` → `link-kit-tools` → BSLLS download → Reload Window.
+
+## Подключение в проект
 
 ```bash
 git submodule add <url-этого-репо> harness

@@ -37,7 +37,16 @@ mailbox пилота). Правка — здесь, потом Promote (commit �
 | [agent-command-allowlist.md](agent-command-allowlist.md) | allowlist Cursor/Claude |
 | [git-workflow.md](git-workflow.md) | общие правила git для агентов |
 
-`tools/sandbox/` и `.cursor/cli.json` — в потребителе. Пилот КПСР: addendum
+## Срез 3w (workflow, 2026-08-19)
+
+| Файл | Зачем |
+| --- | --- |
+| [agent-task-bus.md](agent-task-bus.md) | шина задач, mailbox |
+| [load-config-to-dev.md](load-config-to-dev.md) | load conf в dev-ИБ |
+
+Скиллы: `harness/cursor/skills/` (срез B). Tools: `harness/tools/{mailbox,bsl-check,sandbox,load-changed-files}`.
+
+`tools/sandbox/` и `.cursor/cli.json` — junction/copy у потребителя. Пилот КПСР: addendum
 `docs/ai/git-workflow-kpsr.md` (не в kit).
 
 ## Срез 2c (2026-08-18)

@@ -21,6 +21,8 @@ description: >-
 
 ```bash
 bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills.txt
+bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-overlay.txt
+bash harness/scripts/link-kit-tools.sh . tools/cc-1c-skills-sync/local-tools.txt
 ```
 
 **Promote cc-1c upstream (maintainer kit):**

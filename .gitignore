@@ -4,6 +4,9 @@ Thumbs.db
 .tmp/
 node_modules/
 
+tools/bsl-check/bsl-language-server-linux/
+tools/bsl-check/bsl-language-server-win/
+
 tools/cc-1c-skills/
 .tmp/
 .env

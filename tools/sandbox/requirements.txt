@@ -1,0 +1,3 @@
+# Зависимости Python для cc-1c-skills (см. upstream python-porting-guide)
+lxml>=4.9.0
+psutil>=5.9.0
