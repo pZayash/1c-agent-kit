@@ -20,6 +20,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+. (Join-Path $PSScriptRoot "_win-reparse.ps1")
 
 function Read-LocalNames([string]$path) {
     $map = @{}
@@ -31,25 +32,20 @@ function Read-LocalNames([string]$path) {
     return $map
 }
 
-function Test-Reparse([string]$path) {
-    $item = Get-Item -LiteralPath $path -Force
-    return [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
-}
-
 function New-DirJunction([string]$link, [string]$target, [string]$name) {
     if ($DryRun) {
         Write-Host "WOULD JUNCTION: $link -> $target"
         return
     }
     if (Test-Path $link) {
-        if (Test-Reparse $link) {
-            Remove-Item -LiteralPath $link -Force
+        if (Test-KitReparse $link) {
+            Remove-KitReparseOrTree $link
         } elseif ($NoReplaceCopies) {
             Write-Error "Exists and not junction: $link"
             return
         } else {
             Write-Host "REPLACE COPY: $name"
-            Remove-Item -LiteralPath $link -Recurse -Force
+            Remove-KitReparseOrTree $link
         }
     }
     cmd /c "mklink /J `"$link`" `"$target`"" | Out-Host
@@ -67,13 +63,13 @@ function New-FileLink([string]$link, [string]$target, [string]$name) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
     if (Test-Path $link) {
-        if (Test-Reparse $link) {
-            Remove-Item -LiteralPath $link -Force
+        if (Test-KitReparse $link) {
+            Remove-KitReparseOrTree $link
         } elseif ($NoReplaceCopies) {
             Write-Error "Exists and not link: $link"
             return
         } else {
-            Remove-Item -LiteralPath $link -Force
+            Remove-KitReparseOrTree $link
         }
     }
     cmd /c "mklink `"$link`" `"$target`"" | Out-Host

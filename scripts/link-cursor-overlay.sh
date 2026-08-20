@@ -1,18 +1,71 @@
 #!/usr/bin/env bash
-# Link harness/cursor overlay into consumer .cursor/
+# Link harness/cursor overlay into consumer .cursor/ (Linux ln -sfn).
+# On Windows/Git Bash: delegates to link-cursor-overlay.ps1.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./_link-common.sh
+source "$SCRIPT_DIR/_link-common.sh"
+
 CONSUMER_ROOT="${1:-.}"
-LOCAL_MANIFEST="${2:-tools/cc-1c-skills-sync/local-overlay.txt}"
 HARNESS_REL="${HARNESS_REL:-harness}"
+LOCAL_MANIFEST="${2:-tools/cc-1c-skills-sync/local-overlay.txt}"
 DRY_RUN="${DRY_RUN:-0}"
 
-PS1="$(cd "$(dirname "$0")" && pwd)/link-cursor-overlay.ps1"
-args=(-ConsumerRoot "$(cd "$CONSUMER_ROOT" && pwd)" -HarnessRel "$HARNESS_REL")
-if [[ -n "$LOCAL_MANIFEST" && -f "$CONSUMER_ROOT/$LOCAL_MANIFEST" ]]; then
-  args+=(-LocalManifest "$(cd "$CONSUMER_ROOT" && pwd)/$LOCAL_MANIFEST")
+if kit_is_windows; then
+  PS1="$SCRIPT_DIR/link-cursor-overlay.ps1"
+  root="$(cd "$CONSUMER_ROOT" && pwd)"
+  args=(-ConsumerRoot "$root" -HarnessRel "$HARNESS_REL")
+  [[ -f "$root/$LOCAL_MANIFEST" ]] && args+=(-LocalManifest "$root/$LOCAL_MANIFEST")
+  [[ "$DRY_RUN" == "1" ]] && args+=(-DryRun)
+  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi
-if [[ "$DRY_RUN" == "1" ]]; then
-  args+=(-DryRun)
+
+CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
+HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
+OVERLAY="$HARNESS_ROOT/cursor"
+MANIFEST="$CONSUMER_ROOT/$LOCAL_MANIFEST"
+
+[[ -d "$OVERLAY" ]] || { echo "missing overlay: $OVERLAY" >&2; exit 1; }
+mkdir -p "$CONSUMER_ROOT/.cursor/skills" "$CONSUMER_ROOT/.cursor/rules" "$CONSUMER_ROOT/.cursor/commands"
+
+declare -A local_names=()
+kit_load_manifest "$MANIFEST" local_names
+
+if [[ -d "$OVERLAY/skills" ]]; then
+  for d in "$OVERLAY/skills"/*; do
+    [[ -d "$d" ]] || continue
+    name="$(basename "$d")"
+    if [[ -n "${local_names[$name]:-}" ]]; then
+      echo "SKIP LOCAL: $name"
+      continue
+    fi
+    kit_ln_sfn "$d" "$CONSUMER_ROOT/.cursor/skills/$name"
+  done
 fi
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
+
+if [[ -d "$OVERLAY/rules" ]]; then
+  for f in "$OVERLAY/rules"/*; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$f")"
+    if [[ -n "${local_names[$name]:-}" ]]; then
+      echo "SKIP LOCAL: $name"
+      continue
+    fi
+    kit_ln_sfn "$f" "$CONSUMER_ROOT/.cursor/rules/$name"
+  done
+fi
+
+if [[ -d "$OVERLAY/commands" ]]; then
+  for f in "$OVERLAY/commands"/*; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$f")"
+    if [[ -n "${local_names[$name]:-}" ]]; then
+      echo "SKIP LOCAL: $name"
+      continue
+    fi
+    kit_ln_sfn "$f" "$CONSUMER_ROOT/.cursor/commands/$name"
+  done
+fi
+
+echo "Done."

@@ -2,22 +2,6 @@
 <#
 .SYNOPSIS
   Junction .cursor/skills/<name> -> harness/skills/cc-1c/<name> (Windows mklink /J).
-
-.PARAMETER ConsumerRoot
-  Root of consumer repo (contains .cursor/ and harness/).
-
-.PARAMETER HarnessRel
-  Relative path to harness submodule from ConsumerRoot.
-
-.PARAMETER LocalManifest
-  Text file: one skill name per line (# comments). Skipped from linking.
-
-.PARAMETER DryRun
-  Print planned links only.
-
-.PARAMETER ReplaceCopies
-  If .cursor/skills/<name> is a real directory (not junction), delete it and
-  create a junction. Default: on. LOCAL names are never touched.
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -35,6 +19,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+. (Join-Path $PSScriptRoot "_win-reparse.ps1")
 
 $root = (Resolve-Path $ConsumerRoot).Path
 $kitSkills = Join-Path (Join-Path (Join-Path $root $HarnessRel) "skills") "cc-1c"
@@ -63,9 +48,7 @@ Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {
     $target = $_.FullName
     if ($DryRun) {
         if (Test-Path $link) {
-            $item = Get-Item -LiteralPath $link -Force
-            $isReparse = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
-            if (-not $isReparse) {
+            if (-not (Test-KitReparse $link)) {
                 Write-Host "WOULD REPLACE COPY: $link -> $target"
             } else {
                 Write-Host "WOULD RELINK: $link -> $target"
@@ -76,16 +59,14 @@ Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {
         return
     }
     if (Test-Path $link) {
-        $item = Get-Item -LiteralPath $link -Force
-        $isReparse = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
-        if ($isReparse) {
-            Remove-Item -LiteralPath $link -Force
+        if (Test-KitReparse $link) {
+            Remove-KitReparseOrTree $link
         } elseif ($NoReplaceCopies) {
             Write-Error "Exists and not junction: $link (omit -NoReplaceCopies or add to LOCAL)"
             return
         } else {
             Write-Host "REPLACE COPY: $name"
-            Remove-Item -LiteralPath $link -Recurse -Force
+            Remove-KitReparseOrTree $link
         }
     }
     cmd /c "mklink /J `"$link`" `"$target`""
