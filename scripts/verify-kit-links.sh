@@ -48,4 +48,14 @@ else
   echo "SKIP LOCAL tools/load-changed-files"
 fi
 
+check_link "$CONSUMER_ROOT/.agents/skills" ".agents/skills"
+if [[ -e "$CONSUMER_ROOT/.cursor/skills/explore/SKILL.md" || -L "$CONSUMER_ROOT/.cursor/skills/explore" ]]; then
+  if [[ -f "$CONSUMER_ROOT/.agents/skills/explore/SKILL.md" ]]; then
+    echo "OK .agents/skills/explore/SKILL.md"
+  else
+    echo "FAIL missing: .agents/skills/explore/SKILL.md" >&2
+    fail=1
+  fi
+fi
+
 exit "$fail"

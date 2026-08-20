@@ -22,7 +22,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File harness/scripts/bootstrap-ki
 bash harness/scripts/verify-kit-links.sh .
 ```
 
-`bootstrap-kit` вызывает link cc-1c → overlay → tools, при необходимости
+Parent git: `fatal: not a git repository: harness/../.git/modules/harness` —
+сначала `fix-harness-gitdir` (worktree file-gitdir):
+
+```bash
+bash harness/scripts/fix-harness-gitdir.sh .
+```
+
+```powershell
+# gitdir ещё нет в этом worktree — скопировать с живого wt
+powershell -NoProfile -File harness/scripts/fix-harness-gitdir.ps1 `
+  -ConsumerRoot . `
+  -CopyFrom D:\dev\unf\main\.git\worktrees\v77\modules\harness
+```
+
+`bootstrap-kit` вызывает link cc-1c → overlay → tools → editor roots
+(`.agents/skills`, `.claude/skills|commands`), при необходимости
 пишет thin `load-changed-files.sh`, затем `verify-kit-links`.
 
 - Linux: нативные `link-*.sh` (`ln -sfn`).
@@ -41,9 +56,30 @@ Design / staging OpenSpec: [openspec/changes/kit-bootstrap/](openspec/changes/ki
 - **`git status` ломается на harness в worktree** — `harness/.git` →
   `<main>/.git/worktrees/<name>/modules/harness` (не относительный
   `../.git/modules/harness` при file-gitdir).
-- **Нет GitHub creds** — вручную bundle/copy + checkout SHA gitlink.
+  Скрипт: `fix-harness-gitdir.sh` / `.ps1`. На Windows **весь** parent
+  `git status` падает; в Linux Docker parent git часто ещё жив.
+  Emergency: `rename harness harness.bak` — git снова работает.
+  `worktrees/<name>/modules/` может **не существовать**, пока в этом
+  worktree ни разу не делали `submodule update`. `-CopyFrom` с другого
+  wt (пример: `v77`) или shared `<main>/.git/modules/harness` (WARN:
+  общий HEAD).
+- **Копия `harness/` vs gitlink** — untracked каталог блокирует merge
+  (`would be overwritten by merge`). Снести копию **до** merge ветки
+  с `160000 harness`. `git clean -fd` **не** удалит каталог с файлом
+  `.git` (nested repo) — нужен `rm -rf harness`.
+- **Нет GitHub creds / GCM** — на 42 `git fetch origin` по SSH без TTY
+  падает (`wincredman`, `/dev/tty`). Канон offline: `git bundle` с
+  машины, где ветка уже есть, + `git fetch <bundle>`.
+- **Слот Docker: remote `kpsr`, не `origin`** — `origin/zayash` unknown;
+  merge `kpsr/zayash`. Host `git worktree list` помечает
+  `/srv/agent-worktrees/agent-N` как **prunable** — **не** `prune`.
 - **CRLF в `.sh` на Linux** — `sed -i 's/\r$//'` или `tr -d '\r'`.
 - **Старый worktree** — merge → hydrate harness → `bootstrap-kit` → verify.
+- **Cursor UI не видит skill (slash)** — junctions в `.cursor/skills`, UI
+  читает `.agents/skills`. `bootstrap-kit` делает junction/symlink
+  `.agents/skills` → `.cursor/skills` (и `.claude/skills`). Не копировать
+  потребительский `setup-project-symlinks.sh` целиком (`src/cf` — layout
+  потребителя).
 
 ## cc-1c-skills (vendor + junction)
 

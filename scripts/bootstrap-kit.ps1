@@ -41,6 +41,11 @@ Write-Host "=== link-cursor-overlay ==="
 Write-Host "=== link-kit-tools ==="
 & (Join-Path $scripts "link-kit-tools.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-tools.txt")
 
+Write-Host "=== link-editor-roots ==="
+$editor = @{ ConsumerRoot = $root }
+if ($DryRun) { $editor["DryRun"] = $true }
+& (Join-Path $scripts "link-editor-roots.ps1") @editor
+
 $wrapper = Join-Path $root "load-changed-files.sh"
 $engine = Join-Path $harness "tools\load-changed-files\load-changed-files.sh"
 $thinMarker = "harness/tools/load-changed-files/load-changed-files.sh"

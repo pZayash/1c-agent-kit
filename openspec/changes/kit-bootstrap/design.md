@@ -27,6 +27,7 @@ bootstrap-kit
   ├─ link-cc-1c (Win: /J, Linux: ln -sfn)
   ├─ link-cursor-overlay
   ├─ link-kit-tools
+  ├─ link-editor-roots (.agents/skills, .claude/skills|commands)
   ├─ ensure thin load-changed-files.sh wrapper (warn if fat legacy)
   └─ verify-kit-links → non-zero if key paths not reparse/symlink
 ```
@@ -68,8 +69,14 @@ bootstrap-kit
   verify.
 - Worktree gitdir: абсолютный путь к
   `<main>/.git/worktrees/<name>/modules/harness`.
-- Нет GitHub creds: bundle/copy + pin SHA (ручной fallback phase 1).
+  Скрипт `fix-harness-gitdir`; `-CopyFrom` если каталога нет.
+  Emergency: rename `harness` → parent git оживает.
+- Нет GitHub creds / GCM без TTY: bundle/copy + pin SHA
+  (ручной fallback phase 1).
 - CRLF в `.sh` с Windows → `tr -d '\r'` перед запуском в Linux.
+- Untracked `harness/` vs incoming gitlink: удалить копию до merge.
+- Docker slot: merge `kpsr/zayash` (не `origin`); не `worktree prune`
+  с хоста.
 
 ## Вне scope (явно)
 
@@ -90,7 +97,7 @@ bootstrap-kit
 
 - [x] Linux: один вход поднимает links без powershell (`bootstrap-kit.sh`).
 - [x] Win: повторный bootstrap не падает на существующих junction (`rmdir`).
-- [x] `verify-kit-links` отличает копию от link.
+- [x] `verify-kit-links` отличает копию от link и проверяет `.agents/skills`.
 - [x] README kit: pitfalls + порядок bootstrap.
 - [x] Пилотный `docker/agent-container/link-kit-in-worktree-linux.sh` —
       thin wrapper на `harness/scripts/bootstrap-kit.sh`.

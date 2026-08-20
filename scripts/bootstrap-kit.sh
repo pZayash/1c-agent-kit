@@ -43,6 +43,9 @@ bash "$SCRIPT_DIR/link-cursor-overlay.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-s
 echo "=== link-kit-tools ==="
 bash "$SCRIPT_DIR/link-kit-tools.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-tools.txt"
 
+echo "=== link-editor-roots ==="
+bash "$SCRIPT_DIR/link-editor-roots.sh" "$CONSUMER_ROOT"
+
 WRAPPER="$CONSUMER_ROOT/load-changed-files.sh"
 ENGINE="$HARNESS_ROOT/tools/load-changed-files/load-changed-files.sh"
 THIN_MARKER='harness/tools/load-changed-files/load-changed-files.sh'

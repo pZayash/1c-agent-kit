@@ -51,6 +51,18 @@ if (-not $local.ContainsKey("load-changed-files")) {
     Write-Host "SKIP LOCAL tools/load-changed-files"
 }
 
+Assert-KitLink ".agents\skills" ".agents/skills"
+$exploreCursor = Join-Path $root ".cursor\skills\explore\SKILL.md"
+$exploreAgents = Join-Path $root ".agents\skills\explore\SKILL.md"
+if (Test-Path -LiteralPath $exploreCursor) {
+    if (Test-Path -LiteralPath $exploreAgents) {
+        Write-Host "OK .agents/skills/explore/SKILL.md"
+    } else {
+        Write-Host "FAIL missing: .agents/skills/explore/SKILL.md"
+        $fail = 1
+    }
+}
+
 if ($fail -ne 0) {
     exit 1
 }
