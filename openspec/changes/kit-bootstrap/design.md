@@ -77,6 +77,8 @@ bootstrap-kit
 - Untracked `harness/` vs incoming gitlink: удалить копию до merge.
 - Docker slot: merge `kpsr/zayash` (не `origin`); не `worktree prune`
   с хоста.
+- Host PATH (node, openspec CLI, rtk, rg): `init-kit-deps`; никогда
+  `openspec init` / `rtk init`. Плейбук `docs/ai/kit-host-deps.md`.
 
 ## Вне scope (явно)
 

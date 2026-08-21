@@ -86,6 +86,12 @@ web/build/autotest:
 
 Пилот: `object-conventions-kpsr.md`, `logging-strategy-kpsr.md`.
 
+## Срез kit-bootstrap (2026-08-20+)
+
+| Файл | Зачем |
+| --- | --- |
+| [kit-host-deps.md](kit-host-deps.md) | node/openspec/rtk на worktree; **не** `openspec init` |
+
 ## Пока в репо потребителя
 
 Печать, MCP, слоты, OpenSpec, `tools/`, skills.

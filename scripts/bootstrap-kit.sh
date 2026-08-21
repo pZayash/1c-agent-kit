@@ -7,6 +7,7 @@
 #   DRY_RUN=1
 #   FORCE_WRAPPER=1   — replace fat load-changed-files.sh with thin wrapper
 #   SKIP_VERIFY=1
+#   SKIP_DEPS=1       — не звать init-kit-deps
 #   HARNESS_REL=harness
 set -euo pipefail
 
@@ -26,6 +27,7 @@ if kit_is_windows; then
   [[ "$DRY_RUN" == "1" ]] && args+=(-DryRun)
   [[ "$FORCE_WRAPPER" == "1" ]] && args+=(-ForceWrapper)
   [[ "$SKIP_VERIFY" == "1" ]] && args+=(-SkipVerify)
+  [[ "${SKIP_DEPS:-0}" == "1" ]] && args+=(-SkipDeps)
   exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi
 
@@ -81,6 +83,13 @@ fi
 if [[ "$SKIP_VERIFY" != "1" ]]; then
   echo "=== verify-kit-links ==="
   bash "$SCRIPT_DIR/verify-kit-links.sh" "$CONSUMER_ROOT"
+fi
+
+if [[ "${SKIP_DEPS:-0}" != "1" ]]; then
+  echo "=== init-kit-deps (check) ==="
+  if ! bash "$SCRIPT_DIR/init-kit-deps.sh" "$CONSUMER_ROOT"; then
+    echo "WARN host deps incomplete — harness/docs/ai/kit-host-deps.md (INSTALL=1). Links still done." >&2
+  fi
 fi
 
 echo "bootstrap-kit: Done."

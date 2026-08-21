@@ -115,3 +115,15 @@
     уже созданных junction. Канон: `bootstrap-kit` с `cmd rmdir`.
 11. **Editor roots** ещё не в kit `02a4097` (грязный working tree).
     Overlay `link-editor-roots.*` до bump.
+
+## Поле 2026-08-21 (42/features host PATH)
+
+На голом Windows-worktree нет node / openspec CLI / rtk (слот Docker —
+в образе). Агент без них не поднимает OpenSpec-скиллы.
+
+- Скрипт `scripts/init-kit-deps.*` (`-Install` / `INSTALL=1`).
+- **Запрет:** `openspec init` (свои `openspec/` + kit skills), `rtk init`
+  (CLAUDE.md), `rtk init -g` (хук Claude, не Cursor).
+- CLI: `@fission-ai/openspec@1.2.0` как в sandbox/agent-container.
+- Плейбук: `docs/ai/kit-host-deps.md`. `bootstrap-kit` в конце зовёт
+  check (warn, не fail); `SKIP_DEPS=1` отключает.

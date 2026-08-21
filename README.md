@@ -18,6 +18,10 @@ bash harness/scripts/bootstrap-kit.sh .
 # Windows (PowerShell)
 powershell -NoProfile -ExecutionPolicy Bypass -File harness/scripts/bootstrap-kit.ps1 -ConsumerRoot .
 
+# Host PATH (node, openspec CLI, rtk) — NEVER openspec init
+powershell -NoProfile -File harness/scripts/init-kit-deps.ps1 -ConsumerRoot . -Install
+# Linux: INSTALL=1 bash harness/scripts/init-kit-deps.sh .
+
 # Проверка links (копия ≠ kit link)
 bash harness/scripts/verify-kit-links.sh .
 ```
@@ -80,6 +84,11 @@ Design / staging OpenSpec: [openspec/changes/kit-bootstrap/](openspec/changes/ki
   `.agents/skills` → `.cursor/skills` (и `.claude/skills`). Не копировать
   потребительский `setup-project-symlinks.sh` целиком (`src/cf` — layout
   потребителя).
+- **Нет node / openspec / rtk на голом Windows-worktree** — слот Docker
+  уже содержит их в образе; 42/`features` — нет. Скрипт
+  `init-kit-deps` (`-Install`). **Не** `openspec init` (свои
+  `openspec/` + kit skills). **Не** `rtk init` (CLAUDE.md). Канон:
+  [docs/ai/kit-host-deps.md](docs/ai/kit-host-deps.md).
 
 ## cc-1c-skills (vendor + junction)
 

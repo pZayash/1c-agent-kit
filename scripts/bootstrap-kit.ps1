@@ -13,7 +13,9 @@ param(
 
     [switch]$ForceWrapper,
 
-    [switch]$SkipVerify
+    [switch]$SkipVerify,
+
+    [switch]$SkipDeps
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,6 +84,15 @@ if (Test-Path $engine) {
 if (-not $SkipVerify) {
     Write-Host "=== verify-kit-links ==="
     & (Join-Path $scripts "verify-kit-links.ps1") -ConsumerRoot $root
+}
+
+if (-not $SkipDeps) {
+    Write-Host "=== init-kit-deps (check) ==="
+    $dep = Join-Path $scripts "init-kit-deps.ps1"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dep -ConsumerRoot $root
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARN host deps incomplete — harness/docs/ai/kit-host-deps.md (-Install). Links still done."
+    }
 }
 
 Write-Host "bootstrap-kit: Done."
