@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -17,8 +18,10 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-import platform
+# tools/bsl-check → parents[2] = repo root.
+# harness/tools/bsl-check → parents[2] = harness, root is parents[3].
+_p2 = Path(__file__).resolve().parents[2]
+REPO_ROOT = _p2.parent if _p2.name == "harness" else _p2
 is_windows = platform.system() == "Windows"
 if is_windows:
     DEFAULT_BSL_LS = Path(__file__).with_name("bsl-language-server.exe")

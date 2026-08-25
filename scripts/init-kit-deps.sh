@@ -94,7 +94,7 @@ fi
 if have python || have python3; then echo "OK python"; else echo "WARN python not on PATH"; fi
 if have qmd; then echo "OK qmd"; else echo "WARN qmd not on PATH"; fi
 if have docker; then echo "OK docker"; else echo "WARN docker not on PATH"; fi
-if have unzip; then echo "OK unzip"; else echo "WARN unzip not on PATH (BSLLS on Linux)"; fi
+if have unzip; then echo "OK unzip"; else echo "WARN unzip not on PATH (BSLLS download)"; fi
 
 echo "see harness/docs/ai/kit-host-deps.md"
 if [[ "$fail" -ne 0 ]]; then exit 1; fi

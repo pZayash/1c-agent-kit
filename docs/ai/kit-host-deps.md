@@ -60,7 +60,7 @@ CLI: `npm install -g @fission-ai/openspec@1.2.0` (пин как в
 - `python` / sandbox (`docs/ai/sandbox.md`)
 - Docker Desktop (sandbox, слоты)
 - `qmd`, `uv` / rlm-tools-bsl
-- `unzip` (Linux BSLLS)
+- `unzip` + `gh`/`curl` (скачать BSLLS: `bash tools/bsl-check/update-bsl-language-server.sh`)
 - Windows Developer Mode (file `mklink` для `.mdc`; иначе copy-fallback)
 - `harness/.git` file-gitdir — `fix-harness-gitdir`
 - 42 HTTP git: GCM без TTY; fetch с `D:\gitea-data\repositories\admin\unf_ru.git`
@@ -71,4 +71,5 @@ CLI: `npm install -g @fission-ai/openspec@1.2.0` (пин как в
 2. Merge канон-ветки (чтобы был `openspec/` в git).
 3. `init-kit-deps -Install` — **не** `openspec init`.
 4. `bootstrap-kit` → `verify-kit-links`.
-5. Reload Window Cursor.
+5. BSLLS: `bash tools/bsl-check/update-bsl-language-server.sh` (без `--latest`).
+6. Reload Window Cursor.

@@ -34,13 +34,16 @@ description: >-
 После правок файлов на диске:
 
 ```bash
-bash tools/sandbox/run.sh python tools/bsl-check/check-bsl.py conf/.../Module.bsl
+bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py conf/.../Module.bsl
 ```
+
+Windows Docker: не `tools/bsl-check/…` — junction в sandbox мёртвый. Linux/слот:
+`tools/bsl-check/check-bsl.py` тоже ок.
 
 Проверка текста **без записи** в дерево (stdin):
 
 ```bash
-bash tools/sandbox/run.sh python tools/bsl-check/check-bsl.py --stdin --path Module.bsl < file.bsl
+bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py --stdin --path Module.bsl < file.bsl
 ```
 
 Если известен логический путь модуля, передай его в `--path`, например
@@ -49,24 +52,46 @@ bash tools/sandbox/run.sh python tools/bsl-check/check-bsl.py --stdin --path Mod
 Первичный прогон (только ошибки), затем полный режим:
 
 ```bash
-bash tools/sandbox/run.sh python tools/bsl-check/check-bsl.py --min-severity Error conf/Path/To/Module.bsl
-bash tools/sandbox/run.sh python tools/bsl-check/check-bsl.py conf/Path/To/Module.bsl
+bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py --min-severity Error conf/Path/To/Module.bsl
+bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py conf/Path/To/Module.bsl
 ```
 
 По умолчанию порог для кода возврата — `Warning`; см. `--min-severity` в
-`python tools/bsl-check/check-bsl.py --help`.
+`python harness/tools/bsl-check/check-bsl.py --help`.
 
-## Обновление BSLLS
+## Обновление BSLLS (бинарь не в git)
 
-Пин: [`tools/bsl-check/BSLLS_VERSION`](../../../tools/bsl-check/BSLLS_VERSION).
-Скрипт: [`tools/bsl-check/update-bsl-language-server.sh`](../../../tools/bsl-check/update-bsl-language-server.sh).
+Канон: [`tools/bsl-check/README.md`](../../../tools/bsl-check/README.md).
+
+**Другой хост / новый worktree / после pull пина:** скрипт **без флагов**
+(версия из [`BSLLS_VERSION`](../../../tools/bsl-check/BSLLS_VERSION)). Не
+`--latest` — это бамп пина, не «поставить как у всех».
 
 ```bash
 bash tools/bsl-check/update-bsl-language-server.sh
-# или: bash tools/bsl-check/update-bsl-language-server.sh --latest
 ```
 
-После обновления — smoke на одном `.bsl` через sandbox (см. выше).
+Хост, **не** `sandbox/run.sh`. Нужны `unzip` + (`gh` или `curl`) + сеть GitHub.
+Нет бинаря → `bsl-language-server not found`.
+
+**Бамп пина** (этот хост, потом commit `BSLLS_VERSION` в kit `harness/`):
+
+```bash
+bash tools/bsl-check/update-bsl-language-server.sh --version 1.1.0-rc.3
+# GitHub Latest = stable, RC пропускает:
+# bash tools/bsl-check/update-bsl-language-server.sh --latest
+```
+
+После — smoke на одном `.bsl` (не `--help`: он BSLLS не запускает).
+
+Windows + Docker sandbox: junction `tools/bsl-check` внутри контейнера — битая
+ссылка на `/mnt/host/c/...`. Звать физический путь kit:
+
+```bash
+bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py --min-severity Error conf/Path/To/Module.bsl
+```
+
+Agent-slot: rebuild образа, linux-дерево копируется на `docker build`.
 
 ## Коды возврата
 

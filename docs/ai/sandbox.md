@@ -197,6 +197,7 @@ bash tools/sandbox/run.sh pip install -r tools/sandbox/requirements.txt
 | Approve на `run.sh … && …` | Цепочка ломает матч allowlist | Отдельные Shell-вызовы или один `run.sh bash -c '…'` |
 | `No module named 'lxml'` | Нет пакета | `pip install -r tools/sandbox/requirements.txt` |
 | `run.sh: docker: command not found` | Docker выключен | Сообщить пользователю |
+| `bsl-check.py` not found | Win junction → `/mnt/host` в sandbox | `harness/tools/bsl-check/check-bsl.py` |
 | Нет `1cv8.exe` | Платформа на хосте | db-* / epf-build — не sandbox |
 
 ## Связанные документы

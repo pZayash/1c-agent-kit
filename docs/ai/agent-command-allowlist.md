@@ -124,6 +124,22 @@ Allowlist:
 
 Подробнее: [sandbox.md](sandbox.md).
 
+### BSLLS download (бинарь не в git)
+
+На хосте, не через `run.sh` (нужны `unzip` + сеть GitHub):
+
+```bash
+bash tools/bsl-check/update-bsl-language-server.sh
+```
+
+Allowlist:
+
+```json
+"Bash(bash tools/bsl-check/update-bsl-language-server.sh:*)"
+```
+
+Канон: потребитель `tools/bsl-check/README.md` (junction на kit).
+
 ### Git / gh с `rtk`
 
 ```json
