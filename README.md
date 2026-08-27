@@ -89,6 +89,11 @@ Design / staging OpenSpec: [openspec/changes/kit-bootstrap/](openspec/changes/ki
   `init-kit-deps` (`-Install`). **Не** `openspec init` (свои
   `openspec/` + kit skills). **Не** `rtk init` (CLAUDE.md). Канон:
   [docs/ai/kit-host-deps.md](docs/ai/kit-host-deps.md).
+- **Пути в разном регистре (Win/macOS)** — NTFS не видит
+  `Foo`/`foo`, индекс Git видит два пути. Merge:
+  `untracked would be overwritten`. Канон:
+  [docs/ai/git-workflow.md](docs/ai/git-workflow.md) § «Регистр путей».
+  `git mv` по регистру — **два** шага через `_case.tmp`.
 
 ## cc-1c-skills (vendor + junction)
 

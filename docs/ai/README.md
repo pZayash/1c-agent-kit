@@ -35,7 +35,7 @@ mailbox пилота). Правка — здесь, потом Promote (commit �
 | --- | --- |
 | [sandbox.md](sandbox.md) | Docker-песочница, `run.sh` |
 | [agent-command-allowlist.md](agent-command-allowlist.md) | allowlist Cursor/Claude |
-| [git-workflow.md](git-workflow.md) | общие правила git для агентов |
+| [git-workflow.md](git-workflow.md) | git для агентов; регистр путей NTFS |
 
 ## Срез 3w (workflow, 2026-08-19)
 
