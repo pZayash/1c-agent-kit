@@ -92,6 +92,22 @@ web/build/autotest:
 | --- | --- |
 | [kit-host-deps.md](kit-host-deps.md) | node/openspec/rtk на worktree; **не** `openspec init` |
 
+## Срез docs-layout (2026-08-27)
+
+| Файл | Зачем |
+| --- | --- |
+| [docs-layout.md](docs-layout.md) | папки `docs/`, оглавления, куда агент пишет |
+| [ADR-FORMAT.md](ADR-FORMAT.md) | ADR |
+| [CONTEXT-FORMAT.md](CONTEXT-FORMAT.md) | словарь домена |
+| [ROLES-FORMAT.md](ROLES-FORMAT.md) | бизнес-роли |
+| [ANALYTICS-FORMAT.md](ANALYTICS-FORMAT.md) | штатка / люди / теневая автоматизация |
+| [memory-format.md](memory-format.md) | записи `memory/` |
+| [agent-session-lessons.md](agent-session-lessons.md) | memory → docs на close-chat |
+
+Шаблоны оглавления: [templates/docs/](../../templates/docs/). Карта kit:
+[docs/README.md](../README.md).
+
 ## Пока в репо потребителя
 
-Печать, MCP, слоты, OpenSpec, `tools/`, skills.
+Печать, MCP, слоты, OpenSpec, `tools/`, skills. Индекс потребителя —
+`docs/README.md` (не копировать kit blob).

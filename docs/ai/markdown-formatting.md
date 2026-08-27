@@ -7,7 +7,9 @@ kit (пилот и другие проекты).
 
 ## Автоматическое применение
 
-Правила форматирования автоматически применяются ко всем файлам `.md` через `.cursor/rules/markdown-formatting.mdc`.
+Правила форматирования — этот файл. Overlay kit ставит
+`.cursor/rules/markdown-formatting.mdc` (alwaysApply) со ссылкой сюда.
+Раскладка папок `docs/`: [docs-layout.md](docs-layout.md).
 
 ## Проверка соответствия
 

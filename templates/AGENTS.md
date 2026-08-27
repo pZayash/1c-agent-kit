@@ -1,6 +1,7 @@
 # Агенты
 
 Общие правила и tools — submodule [harness/](harness/README.md).
+Документация: [docs-layout.md](harness/docs/ai/docs-layout.md).
 
 Специфика этого проекта (префикс, ИБ, платформа) — ниже.
 

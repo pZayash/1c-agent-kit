@@ -4,7 +4,8 @@
 Потребители подключают этот репозиторий как **git submodule** в `harness/`.
 
 Канон решений — отдельный пилот-репозиторий (не этот kit). Срез общих
-`docs/ai` — [docs/ai/README.md](docs/ai/README.md). Навыки cc-1c —
+`docs/ai` — [docs/ai/README.md](docs/ai/README.md). Раскладка `docs/` у
+потребителя — [docs/ai/docs-layout.md](docs/ai/docs-layout.md). Навыки cc-1c —
 [skills/cc-1c/](skills/cc-1c/) + sync [tools/cc-1c-skills-sync/](tools/cc-1c-skills-sync/).
 
 ## Bootstrap (рекомендуемый вход)

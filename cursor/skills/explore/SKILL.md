@@ -450,7 +450,11 @@ REQUIREMENT, ошибки размещения), не блокируя propose.
 
 Проектные форматы:
 
+- [docs/ai/docs-layout.md](../../docs/ai/docs-layout.md)
 - [docs/ai/CONTEXT-FORMAT.md](../../docs/ai/CONTEXT-FORMAT.md)
 - [docs/ai/ADR-FORMAT.md](../../docs/ai/ADR-FORMAT.md)
+- [docs/ai/ROLES-FORMAT.md](../../docs/ai/ROLES-FORMAT.md)
+- [docs/ai/ANALYTICS-FORMAT.md](../../docs/ai/ANALYTICS-FORMAT.md)
+- [docs/ai/memory-format.md](../../docs/ai/memory-format.md)
 
 Слияние с explore РозницаРБ: `.claude/skills/explore` (Луч/РозницаРБ.git).
