@@ -59,7 +59,8 @@ CLI: `npm install -g @fission-ai/openspec@1.2.0` (пин как в
 - `.env` в корне потребителя
 - `python` / sandbox (`docs/ai/sandbox.md`)
 - Docker Desktop (sandbox, слоты)
-- `qmd`, `uv` / rlm-tools-bsl
+- `qmd`, `uv` / rlm-tools-bsl. Клиент агента: `QMD_CLIENT` / `QMD_MCP_URL`
+  ([qmd-search.md](qmd-search.md), шаблон [env-qmd.example](../../templates/env-qmd.example))
 - `unzip` + `gh`/`curl` (скачать BSLLS: `bash tools/bsl-check/update-bsl-language-server.sh`)
 - Windows Developer Mode (file `mklink` для `.mdc`; иначе copy-fallback)
 - `harness/.git` file-gitdir — `fix-harness-gitdir`

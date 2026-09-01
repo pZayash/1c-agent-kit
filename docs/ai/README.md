@@ -92,6 +92,16 @@ web/build/autotest:
 | --- | --- |
 | [kit-host-deps.md](kit-host-deps.md) | node/openspec/rtk на worktree; **не** `openspec init` |
 
+## Срез qmd-client (2026-09-01)
+
+| Файл | Зачем |
+| --- | --- |
+| [qmd-search.md](qmd-search.md) | гибридный поиск; `QMD_CLIENT` = off / cli / mcp |
+| [qmd-query-syntax.md](qmd-query-syntax.md) | `lex:` / `vec:` / `hyde:` |
+
+Ключи `.env`: [templates/env-qmd.example](../../templates/env-qmd.example).
+Специфика потребителя — addendum `docs/ai/qmd-search-*.md`, не этот kit.
+
 ## Срез docs-layout (2026-08-27)
 
 | Файл | Зачем |

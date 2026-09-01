@@ -5,6 +5,12 @@
 
 Специфика этого проекта (префикс, ИБ, платформа) — ниже.
 
+## Поиск (qmd)
+
+Канон kit: [qmd-search.md](harness/docs/ai/qmd-search.md).
+Ключи `.env`: `QMD_CLIENT` (`off`/`cli`/`mcp`), `QMD_MCP_URL`.
+Шаблон: [env-qmd.example](harness/templates/env-qmd.example).
+
 ## Проект
 
 - `PROJECT_PREFIX`: (заполнить)

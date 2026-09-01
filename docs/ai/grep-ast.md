@@ -102,5 +102,5 @@ PYTHONIOENCODING=utf-8 PYTHONUTF8=1 grep-ast "Процедура" \
 
 - Навык быстрого поиска по `conf/` — `.cursor/skills/1c-configdump-fast-search`
   в потребителе
-- Гибридный поиск (BM25 + векторы): `qmd-search.md` в потребителе (если подключён)
+- Гибридный поиск (BM25 + векторы): [qmd-search.md](qmd-search.md)
 - Массовый обход кода: `rlm-tools-bsl.md` в потребителе (если подключён)
