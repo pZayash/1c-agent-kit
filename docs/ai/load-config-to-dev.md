@@ -35,8 +35,17 @@ Upstream cc-1c: `db-load-git`, `db-load-xml`, `db-update`, `db-load-cf` —
 - **`--no-extensions`** — только `conf/`, без `cfe.xml/`. **Обязателен**, если
   агент не менял расширения (защита от чужих правок в worktree).
 - **`--list-file PATH`** — фолбэк: явный список вместо git-discovery.
-- **`--reset-marker`** — сброс маркера merge-загрузки.
+- **`-F` / `--full-resync`** — вся `conf/` без partial; когда ИБ отстала от
+  диска после merge («Неизвестный объект», exit 21).
+- **`--reset-marker`** — удалить файл маркера (мёртвый SHA). **Не** канон
+  «залить merge»: на чистом дереве это был бы только UpdateDB; скрипт на
+  merge-HEAD сам берёт `HEAD^1`.
+- **`--force-partial`** — не отменять partial с `Configuration.xml` после merge.
 - **`--ibcmd`** / `LOAD_ENGINE=ibcmd` — headless/CI (медленнее designer).
+
+После merge: `./load-changed-files.sh -U`. Стоп: `Загрузка пропущена; только
+UpdateDB` при ненулевой дельте `conf/` — смотри exit 21, затем `-F -U`.
+`LOAD_HIDE_FILES` в `.env` прячет битые типовые формы на время designer.
 
 Подробности — skill `/load-changed-files` и docs потребителя.
 
@@ -45,8 +54,9 @@ Upstream cc-1c: `db-load-git`, `db-load-xml`, `db-update`, `db-load-cf` —
 1. Правки в git (`conf/`, `cfe.xml/`)? → без `--list-file`.
 2. Не трогал `cfe.xml/` → `--no-extensions`.
 3. `.env` настроен (`cp .env.example .env`).
-4. `./load-changed-files.sh -U` (или `-U --no-extensions`).
-5. BSL/XML проверки до load — `/bsl-check`, `/xml-wellformed`.
+4. Обычный load: `./load-changed-files.sh -U`. Merge + отставание ИБ: `-F -U`.
+5. Не записывать маркер = текущий HEAD до успешной заливки файлов.
+6. BSL/XML проверки до load — `/bsl-check`, `/xml-wellformed`.
 
 ## Promote
 
