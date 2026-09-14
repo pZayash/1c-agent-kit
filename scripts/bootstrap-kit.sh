@@ -48,6 +48,9 @@ bash "$SCRIPT_DIR/link-kit-tools.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/l
 echo "=== link-editor-roots ==="
 bash "$SCRIPT_DIR/link-editor-roots.sh" "$CONSUMER_ROOT"
 
+echo "=== link-pi-roots ==="
+HARNESS_REL="$HARNESS_REL" bash "$SCRIPT_DIR/link-pi-roots.sh" "$CONSUMER_ROOT"
+
 WRAPPER="$CONSUMER_ROOT/load-changed-files.sh"
 ENGINE="$HARNESS_ROOT/tools/load-changed-files/load-changed-files.sh"
 THIN_MARKER='harness/tools/load-changed-files/load-changed-files.sh'

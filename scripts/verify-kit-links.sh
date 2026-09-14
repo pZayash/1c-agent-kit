@@ -58,4 +58,8 @@ if [[ -e "$CONSUMER_ROOT/.cursor/skills/explore/SKILL.md" || -L "$CONSUMER_ROOT/
   fi
 fi
 
+check_link "$CONSUMER_ROOT/.pi/skills" ".pi/skills"
+check_link "$CONSUMER_ROOT/.pi/prompts" ".pi/prompts"
+check_link "$CONSUMER_ROOT/.pi/extensions" ".pi/extensions"
+
 exit "$fail"

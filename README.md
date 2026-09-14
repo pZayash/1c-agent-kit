@@ -42,8 +42,8 @@ powershell -NoProfile -File harness/scripts/fix-harness-gitdir.ps1 `
 ```
 
 `bootstrap-kit` вызывает link cc-1c → overlay → tools → editor roots
-(`.agents/skills`, `.claude/skills|commands`), при необходимости
-пишет thin `load-changed-files.sh`, затем `verify-kit-links`.
+(`.agents/skills`, `.claude/skills|commands`) → pi roots (`.pi/*`), при
+необходимости пишет thin `load-changed-files.sh`, затем `verify-kit-links`.
 
 - Linux: нативные `link-*.sh` (`ln -sfn`).
 - Windows: `link-*.ps1` (`mklink /J`; file `mklink` / copy-fallback).
@@ -131,6 +131,20 @@ bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-over
 
 - Skills: `mklink /J`. Rules/commands: **file** `mklink` (Windows Developer Mode).
 - `sandbox` skill, `web-test` — LOCAL у потребителя.
+
+## Pi harness (опционально)
+
+[pi](https://pi.dev) читает навыки из `.agents/skills` (линк kit) и контекст
+из `AGENTS.md`. `bootstrap-kit` дополнительно линкует:
+
+- `.pi/skills` → `.cursor/skills` (относительные ссылки из команд),
+- `.pi/prompts` → `.cursor/commands` (prompt templates `/имя`),
+- `.pi/extensions` → `harness/pi/extensions` (расширения kit).
+
+Вручную: `bash harness/scripts/link-pi-roots.sh .` (Win — `.ps1`).
+Расширение `auto-session-title` — [pi/extensions/](pi/extensions/);
+Zed/ACP — `node harness/pi/scripts/patch-pi-acp-session-title.mjs`.
+Канон: [docs/ai/pi-harness.md](docs/ai/pi-harness.md).
 
 ## Workflow tools (срез B)
 

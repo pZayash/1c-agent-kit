@@ -63,6 +63,10 @@ if (Test-Path -LiteralPath $exploreCursor) {
     }
 }
 
+Assert-KitLink ".pi\skills" ".pi/skills"
+Assert-KitLink ".pi\prompts" ".pi/prompts"
+Assert-KitLink ".pi\extensions" ".pi/extensions"
+
 if ($fail -ne 0) {
     exit 1
 }

@@ -48,6 +48,11 @@ $editor = @{ ConsumerRoot = $root }
 if ($DryRun) { $editor["DryRun"] = $true }
 & (Join-Path $scripts "link-editor-roots.ps1") @editor
 
+Write-Host "=== link-pi-roots ==="
+$pi = @{ ConsumerRoot = $root; HarnessRel = $HarnessRel }
+if ($DryRun) { $pi["DryRun"] = $true }
+& (Join-Path $scripts "link-pi-roots.ps1") @pi
+
 $wrapper = Join-Path $root "load-changed-files.sh"
 $engine = Join-Path $harness "tools\load-changed-files\load-changed-files.sh"
 $thinMarker = "harness/tools/load-changed-files/load-changed-files.sh"

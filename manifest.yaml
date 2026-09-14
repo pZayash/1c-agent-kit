@@ -21,3 +21,5 @@ options:
     default: optional       # глобальная служба, не blob kit
   mcp:
     default: separate       # first-install: .cfe + LoadCfg, не XML dump 2.21
+  pi:
+    default: optional       # harness pi: link .pi/{skills,prompts,extensions}
