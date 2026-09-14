@@ -41,5 +41,5 @@
 - `tools/mcp-call/extension-load-cfe.sh` — загрузка CFE через MCP-tool
   расширения (`extension_load_post`).
 
-Smoke-набор и «боевые» args-json — у потребителя (`tools/mcp-call-examples/`
-и собственные скрипты); в kit не входят.
+Smoke-набор и «боевые» args-json — у потребителя (его каталог примеров и
+собственные скрипты); в kit не входят.

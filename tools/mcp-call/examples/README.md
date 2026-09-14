@@ -37,9 +37,9 @@ bash tools/mcp-call/mcp-call.sh execute_code_safe_transaction @verify-args.json
 
 ## Где хранить наборы
 
-Для своих сценариев предложи потребителю каталог `tools/mcp-call-examples/`
-в корне его репо. Скрипты потребителя могут резолвить каталог примеров в
-порядке: `MCP_CALL_EXAMPLES` (env) → `examples/` → `tools/mcp-call-examples/`.
+Каталог примеров — на стороне потребителя. Кладите его рядом со своими
+скриптами (sibling `examples/`), если они резолвят примеры от `__file__`,
+или задавайте путь через `MCP_CALL_EXAMPLES`.
 
 Описание CLI и конфига — [../README.md](../README.md),
 канон `.mcp.json` — [docs/ai/mcp-config.md](../../../docs/ai/mcp-config.md).
