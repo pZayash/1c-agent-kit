@@ -1,7 +1,0 @@
-{
-  "objectRef": { "_ref": "Document.РасходнаяНакладная:00000000-0000-0000-0000-000000000000" },
-  "printManager": "Документ.РасходнаяНакладная",
-  "commandId": "СчетФактураРиТС",
-  "returnFileBase64": true,
-  "signatureAndStamp": true
-}

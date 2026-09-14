@@ -87,7 +87,7 @@ changes — указывай это явно (см. [git-workflow.md](../../../d
 - **Навыки**: перечислить релевантные из `.cursor/skills/` (например `openspec-apply-change`, `form-edit`, `bsl-check`, `explore`, `code-analysis-orchestrator`).
 - **Документация**: `docs/ai/...` по теме задачи.
 - **Память**: `qmd query` / `qmd search` с `--path "memory/"` по ключевым терминам; при необходимости [memory.md](../../../memory.md).
-- **MCP** (если нужны факты из ИБ, не из `conf/`): [docs/ai/mcp-server.md](../../../docs/ai/mcp-server.md) — `dev_dt` / `prod_dt` (`metadata_get`, `query_post`, `object_get`, …).
+- **MCP** (если нужны факты из ИБ, не из `conf/`): [docs/ai/mcp-config.md](../../../docs/ai/mcp-config.md) — конфиг `.mcp.json`, CLI `tools/mcp-call/` (`dev_dt` / `prod_dt`, `metadata_get`, `query_post`, …).
 - **Поиск по коду**: сначала `qmd query`, затем узкий `grep` / [1c-configdump-fast-search](../../../.cursor/skills/1c-configdump-fast-search/SKILL.md); массовое чтение — `rlm-tools-bsl` ([docs/ai/rlm-tools-bsl.md](../../../docs/ai/rlm-tools-bsl.md)).
 
 ## Ссылки (содержимое не копировать)

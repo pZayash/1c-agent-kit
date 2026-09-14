@@ -265,5 +265,5 @@ cfe.xml/MCP_Сервер/…/Module.bsl
   маршрутизация для агентов.
 - [docs/human/development-setup.md](../../docs/human/development-setup.md) —
   настройка `.env`.
-- [docs/ai/mcp-server.md](../../docs/ai/mcp-server.md) — MCP после `-U`.
+- [docs/ai/mcp-config.md](../../docs/ai/mcp-config.md) — MCP после `-U`.
 - `xml-wellformed` — проверка XML до загрузки.

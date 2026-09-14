@@ -6,9 +6,7 @@
 
 `mcp-call.py` — тонкий делегат в `.sh` для старых команд и скриптов.
 
-> Часть упоминаемых ниже файлов (`docs/ai/mcp-server.md`, `e2e-hybrid-testing.md`,
-> `scripts/README_jwt_1c.md`, `scripts/update_mcp_tokens.py` и т. п.) живёт
-> в репо потребителя, а не в kit.
+Канон конфига MCP-серверов — [docs/ai/mcp-config.md](../../docs/ai/mcp-config.md).
 
 ## Когда использовать
 
@@ -35,7 +33,7 @@ bash tools/mcp-call/mcp-call.sh version_get
 # Вызов с аргументами (JSON-объект)
 bash tools/mcp-call/mcp-call.sh query_post '{"query": "ВЫБРАТЬ 1"}'
 
-# Прод-сервер из .mcp.json
+# Другой сервер из конфига
 bash tools/mcp-call/mcp-call.sh --server prod_dt version_get
 
 # Прямой URL (минует конфиг MCP; заголовки JWT не подставляются)
@@ -52,8 +50,8 @@ bash tools/mcp-call/mcp-call.sh execute_code_safe_transaction @path/to/args.json
 
 Файл конфигурации ищется **в корне репозитория** (текущая рабочая директория), в порядке:
 
-1. `.cursor/mcp.json` — как в Cursor IDE (часто в `.gitignore`);
-2. `.mcp.json` — запасной вариант.
+1. `.mcp.json` — канон;
+2. `.cursor/mcp.json` — legacy fallback (как в Cursor IDE, часто в `.gitignore`).
 
 Из записи `mcpServers.<ключ>` читаются:
 
@@ -62,10 +60,10 @@ bash tools/mcp-call/mcp-call.sh execute_code_safe_transaction @path/to/args.json
 
 Заголовки из конфига передаются во **все** запросы (`tools/list`, `tools/call`). Без Bearer
 сервер с JWT в vrd отвечает **HTTP 401** (тело может быть пустым) — это не «сломанный MCP»,
-а отсутствие или просроченный токен. Обновление JWT: `scripts/README_jwt_1c.md`.
+а отсутствие или просроченный токен. Ротацию токена выполняет скрипт потребителя
+(в kit его нет); схема конфига — [docs/ai/mcp-config.md](../../docs/ai/mcp-config.md).
 
-По умолчанию используется сервер `dev_dt`. Подробнее про opt-in tools и JWT в ИБ:
-`docs/ai/mcp-server.md`.
+По умолчанию используется сервер `dev_dt`.
 
 Опции переопределения:
 
@@ -77,11 +75,6 @@ bash tools/mcp-call/mcp-call.sh execute_code_safe_transaction @path/to/args.json
 - `--config <path>` — явный путь к JSON с `mcpServers`.
 - `--timeout <seconds>` — таймаут запроса (по умолчанию 60 с).
 - `--id <int>` — id JSON-RPC запроса (по умолчанию 1).
-
-**Agent-слоты с хоста** (не добавлять в `.cursor/mcp.json`):
-`docker/agent-container/mcp-call-slot.sh`
-— JWT из контейнера + URL `:808N/agentN`. См.
-`docs/ai/mcp-server.md` § «MCP agent-слотов с хоста».
 
 ## Коды возврата
 
@@ -95,12 +88,11 @@ bash tools/mcp-call/mcp-call.sh execute_code_safe_transaction @path/to/args.json
 
 По умолчанию CLI завершается с кодом **1**, если разобранный JSON ответа tool содержит
 `"success": false`, даже при `isError: false` в обёртке MCP (например
-`[command_not_found]`, `[client_only]`, падение `print_tests_run`). Это нужно shell и
-агентам, которые проверяют только exit code.
+`[command_not_found]`, `[client_only]`). Это нужно shell и агентам, которые проверяют
+только exit code.
 
 Флаг **`--no-fail-on-success-false`** отключает проверку `success` в теле (legacy:
-exit 0 при `isError: false`). Имя зафиксировано в change
-`mcp-print-tools-hardening`.
+exit 0 при `isError: false`).
 
 ## Формат вывода
 
@@ -109,7 +101,7 @@ exit 0 при `isError: false`). Имя зафиксировано в change
 - Для вызова: содержимое `result.content[0].text`. Если оно валидный JSON — печатается как форматированный JSON; иначе — как plain-text.
 - Кириллица на вход и выход — через UTF-8, без экранирования (`ensure_ascii=False`).
 
-## Крупный payload (extension_load_post)
+## Крупный payload (`extension_load_post`)
 
 `.cfe` в base64 — мегабайты. Не передавать args inline в argv `jq`.
 
@@ -124,27 +116,16 @@ bash tools/mcp-call/mcp-call.sh --server dev_db_privileged \
   --timeout 600 extension_load_post @.tmp/extension-load.json
 ```
 
-См. `mcp-server.md § Сборка .cfe`,
-`memory/2026-08-04-cfe-extension-load-mcp.md`.
-
 ## JWT и диагностика 401
 
 | Симптом | Что проверить |
 | --- | --- |
-| `HTTP 401` в stderr | В `.cursor/mcp.json` / `.mcp.json` у `dev_dt` есть `headers.Authorization` |
+| `HTTP 401` в stderr | В `.mcp.json` / `.cursor/mcp.json` у сервера есть `headers.Authorization` |
 | Пустой ответ, код 3 | Тот же 401; не путать с недоступным Apache/публикацией |
 | Работает в Cursor, не из CLI | Cursor подставляет headers; CLI читает тот же файл — путь `--config` и cwd = корень репо |
 | `--url` без заголовков | Для JWT нужен конфиг или свой `curl` с `-H` |
 
-Проверка после обновления токена:
-
-```bash
-python scripts/update_mcp_tokens.py --verify
-# или
-bash tools/mcp-call/mcp-call.sh version_get
-```
-
-Проверка **всех** серверов из `.cursor/mcp.json` / `.mcp.json` (1С + qmd):
+Проверка **всех** серверов из `.mcp.json` / `.cursor/mcp.json` (1С + qmd):
 
 ```bash
 python tools/mcp-call/test-connected-mcp.py
@@ -153,12 +134,11 @@ python tools/mcp-call/test-connected-mcp.py
 Скрипт читает все ключи `mcpServers`, для 1С — `tools/list` + `version_get`, для qmd
 (streamable HTTP) — `health`, `initialize` + `tools/list`.
 
-Секреты и перегенерация: `scripts/update_mcp_tokens.py`,
-переменные `.env` — `.env.example` (`MCP_JWT_*`).
+Секреты (JWT) — только в `.env` (gitignored), в `.mcp.json` — имена переменных.
 
 ## BSL: `execute_code` и `execute_code_safe_transaction`
 
-Для smoke-тестов и проверки серверной логики после UI-теста предпочтителен
+Для проверок и smoke-тестов предпочтителен
 **`execute_code_safe_transaction`**: транзакция откатывается, запись в БД не остаётся.
 
 Формат аргументов — JSON-объект в argv или `@file.json` (UTF-8):
@@ -173,27 +153,15 @@ python tools/mcp-call/test-connected-mcp.py
 кодировка и экранирование. Вызывайте `mcp-call.sh` с `@file` или
 передайте JSON как один аргумент из скрипта на Python.
 
-См. также раздел «Выполнение BSL» в `docs/ai/mcp-server.md`.
-
-Готовый probe локали даты ИБ (для `fillFields` в web-test):
-
-```bash
-bash tools/mcp-call/mcp-call.sh execute_code_safe_transaction @tools/mcp-call/examples/locale-probe-args.json
-```
-
-Ответ вида `RU|30.08.2025` или `US|08/30/2025` — см.
-`docs/ai/e2e-hybrid-testing.md`.
-
-Печать с факсимиле (`signatureAndStamp: true`): шаблон
-[`examples/print-execute-fax-args.json`](examples/print-execute-fax-args.json);
-см. `mcp-tool-print-forms-list-execute.md`.
+Примеры аргументов (args-json) в kit не поставляются — они специфичны для
+конфигурации потребителя; формат и шаблоны — в
+[examples/README.md](examples/README.md).
 
 ## Промпт для субагентов
 
 > Используй `bash tools/mcp-call/mcp-call.sh` для прямых вызовов MCP 1С. Список: `--list`.
 > Схема: `--schema <tool_name>`. Вызов: `<tool_name> '<json_args>'` или `@args.json`.
-> Конфиг: сначала `.cursor/mcp.json`, иначе `.mcp.json`; сервер по умолчанию `dev_dt`;
-> JWT из `headers` конфига. Прод: `--server prod_dt`. При 401 — обновить Bearer
-> (`scripts/README_jwt_1c.md`). Кириллица: UTF-8.
+> Конфиг: `.mcp.json`, иначе `.cursor/mcp.json`; сервер по умолчанию `dev_dt`;
+> JWT из `headers` конфига. При 401 — обновить Bearer. Кириллица: UTF-8.
 > Коды выхода: 0 успех, 1 ошибка инструмента (в т.ч. `success: false` в JSON-теле),
 > 2 JSON-RPC, 3 сеть, 4 аргументы. Legacy: `--no-fail-on-success-false`.

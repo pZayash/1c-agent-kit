@@ -1,6 +1,0 @@
-{
-  "event": "MCP.tools_call",
-  "all_levels": true,
-  "limit": 10,
-  "minutes": 60
-}

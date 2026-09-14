@@ -9,9 +9,9 @@
 
 - `.mcp.json` — **коммитится**, содержит только плейсхолдеры
   `${VAR}` / `${VAR:-default}` (URL, токены).
-- Значения — в `.env` (gitignored) или окружении. Подстановку делают
-  `mcp-call.sh` и smoke-скрипты kit (`.env` подгружается автоматически,
-  `MCP_ENV_FILE` для другого пути).
+- Значения — в `.env` (gitignored) или окружении. Подстановку делает
+  `mcp-call.sh` (`.env` подгружается автоматически, `MCP_ENV_FILE` для
+  другого пути).
 - `.cursor/mcp.json` — legacy fallback (literal-токены, в `.gitignore`);
   читается с warning, пока Cursor не выведен из эксплуатации.
 
@@ -35,7 +35,11 @@
 
 - `tools/mcp-call/mcp-call.sh` — JSON-RPC CLI (`--list`, `--schema`,
   `<tool> '<args>'`, `--url` ad-hoc). README — в каталоге tool.
-- `run-mcp-smoke-tests.py`, `smoke-privileged.py` — smoke; args-json у
-  потребителя в `tools/mcp-call-examples/` (резолв: `MCP_CALL_EXAMPLES`
-  → sibling `examples/` → `tools/mcp-call-examples`).
-- `extension-load-cfe.sh` — загрузка CFE через MCP-tool расширения.
+- `tools/mcp-call/test-connected-mcp.py` — проверка всех `mcpServers`
+  из конфига (1С: `tools/list` + `version_get`; qmd: `health`,
+  `initialize` + `tools/list`).
+- `tools/mcp-call/extension-load-cfe.sh` — загрузка CFE через MCP-tool
+  расширения (`extension_load_post`).
+
+Smoke-набор и «боевые» args-json — у потребителя (`tools/mcp-call-examples/`
+и собственные скрипты); в kit не входят.

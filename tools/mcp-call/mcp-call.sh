@@ -47,9 +47,8 @@ usage() {
 
 ARGS_JSON — JSON-объект или @path/to/file.json (UTF-8).
 
-Слоты agent-container с хоста (без записи в .cursor/mcp.json):
+Слоты agent-container с хоста (без записи в .mcp.json):
   bash docker/agent-container/mcp-call-slot.sh N version_get
-  см. docs/ai/mcp-server.md § «MCP agent-слотов с хоста».
 EOF
 }
 
