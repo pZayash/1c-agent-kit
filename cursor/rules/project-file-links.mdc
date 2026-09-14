@@ -1,0 +1,59 @@
+---
+description: Кликабельные ссылки на файлы репозитория в ответах агентов (Cursor, Composer, agent-slot)
+alwaysApply: true
+---
+
+# Ссылки на файлы проекта
+
+Полный гайд: [docs/ai/project-file-links.md](../../docs/ai/project-file-links.md).
+
+Пути в **ответах агента** и в markdown — кликабельны в Cursor только в форматах ниже.
+Кириллица в пути — UTF-8 как на диске, **никогда** `%D0%…`.
+
+## Рабочие форматы
+
+### A. Code citation — показать код (тело обязательно)
+
+Пустой citation **невидим** в Cursor. Не substitutе им `[](path#Ln)`.
+
+```text
+```startLine:endLine:src/cf/Catalogs/Номенклатура/Ext/ObjectModule.bsl
+// минимум одна строка кода из файла
+```
+```
+
+### B. Markdown-ссылка на файл
+
+```markdown
+[Module.bsl](src/cf/Catalogs/Номенклатура/Ext/ObjectModule.bsl)
+```
+
+### C. Markdown-ссылка на строку (место без кода — первый выбор)
+
+```markdown
+[Module.bsl:42](src/cf/Catalogs/Номенклатура/Ext/ObjectModule.bsl#L42)
+[Module.bsl:42-50](src/cf/Catalogs/Номенклатура/Ext/ObjectModule.bsl#L42-L50)
+```
+
+## Обязательно
+
+- Путь от **корня репозитория** (`src/cf/…` или `conf/…`), разделитель `/`.
+- Agent-slot: не `/work/conf/…` — всё равно `conf/…`.
+- Строка без кода → `[](path#Ln)`; citation только с непустым телом.
+
+## Запрещено (не открывается)
+
+| Антипаттерн | Пример |
+| --- | --- |
+| Percent-encoding | `conf/.../%D1%8F%D1%8F_...` |
+| Encoded + `#Ln` | `...%D0%.../Module.bsl#L1` |
+| Citation без тела | невидим; для строки — `[](path#Ln)` |
+| Голый `path` / `path#Ln` | без `[]()` → auto-encode → не открывается |
+| Backticks вместо ссылки | `` `conf/…/file.bsl` `` — не file-link |
+| `file:///…` | URI ОС |
+| Wikilinks | `[[conf/…]]` |
+| Windows-абсолют | `C:\path\to\file.bsl` |
+
+## Быстрая проверка
+
+Перед ответом: кириллица читаема в URL, оформлено как `[text](path)`, `[text](path#Ln)` или code citation.

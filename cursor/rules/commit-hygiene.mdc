@@ -1,0 +1,42 @@
+---
+description: Kit публичный — не коммитить внутреннюю инфраструктуру (IP, хосты, пути, кодовые имена, секреты)
+alwaysApply: true
+---
+
+Канон: [commit-hygiene.md](../../harness/docs/ai/commit-hygiene.md).
+
+Kit `1c-agent-kit` — публичный репозиторий. Перед коммитом в kit
+(или `promote.sh`) проверь, что в staged нет внутренней инфраструктуры:
+
+- **IP** приватных диапазонов (`10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`, `169.254.0.0/16`) — кроме `127.0.0.1` /
+  `host.docker.internal`.
+- **Имена хостов** и **пути сервера** (кэши, worktree, bare-репо,
+  ящики, базы ИБ на ваших хостах).
+- **Кодовые имена** проектов/ИБ/орг, префикс объектов пилота, имена
+  dev/prod баз.
+- **Ремоуты/ветки** и имена worktree.
+- **Секреты** (пароли, токены, ключи, `.env`).
+
+Публичные плейсхолдеры — таблица в
+[commit-hygiene.md](../../harness/docs/ai/commit-hygiene.md):
+`SRV01`, `10.0.0.10`, `D:\tools\bslls`, `D:\dev\proj\…`,
+`/srv/wt/…`, `proj`, `org`/`ORG`, `<PROJECT_PREFIX>_`,
+`dev_db`/`prod_db`, `origin/dev`, `upstream/dev`, `wt-a`,
+`*-org.md`. **Не вписывай реальные внутренние значения в доку/правило
+— иначе они утекут через них.**
+
+Self-check перед коммитом (generic; реальных токенов здесь нет):
+
+```bash
+# приватные IP
+git diff --cached -U | rg -n -P '\b(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+)\b' | rg -v '127\.0\.0\.1|host\.docker\.internal' && echo "OPSEC: приватный IP — замени на 10.0.0.10" && exit 1
+# секреты
+git diff --cached -U | rg -n -E '(AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{82}|xox[baprs]-[A-Za-z0-9-]+|sk-[A-Za-z0-9]{20,}|pk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|https?://[^/\s]+:[^/\s@]+@[^/\s]+)' && echo "SECRET — НЕ коммитить" && exit 1
+# consumer-токены из локального gitignored-списка
+[ -f .opsec-tokens.txt ] && git diff --cached -U | rg -n -F -f .opsec-tokens.txt && echo "OPSEC: токен из .opsec-tokens.txt" && exit 1
+```
+
+Если идентификатор уже в истории — `git filter-repo --replace-text` +
+force-push **до** смены видимости. Коммит — только с явного разрешения
+пользователя.

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Consumer pre-commit: harness/ must be a git submodule (mode 160000),
+# not a tree of regular blobs copied from 1c-agent-kit.
+#
+# No-op if path harness/ is absent (pilot before submodule).
+# Block (exit 1) if staged changes put 100644 files under harness/.
+#
+# Wire from project's .githooks/pre-commit:
+#   bash "$repo_root/.githooks/pre-commit-harness"
+# or copy this file from the kit.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [[ ! -e harness ]]; then
+  exit 0
+fi
+
+fail=0
+
+# Staged raw: :oldmode newmode oldsha newsha status<TAB>path
+while IFS=$'\t' read -r meta path; do
+  [[ -z "${path:-}" ]] && continue
+  newmode="$(awk '{print $2}' <<<"$meta")"
+  case "$path" in
+    harness|harness/)
+      if [[ "$newmode" != "160000" ]]; then
+        echo "pre-commit-harness: '$path' must be gitlink 160000, got $newmode" >&2
+        fail=1
+      fi
+      ;;
+    harness/*)
+      echo "pre-commit-harness: kit file staged as project blob: $path" >&2
+      echo "  Promote: commit inside harness/ (kit repo), then bump SHA only." >&2
+      fail=1
+      ;;
+  esac
+done < <(git diff --cached --raw)
+
+# Index already has blobs under harness/ even if this commit does not touch them
+while read -r mode _ _ path; do
+  [[ -z "${path:-}" ]] && continue
+  case "$path" in
+    harness/*)
+      echo "pre-commit-harness: index already has blob under harness/: $path (mode $mode)" >&2
+      fail=1
+      ;;
+    harness)
+      if [[ "$mode" != "160000" ]]; then
+        echo "pre-commit-harness: index 'harness' is mode $mode, want 160000" >&2
+        fail=1
+      fi
+      ;;
+  esac
+done < <(git ls-files -s -- harness)
+
+if [[ "$fail" -ne 0 ]]; then
+  echo "pre-commit-harness: refuse commit. See 1c-agent-kit README / harness-promote." >&2
+  exit 1
+fi
+
+exit 0

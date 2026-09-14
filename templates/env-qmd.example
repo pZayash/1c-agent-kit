@@ -1,0 +1,14 @@
+# QMD client (kit). Скопировать в .env.example / .env потребителя.
+# Канон агента: harness/docs/ai/qmd-search.md
+#
+# off  — не звать qmd CLI, не ждать MCP; только rg/Grep
+# cli  — локальный бинарник `qmd` в PATH
+# mcp  — HTTP MCP; CLI не звать
+QMD_CLIENT=cli
+
+# Для QMD_CLIENT=mcp (общий сервер или хост слота).
+# Пример после переноса на SRV01:
+# QMD_MCP_URL=http://10.0.0.10:8181/mcp
+# Слот Docker к демону на том же Windows-хосте:
+# QMD_MCP_URL=http://host.docker.internal:8181/mcp
+QMD_MCP_URL=
