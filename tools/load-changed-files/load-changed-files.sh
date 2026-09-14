@@ -75,6 +75,8 @@
 #   AUTO_CLOSE_DESIGNER       Автоматически закрывать конфигуратор (true/false, по умолчанию: false)
 #   REOPEN_DESIGNER_AFTER_LOAD Открывать конфигуратор после загрузки (true/false, по умолчанию: false)
 #   AUTO_UNSUPPORT_OBJECTS    Автоматически снимать с поддержки загружаемые объекты (true/false, по умолчанию: false)
+#   PARENT_CONFIG_PY          Путь к parent_config.py для preflight поддержки
+#                             (по умолчанию: scripts/parent_config.py потребителя, иначе канон в kit)
 #   UPDATE_DB                 Обновить конфигурацию базы данных после загрузки (true/false, по умолчанию: false)
 #   APACHE_SERVICE_NAME       Имя службы Apache (например, Apache2.4). Если задано и UPDATE_DB=true —
 #                             служба останавливается перед /UpdateDBCfg и запускается после.
@@ -553,6 +555,17 @@ run_python() {
     fi
 }
 
+# Список изменённых файлов для -listFile: пишется в .tmp/ потребителя и снимается
+# на любом выходе (успех/ошибка/Ctrl+C), чтобы не оставлять незаигноренный
+# артефакт в корне репозитория.
+_LIST_OUTPUT_FILE=""
+cleanup_changed_files_list() {
+    if [[ -n "${_LIST_OUTPUT_FILE:-}" ]]; then
+        rm -f -- "$_LIST_OUTPUT_FILE"
+        _LIST_OUTPUT_FILE=""
+    fi
+}
+
 # Функция для извлечения имени конечного каталога базы из строки IB_CONNECTION.
 # Работает для файловых баз (/F"путь") и серверных (/S сервер\база).
 # Пример: /F"C:\bases\org_proj.dev.dt" → org_proj.dev.dt
@@ -785,7 +798,7 @@ apply_load_hide_files() {
     done
     if [[ ${#HIDDEN_LOAD_FILES[@]} -gt 0 ]]; then
         _LOAD_HIDE_PREV_TRAP=$(trap -p EXIT 2>/dev/null || true)
-        trap 'restore_load_hide_files; eval "${_LOAD_HIDE_PREV_TRAP:-true}"' EXIT
+        trap 'restore_load_hide_files; cleanup_changed_files_list; eval "${_LOAD_HIDE_PREV_TRAP:-true}"' EXIT
     fi
 }
 
@@ -1615,6 +1628,7 @@ while [[ $# -gt 0 ]]; do
             echo "  DESIGNER_PATH             Путь к 1cv8.exe"
             echo "  AUTO_CLOSE_DESIGNER       Автоматически закрывать конфигуратор"
             echo "  AUTO_UNSUPPORT_OBJECTS    Автоматически снимать с поддержки загружаемые объекты"
+            echo "  PARENT_CONFIG_PY          Путь к parent_config.py для preflight (default: scripts/ потребителя, иначе kit)"
             echo "  UPDATE_DB                 Обновить конфигурацию базы данных после загрузки"
             echo "  REOPEN_DESIGNER_AFTER_LOAD Открывать конфигуратор после загрузки"
             echo "  APACHE_SERVICE_NAME       Имя службы Apache для остановки/запуска при UPDATE_DB"
@@ -1896,8 +1910,13 @@ if [[ "$nothing_to_load" != "true" ]]; then
     file_count=$(wc -l < temp_changed_files.txt)
     log "INFO" "Найдено $file_count измененных файлов в $CONFIG_PATH/"
 
-    # Создаем итоговый файл со списком измененных файлов в UTF-8 with BOM (только основная конфигурация)
-    full_output_file="$repo_path/$OUTPUT_FILE"
+    # Создаем итоговый файл со списком измененных файлов в UTF-8 with BOM (только основная конфигурация).
+    # Пишем во временный каталог потребителя (.tmp/, рядом с логом загрузки) и снимаем
+    # на любом выходе через EXIT-trap — артефакт не остаётся в корне репозитория.
+    mkdir -p "$repo_path/.tmp"
+    full_output_file="$repo_path/.tmp/$OUTPUT_FILE"
+    _LIST_OUTPUT_FILE="$full_output_file"
+    trap 'cleanup_changed_files_list' EXIT
     {
         printf '\xEF\xBB\xBF'
         cat temp_changed_files.txt
@@ -2000,7 +2019,7 @@ if [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]] \
         exit 30
     fi
     _slot_apache_was_running="true"
-    trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true' EXIT
+    trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_changed_files_list' EXIT
 fi
 else
 _slot_apache_was_running="false"
@@ -2011,38 +2030,52 @@ fi
 PARENT_CONFIG_BIN="$CONFIG_PATH_ABS/Ext/ParentConfigurations.bin"
 PARENT_CONFIG_JSON="$repo_path/ParentConfigurations.json"
 CONFIG_DUMP_INFO_PATH="$CONFIG_PATH_ABS/ConfigDumpInfo.xml"
+# parent_config.py для preflight: явный PARENT_CONFIG_PY → скрипт потребителя → канон в kit.
+if [[ -z "${PARENT_CONFIG_PY:-}" ]]; then
+    if [[ -f "$repo_path/scripts/parent_config.py" ]]; then
+        PARENT_CONFIG_PY="$repo_path/scripts/parent_config.py"
+    else
+        PARENT_CONFIG_PY="$_KIT_LOAD_DIR/parent_config.py"
+    fi
+fi
 
 if [[ "$has_conf_changes" == "true" && -f "$PARENT_CONFIG_BIN" && "$FULL_RESYNC" != "true" ]]; then
-    PREFLIGHT_ARGS=(
-        "scripts/parent_config.py"
-        "preflight-load"
-        "--config-dir" "$CONFIG_PATH_ABS"
-        "--list-file" "$full_output_file"
-        "--bin" "$PARENT_CONFIG_BIN"
-        "--json" "$PARENT_CONFIG_JSON"
-    )
+    if [[ ! -f "$PARENT_CONFIG_PY" ]]; then
+        log "WARN" "Preflight по поддержке пропущен: не найден parent_config.py"
+        log "WARN" "Ожидался PARENT_CONFIG_PY, $repo_path/scripts/parent_config.py или $_KIT_LOAD_DIR/parent_config.py; либо запустите с -F (full-resync без preflight)"
+        timing_mark "preflight поддержки (пропущен)"
+    else
+        PREFLIGHT_ARGS=(
+            "$PARENT_CONFIG_PY"
+            "preflight-load"
+            "--config-dir" "$CONFIG_PATH_ABS"
+            "--list-file" "$full_output_file"
+            "--bin" "$PARENT_CONFIG_BIN"
+            "--json" "$PARENT_CONFIG_JSON"
+        )
 
-    if [[ -f "$CONFIG_DUMP_INFO_PATH" ]]; then
-        PREFLIGHT_ARGS+=("--configdump" "$CONFIG_DUMP_INFO_PATH")
-    fi
+        if [[ -f "$CONFIG_DUMP_INFO_PATH" ]]; then
+            PREFLIGHT_ARGS+=("--configdump" "$CONFIG_DUMP_INFO_PATH")
+        fi
 
-    if [[ "$AUTO_UNSUPPORT_OBJECTS" == "true" ]]; then
-        PREFLIGHT_ARGS+=("--auto-unsupport")
-        log "INFO" "Включен режим автоматического снятия с поддержки (--auto-unsupport)"
-    fi
+        if [[ "$AUTO_UNSUPPORT_OBJECTS" == "true" ]]; then
+            PREFLIGHT_ARGS+=("--auto-unsupport")
+            log "INFO" "Включен режим автоматического снятия с поддержки (--auto-unsupport)"
+        fi
 
-    run_python "${PREFLIGHT_ARGS[@]}"
-    preflight_exit_code=$?
-    if [[ $preflight_exit_code -eq 20 ]]; then
-        log "ERROR" "Загрузка остановлена: нужно снять объекты с поддержки или запустить скрипт с --auto-unsupport"
-        rm -f temp_changed_files.txt
-        exit 20
-    elif [[ $preflight_exit_code -ne 0 ]]; then
-        log "ERROR" "Preflight по поддержке завершился с ошибкой (код: $preflight_exit_code)"
-        rm -f temp_changed_files.txt
-        exit $preflight_exit_code
+        run_python "${PREFLIGHT_ARGS[@]}"
+        preflight_exit_code=$?
+        if [[ $preflight_exit_code -eq 20 ]]; then
+            log "ERROR" "Загрузка остановлена: нужно снять объекты с поддержки или запустить скрипт с --auto-unsupport"
+            rm -f temp_changed_files.txt
+            exit 20
+        elif [[ $preflight_exit_code -ne 0 ]]; then
+            log "ERROR" "Preflight по поддержке завершился с ошибкой (код: $preflight_exit_code)"
+            rm -f temp_changed_files.txt
+            exit $preflight_exit_code
+        fi
+        timing_mark "preflight поддержки"
     fi
-    timing_mark "preflight поддержки"
 fi
 
 if [[ "$has_conf_changes" == "true" && "$FULL_RESYNC" == "true" && -f "$PARENT_CONFIG_BIN" ]]; then
@@ -2192,7 +2225,7 @@ if [[ "$UPDATE_DB" == "true" ]]; then
             rm -f temp_changed_files.txt temp_changed_extensions.txt
             exit 30
         fi
-        trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true' EXIT
+        trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_changed_files_list' EXIT
     fi
 
     if [[ "$has_extension_changes" == "true" ]]; then
@@ -2252,6 +2285,7 @@ if [[ "$UPDATE_DB" == "true" ]]; then
 
     # Успех — снимаем аварийный trap и явно поднимаем Apache, если останавливали
     if [[ "$apache_was_running" == "true" ]]; then
+        cleanup_changed_files_list
         trap - EXIT
         if ! apache_start; then
             log "WARN" "Обновление БД прошло, но Apache не стартовал — запустите вручную"
@@ -2270,6 +2304,7 @@ if [[ "$_slot_apache_was_running" == "true" ]]; then
             || log "WARN" "chown /srv/ib не удался"
         sudo -n chmod -R g+rwX /srv/ib 2>/dev/null || chmod -R g+rwX /srv/ib 2>/dev/null || true
     fi
+    cleanup_changed_files_list
     trap - EXIT
     if ! apache_start; then
         log "WARN" "Загрузка прошла, но Apache не стартовал — запустите вручную"

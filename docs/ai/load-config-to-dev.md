@@ -49,6 +49,18 @@ UpdateDB` при ненулевой дельте `conf/` — смотри exit 2
 
 Подробности — skill `/load-changed-files` и docs потребителя.
 
+## Preflight поддержки объектов
+
+При partial-загрузке `conf/` скрипт делает preflight объектов на поддержке
+(`Ext/ParentConfigurations.bin`). `parent_config.py` резолвится по порядку:
+`PARENT_CONFIG_PY` → `scripts/parent_config.py` потребителя → канон
+`harness/tools/load-changed-files/parent_config.py` (kit). Если файла нет
+нигде — preflight пропускается с `WARN`, загрузка продолжается. Альтернатива —
+`-F` (full-resync без preflight).
+
+Внутренний список `-listFile` пишется в `.tmp/changed_files.txt` и удаляется
+при любом выходе (успех/ошибка), в корне репозитория артефакт не остаётся.
+
 ## Чек-лист агента
 
 1. Правки в git (`conf/`, `cfe.xml/`)? → без `--list-file`.
