@@ -51,10 +51,13 @@
 #       --no-extensions         Только conf, без cfe.xml (если агент не менял расширения —
 #                               иначе git подтянет чужие правки cfe.xml и загрузка упадёт)
 #       --reset-marker          Сбросить маркер HEAD последней загрузки (rebase/force-push/resync)
+#                               При чистом дереве + merge НЕ заливает файлы (см. infer merge-marker).
 #   -F, --full-resync           Полная загрузка conf/ целиком (без partial) + reset-marker
 #                               + авто-UpdateDBCfg; лечит «Неверный путь к данным»/
 #                               «Неизвестный объект» после merge/rebase, когда ИБ отстала
 #                               от диска. Без --list-file.
+#       --force-partial         Не отменять partial, даже если в списке Configuration.xml
+#                               после merge (иначе скрипт шлёт на -F).
 #       --verbose               Подробный вывод (по умолчанию — краткий для агентов)
 #   -h, --help                  Показать эту справку
 #
@@ -80,6 +83,10 @@
 #   SKIP_EXTENSIONS           true — только conf, без расширений (то же, что --no-extensions)
 #   RESET_LOAD_MARKER         true — то же, что --reset-marker
 #   FULL_RESYNC               true — то же, что --full-resync
+#   FORCE_PARTIAL             true — то же, что --force-partial
+#   LOAD_HIDE_FILES           «;»-список путей относительно корня репо: на время
+#                             LoadConfigFromFiles переименовать в *.hidden-for-load
+#                             (типовая битая форма УНФ при -F / Configuration.xml)
 #   LOAD_VERBOSE              true — то же, что --verbose
 #   LOG_FILE_LIST_THRESHOLD   Порог поименного вывода файлов в -H/-C/--verbose (по умолчанию: 100)
 #
@@ -515,12 +522,14 @@ diagnose_load_failure() {
         log "ERROR" "либо в partial-сете нет метаданных объектов-владельцев форм."
         log "ERROR" "Часто возникает после merge/rebase/force-push или ручной правки в конфигураторе."
         log "ERROR" "Рекомендации:"
-        log "ERROR" "  1. Полная загрузка через конфигуратор, затем сбросить маркер:"
-        log "ERROR" "       ./load-changed-files.sh --reset-marker"
-        log "ERROR" "  2. Если объект новый — добавьте его корневой XML в --list-file"
-        log "ERROR" "       (напр. CommonForms/Имя.xml), не только форму."
-        log "ERROR" "  3. После merge в marker..HEAD — это ожидаемо; partial часто требует"
-        log "ERROR" "       полной синхронизации ИБ с диском."
+        log "ERROR" "  1. Полная загрузка (не --reset-marker при чистом дереве — это только UpdateDB):"
+        log "ERROR" "       ./load-changed-files.sh -F -U"
+        log "ERROR" "     Битую типовую форму прячет LOAD_HIDE_FILES (см. .env.example)."
+        log "ERROR" "  2. Если объект новый и ИБ почти синхронна — корневой XML в --list-file"
+        log "ERROR" "       (напр. CommonForms/Имя.xml), не только форму; без Configuration.xml,"
+        log "ERROR" "       если можно обойтись."
+        log "ERROR" "  3. После merge marker..HEAD с новыми объектами partial+Configuration.xml"
+        log "ERROR" "       почти всегда проигрывает -F (десятки минут, затем те же ошибки)."
     elif [[ $warn_help -gt 0 ]]; then
         log "WARN" "Блокирующих ошибок нет — только предупреждения по справке типовой УНФ."
         log "WARN" "Если 1С всё равно вернула ненулевой код, проверьте полный лог выше."
@@ -670,6 +679,11 @@ write_loaded_marker() {
     log "INFO" "Маркер загрузки обновлён: $head_sha"
 }
 
+# HEAD — merge-коммит (есть второй родитель).
+head_is_merge() {
+    git rev-parse --verify --quiet HEAD^2 >/dev/null 2>&1
+}
+
 # Предупреждение, если в marker..HEAD есть merge-коммиты: после merge ИБ могла
 # получить большой объём изменений, partial load рискован. ponytail: дёшево по
 # rev-list --merges; потолок — не отличает «merge затронул conf» от «нет»,
@@ -681,10 +695,169 @@ warn_if_merge_in_range() {
     merge_count=$(git_nq rev-list --merges --count "$marker_sha..HEAD" 2>/dev/null)
     [[ -z "$merge_count" || "$merge_count" -eq 0 ]] && return 0
     log "WARN" "В диапазоне marker..HEAD найдено merge-коммитов: $merge_count."
-    log "WARN" "После merge ИБ могла получить много изменений — partial load может не пройти."
-    log "WARN" "Если загрузка упадёт на «Неверный путь к данным»/«Неизвестный объект»:"
-    log "WARN" "  • загрузите полностью через конфигуратор"
-    log "WARN" "  • затем ./load-changed-files.sh --reset-marker"
+    log "WARN" "После merge ИБ могла отстать от диска — partial с Configuration.xml"
+    log "WARN" "часто идёт десятки минут и падает («Неизвестный объект» / «Неверный путь»)."
+    log "WARN" "Канон при отставании ИБ: ./load-changed-files.sh -F -U"
+    log "WARN" "Не используйте --reset-marker на чистом дереве: это 0 файлов + только UpdateDB."
+}
+
+# Нет маркера + HEAD merge → граница committed-diff = первый родитель (наша ветка до merge).
+# Иначе git-discovery видит только working-tree и при чистом дереве делает ложный UpdateDB.
+# Пишет RESOLVED_LOAD_MARKER (не echo: log WARN идёт в stdout).
+resolve_loaded_marker() {
+    local marker_file marker_sha parent
+    marker_file=$(loaded_marker_path "$repo_path")
+    marker_sha=$(read_loaded_marker "$marker_file")
+    if [[ -n "$marker_sha" ]]; then
+        RESOLVED_LOAD_MARKER="$marker_sha"
+        return 0
+    fi
+    if head_is_merge; then
+        parent=$(git rev-parse HEAD^1)
+        log "WARN" "Маркер загрузки отсутствует, HEAD — merge."
+        log "WARN" "Беру первый родитель ${parent:0:8} как границу committed-diff (дельта merge)."
+        log "WARN" "Не пишите в маркер текущий HEAD до успешной загрузки файлов."
+        RESOLVED_LOAD_MARKER="$parent"
+        return 0
+    fi
+    RESOLVED_LOAD_MARKER=""
+    return 0
+}
+
+# Индекс знает файл, на диске его нет (NTFS: delete lowercase-дубля стирает канонический путь).
+# Без restore discover пропускает путь (-f) → пустой список → ложный UpdateDB.
+restore_missing_worktree_from_index() {
+    local prefix="$1"
+    local tmp n
+    [[ -n "$prefix" ]] || return 0
+    tmp=$(mktemp) || return 1
+    git_nq ls-files -d -- "$prefix" > "$tmp" 2>/dev/null || true
+    if [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        return 0
+    fi
+    n=$(wc -l < "$tmp" | tr -d ' ')
+    log "WARN" "Worktree: $n путей под $prefix есть в индексе и отсутствуют на диске"
+    log "WARN" "(часто NTFS case-fold после merge). Восстанавливаю из индекса."
+    if ! git_nq restore --worktree --pathspec-from-file="$tmp"; then
+        log "ERROR" "git restore --worktree не удался для $prefix — загрузка отменена."
+        log "ERROR" "Иначе эти файлы не попадут в listFile, а -U сделает вид, что ИБ синхронна."
+        rm -f "$tmp"
+        return 1
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
+HIDDEN_LOAD_FILES=()
+
+restore_load_hide_files() {
+    local f
+    for f in "${HIDDEN_LOAD_FILES[@]+"${HIDDEN_LOAD_FILES[@]}"}"; do
+        if [[ -f "${f}.hidden-for-load" ]]; then
+            mv -f "${f}.hidden-for-load" "$f"
+            log "INFO" "LOAD_HIDE_FILES: возвращён $f"
+        fi
+    done
+    HIDDEN_LOAD_FILES=()
+}
+
+# На время LoadConfigFromFiles спрятать файлы из LOAD_HIDE_FILES («;» / перевод строки).
+apply_load_hide_files() {
+    local spec item rel abs
+    spec="${LOAD_HIDE_FILES:-}"
+    [[ -n "$spec" ]] || return 0
+    HIDDEN_LOAD_FILES=()
+    local IFS=$';\n'
+    for item in $spec; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [[ -z "$item" ]] && continue
+        rel="${item#./}"
+        abs="$repo_path/$rel"
+        if [[ ! -f "$abs" ]]; then
+            log "WARN" "LOAD_HIDE_FILES: нет файла $rel — пропуск"
+            continue
+        fi
+        mv "$abs" "${abs}.hidden-for-load"
+        HIDDEN_LOAD_FILES+=("$abs")
+        log "INFO" "LOAD_HIDE_FILES: спрятан $rel → *.hidden-for-load"
+    done
+    if [[ ${#HIDDEN_LOAD_FILES[@]} -gt 0 ]]; then
+        _LOAD_HIDE_PREV_TRAP=$(trap -p EXIT 2>/dev/null || true)
+        trap 'restore_load_hide_files; eval "${_LOAD_HIDE_PREV_TRAP:-true}"' EXIT
+    fi
+}
+
+# Partial + Configuration.xml после merge: designer валидирует весь dump (десятки минут)
+# и типично падает. Канон — -F, не начинать doomed partial. Обход: --force-partial.
+abort_costly_merge_partial() {
+    local marker_sha="$1"
+    local list_file="temp_changed_files.txt"
+    [[ "$FULL_RESYNC" == "true" ]] && return 0
+    [[ "$FORCE_PARTIAL" == "true" ]] && return 0
+    [[ -n "$LIST_FILE" ]] && return 0
+    [[ -s "$list_file" ]] || return 0
+    grep -qx 'Configuration.xml' "$list_file" || return 0
+    local merge_here=false
+    if head_is_merge; then
+        merge_here=true
+    elif [[ -n "$marker_sha" ]]; then
+        local mc
+        mc=$(git_nq rev-list --merges --count "$marker_sha..HEAD" 2>/dev/null || echo 0)
+        [[ "${mc:-0}" -gt 0 ]] && merge_here=true
+    fi
+    [[ "$merge_here" == "true" ]] || return 0
+    if [[ -z "$marker_sha" ]]; then
+        marker_sha=$(git rev-parse HEAD^1)
+    fi
+    local n added
+    n=$(wc -l < "$list_file" | tr -d ' ')
+    added=$(git_nq diff --name-only --diff-filter=A "$marker_sha"..HEAD -- \
+        "$CONFIG_GIT_PREFIX/Catalogs/" "$CONFIG_GIT_PREFIX/Documents/" \
+        "$CONFIG_GIT_PREFIX/DataProcessors/" "$CONFIG_GIT_PREFIX/Reports/" \
+        "$CONFIG_GIT_PREFIX/CommonModules/" "$CONFIG_GIT_PREFIX/CommonForms/" \
+        "$CONFIG_GIT_PREFIX/InformationRegisters/" "$CONFIG_GIT_PREFIX/Enums/" \
+        2>/dev/null | grep -E '/[^/]+\.xml$' | grep -v '/Ext/' | wc -l | tr -d ' ')
+    added="${added:-0}"
+    local min_files="${LOAD_MERGE_PARTIAL_MAX_FILES:-20}"
+    if [[ "$added" -ge 1 || "$n" -ge "$min_files" ]]; then
+        log "ERROR" "Partial load после merge включает Configuration.xml ($n файлов conf,"
+        log "ERROR" "новых корневых XML объектов: $added)."
+        log "ERROR" "Designer тогда обходит весь dump: десятки минут и почти наверняка"
+        log "ERROR" "«Неизвестный объект метаданных» / «Неверный путь к данным»."
+        log "ERROR" "Канон: ./load-changed-files.sh -F -U"
+        log "ERROR" "  (LOAD_HIDE_FILES — спрятать битую типовую форму на время -F)."
+        log "ERROR" "Если ИБ уже синхронна и нужен именно partial: --force-partial"
+        return 1
+    fi
+    log "WARN" "В partial-списке Configuration.xml после merge ($n файлов)."
+    log "WARN" "Если загрузка пойдёт долго/упадёт — ./load-changed-files.sh -F -U"
+    return 0
+}
+
+# Merge тронул conf/cfe, список пуст (не кэш) — не делать вид, что UpdateDB = синхронизация.
+abort_empty_load_after_merge() {
+    local marker_sha="$1"
+    [[ "$FULL_RESYNC" == "true" ]] && return 0
+    [[ -n "$LIST_FILE" ]] && return 0
+    local base="${marker_sha}"
+    if [[ -z "$base" ]] && head_is_merge; then
+        base=$(git rev-parse HEAD^1)
+    fi
+    [[ -n "$base" ]] || return 0
+    head_is_merge || return 0
+    local changed
+    changed=$(git_nq diff --name-only --diff-filter=ACMR "$base"..HEAD -- \
+        "$CONFIG_GIT_PREFIX" "$EXTENSIONS_GIT_PREFIX" 2>/dev/null || true)
+    [[ -n "$changed" ]] || return 0
+    log "ERROR" "HEAD — merge, в ${base:0:8}..HEAD есть изменения $CONFIG_PATH/ или $EXTENSIONS_PATH/,"
+    log "ERROR" "но список загрузки пуст. -U сделал бы только UpdateDB — ИБ осталась бы старой."
+    log "ERROR" "Частые причины: маркер уже записан на merge-HEAD до загрузки файлов;"
+    log "ERROR" "файлы есть в git, но нет на диске (NTFS case-fold)."
+    log "ERROR" "Канон: ./load-changed-files.sh -F -U"
+    log "ERROR" "Или сдвиньте маркер на первый родитель: git rev-parse HEAD^1 > .tmp/load-cache/loaded-head-<ИБ>.sha"
+    return 1
 }
 
 # Кириллица в путях conf/: при core.quotepath=true git diff оборачивает пути в кавычки+octal,
@@ -1169,9 +1342,9 @@ classify_explicit_entry() {
 }
 
 discover_changed_files_from_git() {
-    local marker_file marker_sha marker_short
-    marker_file=$(loaded_marker_path "$repo_path")
-    marker_sha=$(read_loaded_marker "$marker_file")
+    local marker_sha marker_short
+    resolve_loaded_marker
+    marker_sha="$RESOLVED_LOAD_MARKER"
     COMMITTED_CHANGES_PRESENT=false
     if committed_range_has_changes "$marker_sha"; then
         COMMITTED_CHANGES_PRESENT=true
@@ -1297,6 +1470,9 @@ IBCMD_NO_CHECK="${IBCMD_NO_CHECK:-false}"  # true — --no-check у import files
 LIST_FILE=""
 RESET_LOAD_MARKER="${RESET_LOAD_MARKER:-false}"
 FULL_RESYNC="${FULL_RESYNC:-false}"   # полная загрузка conf/ целиком (без partial) + reset-marker
+FORCE_PARTIAL="${FORCE_PARTIAL:-false}"
+LOAD_HIDE_FILES="${LOAD_HIDE_FILES:-}"
+RESOLVED_LOAD_MARKER=""
 COMMITTED_CHANGES_PRESENT=false
 
 # Парсинг аргументов командной строки
@@ -1372,6 +1548,10 @@ while [[ $# -gt 0 ]]; do
             RESET_LOAD_MARKER="true"
             shift
             ;;
+        --force-partial)
+            FORCE_PARTIAL="true"
+            shift
+            ;;
         -F|--full-resync)
             FULL_RESYNC="true"
             RESET_LOAD_MARKER="true"
@@ -1418,6 +1598,7 @@ while [[ $# -gt 0 ]]; do
             echo "      --list-file PATH        Фолбэк: явный список (заменяет git); PATH=- для stdin"
             echo "      --no-extensions         Загружать только conf, без расширений (cfe.xml)"
             echo "      --reset-marker          Сбросить маркер HEAD последней загрузки committed-изменений"
+            echo "      --force-partial         Не отменять partial с Configuration.xml после merge"
             echo "  -F, --full-resync           Полная загрузка conf/ целиком (без partial) + reset-marker + авто-UpdateDBCfg"
             echo "      --engine ENGINE         Движок загрузки: designer (по умолчанию) | ibcmd"
             echo "      --ibcmd                 Сокращение для --engine ibcmd"
@@ -1442,7 +1623,9 @@ while [[ $# -gt 0 ]]; do
             echo "  FORCE_CONFIGURATION       true — то же, что --force-configuration (только Configuration.xml)"
             echo "  SKIP_EXTENSIONS           true — то же, что --no-extensions"
             echo "  RESET_LOAD_MARKER         true — то же, что --reset-marker"
+            echo "  FORCE_PARTIAL             true — то же, что --force-partial"
             echo "  FULL_RESYNC               true — то же, что --full-resync"
+            echo "  LOAD_HIDE_FILES           «;»-список путей (спрятать на время LoadConfigFromFiles)"
             echo "  LOAD_ENGINE               designer | ibcmd (по умолчанию designer)"
             echo "  IBCMD_PATH                Путь к ibcmd.exe (по умолчанию рядом с DESIGNER_PATH)"
             echo "  IBCMD_NO_CHECK            true — то же, что --ibcmd-no-check"
@@ -1600,6 +1783,17 @@ timing_mark "подготовка (cd, пути)"
 if [[ "$RESET_LOAD_MARKER" == "true" ]]; then
     rm -f "$(loaded_marker_path "$repo_path")" 2>/dev/null || true
     log "INFO" "Маркер загрузки сброшен (--reset-marker)"
+    if [[ "$FULL_RESYNC" != "true" ]] && head_is_merge; then
+        log "WARN" "--reset-marker при merge не заменяет -F: при чистом дереве без fallback"
+        log "WARN" "был бы пустой список. Ниже маркер выводится из HEAD^1."
+    fi
+fi
+
+if [[ "$FULL_RESYNC" != "true" && -z "$LIST_FILE" ]]; then
+    restore_missing_worktree_from_index "$CONFIG_GIT_PREFIX" || exit 21
+    if [[ "$SKIP_EXTENSIONS" != "true" && -n "$EXTENSIONS_GIT_PREFIX" ]]; then
+        restore_missing_worktree_from_index "$EXTENSIONS_GIT_PREFIX" || exit 21
+    fi
 fi
 
 if [[ "$FULL_RESYNC" == "true" ]]; then
@@ -1609,7 +1803,11 @@ elif [[ -n "$LIST_FILE" ]]; then
     discover_changed_files_from_list "$LIST_FILE"
 else
     discover_changed_files_from_git
-    warn_if_merge_in_range "$(read_loaded_marker "$(loaded_marker_path "$repo_path")")"
+    warn_if_merge_in_range "${RESOLVED_LOAD_MARKER:-}"
+    abort_costly_merge_partial "${RESOLVED_LOAD_MARKER:-}" || {
+        rm -f temp_changed_files.txt temp_changed_extensions.txt
+        exit 21
+    }
 fi
 
 if [[ "$SKIP_EXTENSIONS" == "true" ]]; then
@@ -1672,6 +1870,12 @@ if [[ "$has_conf_changes" == "false" && "$has_extension_changes" == "false" ]]; 
         log "WARN" "Изменений в папках $CONFIG_PATH/ и $EXTENSIONS_PATH/ не найдено"
     fi
     timing_mark "изменений нет"
+    if [[ "${conf_list_before_cache:-0}" -eq 0 ]]; then
+        abort_empty_load_after_merge "${RESOLVED_LOAD_MARKER:-}" || {
+            rm -f temp_changed_files.txt temp_changed_extensions.txt
+            exit 21
+        }
+    fi
     if [[ "$REOPEN_CLIENT_AFTER_LOAD" != "true" && "$REOPEN_DESIGNER_AFTER_LOAD" != "true" && "$UPDATE_DB" != "true" ]]; then
         timing_summary "conf: 0 файлов | расширения: 0"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
@@ -1859,6 +2063,7 @@ fi
 if [[ "$nothing_to_load" != "true" ]]; then
 # Выполняем загрузку измененных файлов основной конфигурации (partial + listFile)
 if [[ "$has_conf_changes" == "true" ]]; then
+    apply_load_hide_files
     if [[ "$FULL_RESYNC" != "true" ]]; then
         if [[ "${PROJECT_OS}" == "linux" ]]; then
             OUTPUT_FILE_CMD="$full_output_file"
@@ -1898,6 +2103,10 @@ if [[ "$has_conf_changes" == "true" ]]; then
             run_1c_command "$COMMAND"
             load_exit_code=$?
         fi
+    fi
+    restore_load_hide_files
+    if [[ -n "${_LOAD_HIDE_PREV_TRAP:-}" ]]; then
+        eval "$_LOAD_HIDE_PREV_TRAP"
     fi
     if [[ $load_exit_code -ne 0 ]]; then
         log "ERROR" "Загрузка $CONFIG_PATH/ завершилась с ошибкой (код: $load_exit_code)"
@@ -2092,6 +2301,10 @@ if [[ -z "$LIST_FILE" \
         || { [[ "${conf_list_before_cache:-0}" -gt 0 ]] && [[ "$has_conf_changes" == "false" ]]; }; then
         write_loaded_marker "$(loaded_marker_path "$repo_path")"
     fi
+fi
+if [[ "$FULL_RESYNC" == "true" && "$SKIP_EXTENSIONS" == "true" ]]; then
+    log "WARN" "Full-resync с --no-extensions: маркер HEAD не обновлён (нужен для последующей заливки cfe.xml)."
+    log "WARN" "Дальше: ./load-changed-files.sh -U   # без --no-extensions; conf возьмёт кэш/маркер-fallback"
 fi
 
 # Опциональный запуск конфигуратора или клиента после загрузки

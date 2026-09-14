@@ -4,7 +4,7 @@ description: >-
   Загрузка conf/cfe.xml в dev-ИБ: предпочтительно из git; --no-extensions если агент не
   трогал cfe.xml (иначе чужие правки расширений блокируют загрузку); --list-file — фолбэк.
   Partial load, -U после правок метаданных.
-argument-hint: "[-C] [-U] [-u] [--no-close] [--no-extensions] [--reset-marker] [--verbose] [--list-file PATH]"
+argument-hint: "[-C] [-U] [-u] [-F] [--no-close] [--no-extensions] [--reset-marker] [--force-partial] [--verbose] [--list-file PATH]"
 allowed-tools:
   - Bash
   - Read
@@ -29,8 +29,9 @@ allowed-tools:
 
 - После правок в `conf/` или `cfe.xml/` — `./load-changed-files.sh` [`-U`]: git-изменения
   (working-tree + committed с маркера, см. ниже). **Предпочтительный режим.**
-- После merge другой ветки (например `agents/2` → текущая) — `./load-changed-files.sh -U`
-  (committed-изменения с маркера подхватятся автоматически).
+- После merge другой ветки — `./load-changed-files.sh -U` (маркер или fallback
+  `HEAD^1`). Если скрипт вышел 21 или в логе «Неизвестный объект» —
+  `./load-changed-files.sh -F -U`, не повторять doomed partial.
 - Только `conf/`, без `cfe.xml/` — `./load-changed-files.sh -U --no-extensions`.
 - Перед проверкой в dev-ИБ (форма, MCP, e2e) — обычно с `-U`.
 - После правок `cfe.xml/MCP_Сервер/` — `./load-changed-files.sh -U` или `./update-mcp-server.sh`.
@@ -67,32 +68,61 @@ Git-режим подхватывает **все** изменения в `cfe.xm
 
 ## Merge из других веток (слоты agents/N, хост)
 
-Git-режим учитывает не только working-tree, но и **committed**-изменения с маркера
-последней успешной загрузки: `git diff <marker>..HEAD` (включая merge).
+Git-режим: working-tree **плюс** committed с маркера последней успешной
+загрузки (`git diff <marker>..HEAD`, включая merge).
 
-Маркер: `.tmp/load-cache/loaded-head-<имя_ИБ>.sha` — SHA-1 `HEAD` на момент успешной
-загрузки committed-изменений. Per ИБ; в слоте `/work` — свой маркер (изолирован от хоста).
+Маркер: `.tmp/load-cache/loaded-head-<имя_ИБ>.sha` — SHA `HEAD` **после
+успешной заливки файлов**. Per ИБ; слот `/work` изолирован от хоста.
 
-**Обновляется**, если загрузка успешна, были committed-изменения, без `--list-file`
-и без `--no-extensions`.
+**Не пиши в маркер текущий HEAD до загрузки.** Это обнуляет committed-diff:
+скрипт скажет «изменений нет» и при `-U` сделает только UpdateDB — ИБ останется
+старой. Выглядит как успех, файлы merge не попали в конфигуратор.
 
-**Не обновляется**, если грузилось только из working-tree или через `--list-file` /
-`--no-extensions` — следующий запуск снова увидит committed-diff.
+### Что делает скрипт сам
 
-**Первый запуск** без маркера — только working-tree (как раньше). Перед первым merge
-запиши маркер вручную или выполни успешную полную загрузку после merge:
+- Нет маркера и `HEAD` — merge-коммит → граница = **первый родитель** (`HEAD^1`),
+  дельта merge попадает в список. WARN в логе.
+- После merge в списке есть `Configuration.xml` и много файлов / новые корневые
+  XML объектов → **exit 21**, не начинает десятки минут doomed partial.
+  Канон: `-F -U`. Обход, если ИБ уже синхронна: `--force-partial`.
+- Пути `conf/`/`cfe.xml/` есть в индексе и нет на диске (NTFS case-fold после
+  merge) → `git restore --worktree`, иначе они выпадут из listFile.
+- `--reset-marker` на чистом дереве **не** заливает merge (удаляет маркер).
+  Скрипт после сброса всё равно возьмёт `HEAD^1`, если HEAD — merge.
+- `-F --no-extensions` **не** сдвигает маркер (чтобы следующий `-U` без флага
+  подхватил `cfe.xml/`).
+
+### Канон после merge
 
 ```bash
-git rev-parse HEAD > .tmp/load-cache/loaded-head-<имя_ИБ>.sha
+# Обычный случай, маркер уже был на предке: git-discovery + UpdateDB
+./load-changed-files.sh -U
+
+# ИБ отстала / exit 21 / лог «Неизвестный объект» / «Неверный путь к данным»:
+./load-changed-files.sh -F -U
+# Битую типовую форму прячет LOAD_HIDE_FILES в .env (УНФ: РегистрацияСчетовФактурНаАванс).
+
+# Только conf, затем расширения отдельным запуском:
+./load-changed-files.sh -F -U --no-extensions
+./load-changed-files.sh -U
 ```
 
-**Сброс** (rebase, reset, force-push, принудительный resync):
+Стоп-сигнал: `Загрузка пропущена; только UpdateDB` сразу после merge при
+ненулевой дельте `conf/` — это **не** синхронизация. Смотри exit 21.
+
+**Обновление маркера:** успешная загрузка committed-изменений, без `--list-file`
+и без `--no-extensions`. `--list-file` / `--no-extensions` маркер не двигают
+(кроме предупреждения после `-F --no-extensions`).
+
+**Сброс** (rebase, reset, force-push, когда SHA маркера мёртв):
 
 ```bash
-./load-changed-files.sh --reset-marker -U
+./load-changed-files.sh --reset-marker
+# затем -U или -F -U; не ожидай, что один --reset-marker -U зальёт merge на чистом дереве
+# без fallback HEAD^1 (fallback есть, если HEAD — merge).
 ```
 
-Env: `RESET_LOAD_MARKER=true`.
+Env: `RESET_LOAD_MARKER=true`, `LOAD_HIDE_FILES`, `FORCE_PARTIAL=true`.
 
 ## Когда НЕ использовать
 
@@ -148,8 +178,11 @@ Env: `RESET_LOAD_MARKER=true`.
 # Только основная конфигурация, без расширений
 ./load-changed-files.sh -U --no-extensions
 
-# После merge: сброс маркера + полная перезаливка committed-изменений
-./load-changed-files.sh --reset-marker -U
+# ИБ отстала от диска после merge (новые объекты, exit 21)
+./load-changed-files.sh -F -U
+
+# Partial с Configuration.xml после merge всё же нужен (ИБ уже синхронна)
+./load-changed-files.sh -U --force-partial
 ```
 
 ### Явный список (`--list-file`, фолбэк)
@@ -186,7 +219,9 @@ cfe.xml/MCP_Сервер/…/Module.bsl
 | `--force-configuration` | Всегда грузить `Configuration.xml` (остальные файлы — по кэшу) |
 | `--list-file PATH` | Фолбэк: явный список (заменяет git); `PATH=-` для stdin |
 | `--no-extensions` | Только `conf/`; обязателен, если агент не трогал `cfe.xml/` (env: `SKIP_EXTENSIONS=true`) |
-| `--reset-marker` | Сбросить маркер HEAD последней загрузки committed-изменений (env: `RESET_LOAD_MARKER=true`) |
+| `--reset-marker` | Сбросить файл маркера (rebase/мёртвый SHA). На merge сам по себе не заменяет `-F` |
+| `--force-partial` | Не отменять partial с `Configuration.xml` после merge (env: `FORCE_PARTIAL=true`) |
+| `-F`, `--full-resync` | Полная загрузка `conf/` без partial + UpdateDB; когда ИБ отстала от диска |
 | `--verbose` | Полный лог (список файлов, тайминги, команды 1С). По умолчанию — краткий вывод для агентов; `-H`/`-C` включают подробный |
 | `-h`, `--help` | Справка |
 
@@ -197,24 +232,32 @@ cfe.xml/MCP_Сервер/…/Module.bsl
 Старый `configuration-<ИБ>-<conf>.sha256` мигрируется автоматически.
 Сброс: удалить manifest или каталог `.tmp/load-cache/`; `--force-configuration` — только для `Configuration.xml`.
 `SKIP_CONFIGURATION_CACHE=true` в `.env` — отключить кэш для всех файлов conf.
+`LOAD_HIDE_FILES` — «;»-список путей относительно корня: на время designer
+переименовать в `*.hidden-for-load` (УНФ: форма `РегистрацияСчетовФактурНаАванс`).
 
 Маркер merge: `.tmp/load-cache/loaded-head-<ИБ>.sha` — см. раздел «Merge из других веток».
 
 ## Алгоритм (кратко)
 
-1. Список: git (working-tree + committed с маркера) **или** `--list-file` (фолбэк).
+1. NTFS: пути индекса без файла на диске → restore. Список: git (working-tree +
+   committed с маркера или `HEAD^1` на merge) **или** `--list-file`.
 2. **Rewrite:** `…/Forms/…/Ext/Form/Module.bsl` (и `CommonForms/…`) → родительский
    `Forms/Имя.xml` / `CommonForms/Имя.xml` — баг платформы partial listFile
    (`…Form.…Ext`). Родитель forced против кэша. См. memory
    `partial-load-form-module-bsl`.
 3. Файлы conf из списка с неизменённым SHA-256 (кэш manifest) — убрать из listfile.
-4. Partial `LoadConfigFromFiles` + listfile для основной конфигурации.
-5. Изменённые расширения — загрузка каталога расширения целиком (пропуск при `--no-extensions`).
-6. При `-U` — `/UpdateDBCfg`; после успешной загрузки conf — обновить кэш хешей.
-7. При успешной загрузке committed-изменений (без `--list-file` / `--no-extensions`) —
+4. Merge + `Configuration.xml` в списке и новые объекты / длинный список →
+   **exit 21** (канон `-F`), если нет `--force-partial`.
+5. Partial `LoadConfigFromFiles` + listfile **или** `-F` без listfile. Перед
+   вызовом — `LOAD_HIDE_FILES` (`.hidden-for-load`, trap на возврат).
+6. Изменённые расширения — загрузка каталога расширения целиком (пропуск при `--no-extensions`).
+7. При `-U` — `/UpdateDBCfg`; после успешной загрузки conf — обновить кэш хешей.
+8. При успешной загрузке committed-изменений (без `--list-file` / `--no-extensions`) —
    обновить маркер HEAD.
 
-Если нечего грузить — шаги 3–4 пропускаются; при `-U`/`-C` всё равно выполняется `/UpdateDBCfg` основной конфигурации (даже если все файлы отфильтрованы кэшем). Без `-U`/`-C` — `exit 0`. При `-H`/`-C` дополнительно закрывается/открывается конфигуратор или клиент.
+Если нечего грузить, а merge тронул `conf/`/`cfe.xml/` и список пуст не из‑за кэша —
+**exit 21**, не UpdateDB. Иначе при `-U`/`-C` выполняется `/UpdateDBCfg`. Без `-U`/`-C` —
+`exit 0`. При `-H`/`-C` дополнительно закрывается/открывается конфигуратор или клиент.
 
 ## Связанные материалы
 
