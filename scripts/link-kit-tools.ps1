@@ -94,7 +94,7 @@ if (-not (Test-Path $consumerTools)) {
 }
 
 $local = Read-LocalNames $LocalManifest
-$dirNames = @("mailbox", "bsl-check", "sandbox", "load-changed-files")
+$dirNames = @("mailbox", "bsl-check", "sandbox", "load-changed-files", "mcp-call")
 
 foreach ($name in $dirNames) {
     if ($local.ContainsKey($name)) {

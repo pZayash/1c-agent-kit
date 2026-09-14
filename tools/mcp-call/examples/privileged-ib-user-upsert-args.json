@@ -1,0 +1,8 @@
+{
+  "login": "mcp_smoke_agent",
+  "fullName": "MCP Dev Agent",
+  "password": "",
+  "standardAuth": true,
+  "showInLoginList": true,
+  "roles": []
+}

@@ -125,6 +125,15 @@ web/build/autotest:
 
 Enforced cursor-rule: `cursor/rules/commit-hygiene.mdc` (`alwaysApply: true`).
 
+## Срез mcp-config (2026-09-09)
+
+| Файл | Зачем |
+| --- | --- |
+| [mcp-config.md](mcp-config.md) | `.mcp.json` канон: committable, `${VAR}` из `.env`; discovery; tools `mcp-call` |
+
+Tool: `harness/tools/mcp-call/` (link-kit-tools). Потребитель: `.mcp.json`,
+`.env` значения, `tools/mcp-call-examples/`.
+
 ## Пока в репо потребителя
 
 Печать, MCP, слоты, OpenSpec, `tools/`, skills. Индекс потребителя —

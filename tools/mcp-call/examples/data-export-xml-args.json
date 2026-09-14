@@ -1,0 +1,11 @@
+{
+  "refs": [
+    {
+      "_ref": "Catalog.Валюты:83015d87-54e3-11f1-9802-00505691c6db"
+    }
+  ],
+  "dry_run": false,
+  "max_refs": 100,
+  "include_dependencies": true,
+  "max_depth": 1
+}

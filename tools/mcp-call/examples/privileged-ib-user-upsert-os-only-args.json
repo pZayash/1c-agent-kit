@@ -1,0 +1,8 @@
+{
+  "login": "ФамилияИИ",
+  "fullName": "Фамилия Имя Отчество",
+  "password": "",
+  "standardAuth": false,
+  "showInLoginList": false,
+  "roles": []
+}

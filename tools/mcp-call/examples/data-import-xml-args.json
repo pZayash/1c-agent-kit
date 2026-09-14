@@ -1,0 +1,5 @@
+{
+  "use_data_exchange_mode": true,
+  "continue_on_error": false,
+  "only_new_and_changed": false
+}
