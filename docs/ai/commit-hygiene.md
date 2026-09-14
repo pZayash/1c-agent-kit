@@ -24,7 +24,9 @@ Kit `1c-agent-kit` — **публичный** репозиторий. Всё, ч
   `D:\dev\proj\…`, `D:\git-data\repositories\team\proj.git` — можно.
 - **Кодовые имена** проектов, ИБ, организации, префикс объектов
   пилота, имена dev/prod баз. Generic `proj`, `org`/`ORG`, `acme_`,
-  `<PROJECT_PREFIX>_`, `dev_db`/`prod_db` — можно.
+  `<PROJECT_PREFIX>_`, `dev_db`/`prod_db` — можно. Префикс `яя_` —
+  тоже generic: сортировочный (объекты уезжают в конец списка),
+  встречается в разных проектах, организацию не идентифицирует.
 - **Внутренние git-ремоуты и ветки**, имена worktree. Generic
   `origin/dev`, `upstream/dev`, `wt-a` — можно.
 - **Ссылки на внутренние файлы** (доки/промпты, названные по
@@ -51,7 +53,7 @@ Kit `1c-agent-kit` — **публичный** репозиторий. Всё, ч
 | Подключение к ИБ | `C:/base/proj` |
 | Кодовое имя проекта | `proj` |
 | Кодовое имя организации | `org` / `ORG` |
-| Префикс объектов | `<PROJECT_PREFIX>_` (или `acme_`) |
+| Префикс объектов | `<PROJECT_PREFIX>_` (или `acme_`, `яя_`) |
 | Имя базы MCP | `dev_db`, `prod_db` |
 | Git-ремоут/ветка | `origin/dev`, `upstream/dev` |
 | Имя worktree | `wt-a` |
@@ -59,7 +61,8 @@ Kit `1c-agent-kit` — **публичный** репозиторий. Всё, ч
 
 Generic-примеры, которые **можно** (не идентифицируют): `srv01` как
 `-InfoBaseServer "srv01"`, `Admin`/`secret` как пароль в примере,
-`127.0.0.1`, `host.docker.internal`, `MyApp_Dev`, `MyDB`.
+`127.0.0.1`, `host.docker.internal`, `MyApp_Dev`, `MyDB`, префикс
+`яя_` (сортировочный, используется в разных проектах).
 
 ## Self-check перед коммитом в kit
 
