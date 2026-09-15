@@ -9,7 +9,7 @@
 #   SKIP_VERIFY=1
 #   SKIP_DEPS=1       — не звать init-kit-deps
 #   SKIP_SECTIONS=1   — не патчить managed-секции AGENTS.md
-#   LAYOUT_ENGINE=1   — раскладка через tools/kit-layout (вместо link-скриптов)
+#   LEGACY_LINKS=1    — раскладка legacy link-скриптами (дефолт: kit-layout)
 #   HARNESS_REL=harness
 set -euo pipefail
 
@@ -31,7 +31,7 @@ if kit_is_windows; then
   [[ "$SKIP_VERIFY" == "1" ]] && args+=(-SkipVerify)
   [[ "${SKIP_DEPS:-0}" == "1" ]] && args+=(-SkipDeps)
   [[ "${SKIP_SECTIONS:-0}" == "1" ]] && args+=(-SkipSections)
-  [[ "${LAYOUT_ENGINE:-0}" == "1" ]] && args+=(-LayoutEngine)
+  [[ "${LEGACY_LINKS:-0}" == "1" ]] && args+=(-LegacyLinks)
   exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi
 
@@ -40,10 +40,10 @@ HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
 
 [[ -d "$HARNESS_ROOT" ]] || { echo "missing harness: $HARNESS_ROOT (git submodule update --init?)" >&2; exit 1; }
 
-if [[ "${LAYOUT_ENGINE:-0}" == "1" ]]; then
+if [[ "${LEGACY_LINKS:-0}" != "1" ]]; then
   echo "=== kit-layout (engine) ==="
   PY="$(command -v python || command -v python3 || true)"
-  [[ -n "$PY" ]] || { echo "LAYOUT_ENGINE needs python on PATH" >&2; exit 1; }
+  [[ -n "$PY" ]] || { echo "kit-layout needs python on PATH (or LEGACY_LINKS=1)" >&2; exit 1; }
   lcmd=apply
   [[ "$DRY_RUN" == "1" ]] && lcmd=plan
   HARNESS_REL="$HARNESS_REL" "$PY" "$HARNESS_ROOT/tools/kit-layout/kit_layout.py" "$lcmd" "$CONSUMER_ROOT"

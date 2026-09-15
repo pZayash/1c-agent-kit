@@ -19,7 +19,7 @@ param(
 
     [switch]$SkipSections,
 
-    [switch]$LayoutEngine
+    [switch]$LegacyLinks
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,11 +38,11 @@ $common = @{
 }
 if ($DryRun) { $common["DryRun"] = $true }
 
-if ($LayoutEngine) {
+if (-not $LegacyLinks) {
     Write-Host "=== kit-layout (engine) ==="
     $py = Get-Command python -ErrorAction SilentlyContinue
     if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
-    if (-not $py) { throw "LayoutEngine needs python on PATH" }
+    if (-not $py) { throw "kit-layout needs python on PATH (or -LegacyLinks)" }
     $lcmd = "apply"
     if ($DryRun) { $lcmd = "plan" }
     $env:HARNESS_REL = $HarnessRel

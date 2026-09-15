@@ -47,8 +47,9 @@ LAYOUT_ENGINE=1 bash harness/scripts/bootstrap-kit.sh .
 python harness/tools/kit-layout/kit_layout.py verify .
 ```
 
-Паритет с link-скриптами проверен синтетикой (440 путей идентично);
-дефолт bootstrap — пока legacy-скрипты.
+Паритет с link-скриптами проверен синтетикой (440 путей идентично) и на
+живом потребителе (нулевой plan). Движок — **дефолт** bootstrap; откат на
+legacy-скрипты: `LEGACY_LINKS=1` / `-LegacyLinks`.
 
 Движок безопасен при запуске из другого namespace (Linux sandbox по
 Windows-раскладке): ссылка, указывающая вне consumer root, помечается

@@ -313,7 +313,7 @@ def main(argv=None):
     p.add_argument('--layout', default=str(Path(__file__).with_name('layout.json')))
     p.add_argument('--strict', action='store_true',
                    help='plan: exit 1 if any pending action (parity gate)')
-    a = p.parse_args(argv)
+    a = p.parse_intermixed_args(argv)
 
     layout = json.loads(Path(a.layout).read_text(encoding='utf-8'))
     ctx = Ctx(a.consumer_root, a.harness_rel, dry_run=(a.command == 'plan'))
