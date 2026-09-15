@@ -41,6 +41,7 @@ check_link() {
 check_link "$CONSUMER_ROOT/.cursor/skills/handoff" "skills/handoff"
 check_link "$CONSUMER_ROOT/.cursor/skills/mailbox" "skills/mailbox"
 check_link "$CONSUMER_ROOT/tools/mailbox" "tools/mailbox"
+check_link "$CONSUMER_ROOT/tools/answer42" "tools/answer42"
 
 if [[ -z "${local_tools[load-changed-files]:-}" ]]; then
   check_link "$CONSUMER_ROOT/tools/load-changed-files" "tools/load-changed-files"

@@ -116,6 +116,29 @@ bash tools/mcp-call/mcp-call.sh --server dev_db_privileged \
   --timeout 600 extension_load_post @.tmp/extension-load.json
 ```
 
+## StreamableHTTP-серверы (`/mcp` без `/hs/`)
+
+Серверы вида `http://host:port/mcp` (например, Answer42, qmd) отличаются от
+HTTP-сервисов 1С:
+
+- endpoint используется **как есть** (суффикс `/rpc` не добавляется);
+- запрос идёт с `Accept: application/json, text/event-stream` — без
+  `text/event-stream` такой сервер отвечает `406`;
+- ответ приходит SSE-потоком (`event: message` + `data: {…}`) — CLI достаёт
+  сообщение с нужным `id`.
+
+Определение — по форме URL (та же эвристика, что в
+[`test-connected-mcp.py`](test-connected-mcp.py)): путь содержит `/hs/` → 1С
+JSON-RPC, иначе оканчивается на `/mcp` → streamable.
+
+## Подстановка `${VAR}` не выполняется
+
+`mcp-call.sh` читает `url` и `headers` из конфига **буквально**: `${VAR}` из
+`.env` он не раскрывает. Для IDE-клиентов (Cursor, VS Code, Claude Code)
+канон — [`.mcp.json`](../../.mcp.json) с плейсхолдерами, для CLI тот же сервер
+нужно продублировать literal-значениями в `.cursor/mcp.json` (файл локальный,
+в `.gitignore`).
+
 ## JWT и диагностика 401
 
 | Симптом | Что проверить |

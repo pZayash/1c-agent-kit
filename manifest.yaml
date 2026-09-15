@@ -23,3 +23,5 @@ options:
     default: separate       # first-install: .cfe + LoadCfg, не XML dump 2.21
   pi:
     default: optional       # harness pi: link .pi/{skills,prompts,extensions}
+  answer42:
+    default: optional       # UI 1С через клиент тестирования (tools/answer42)

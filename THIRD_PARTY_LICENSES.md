@@ -71,6 +71,7 @@ under the repository MIT license.
 | `tree-sitter-bsl` (<https://github.com/alkoleft/tree-sitter-bsl>) | MIT | Dependency reference only. |
 | `rtk` (<https://github.com/rtk-ai/rtk>) | Apache-2.0 | Operator installs manually; kit no longer auto-downloads it. |
 | `qmd` (fork <https://github.com/pZayash/qmd>) | MIT | Referenced in docs only; upstream (c) Tobi Lutke. |
+| `answer42` (<https://gitlab.com/platform42/answer42-mcp>) | MIT | UI-driver 1С через клиент тестирования: ставится из PyPI в venv потребителя (`tools/answer42/`); не вендорится. |
 
 ## MIT license text
 

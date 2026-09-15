@@ -9,9 +9,9 @@
 
 - `.mcp.json` — **коммитится**, содержит только плейсхолдеры
   `${VAR}` / `${VAR:-default}` (URL, токены).
-- Значения — в `.env` (gitignored) или окружении. Подстановку делает
-  `mcp-call.sh` (`.env` подгружается автоматически, `MCP_ENV_FILE` для
-  другого пути).
+- Значения — в `.env` (gitignored) или окружении. Подстановку `${VAR}`
+  делают IDE-клиенты; **`mcp-call.sh` её не делает** — ему нужен literal-конфиг
+  (`.cursor/mcp.json`), см. [tools/mcp-call/README.md](../tools/mcp-call/README.md).
 - `.cursor/mcp.json` — legacy fallback (literal-токены, в `.gitignore`);
   читается с warning, пока Cursor не выведен из эксплуатации.
 

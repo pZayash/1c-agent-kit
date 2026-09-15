@@ -23,3 +23,5 @@ tools/cc-1c-skills/
 .idea/
 .vscode/
 *.log
+__pycache__/
+*.pyc

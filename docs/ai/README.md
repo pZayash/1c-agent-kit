@@ -143,6 +143,16 @@ Tool: `harness/tools/mcp-call/` (link-kit-tools). Потребитель: `.mcp.
 Overlay: `harness/pi/` (`extensions/auto-session-title.ts`), линк —
 `scripts/link-pi-roots.*` (в `bootstrap-kit`).
 
+## Срез answer42 (2026-09-14)
+
+| Файл | Зачем |
+| --- | --- |
+| [answer42.md](answer42.md) | UI 1С через клиент тестирования (Answer42): когда применять, цикл агента, безопасность |
+
+Tool: `harness/tools/answer42/` (`answer42.ps1` / `answer42.sh`, `smoke.py`),
+skill: `harness/cursor/skills/answer42-ui/`. Потребитель: `.env` ключи
+`ANSWER42_*`, запись в `.mcp.json`, сервис на `127.0.0.1:9010`.
+
 ## Пока в репо потребителя
 
 Печать, MCP, слоты, OpenSpec, `tools/`, skills. Индекс потребителя —

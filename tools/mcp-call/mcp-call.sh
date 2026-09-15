@@ -20,6 +20,7 @@ URL=""
 CONFIG=""
 TIMEOUT="$DEFAULT_TIMEOUT"
 REQUEST_ID=1
+STREAMABLE=0
 FAIL_ON_SUCCESS_FALSE=true
 TOOL=""
 ARGS_JSON=""
@@ -76,8 +77,20 @@ default_config_path() {
     fi
 }
 
+# StreamableHTTP-сервер (не 1С HTTP-сервис): endpoint как есть, Accept с SSE.
+# Та же эвристика, что в test-connected-mcp.py (_detect_kind):
+# /hs/mcp → 1С JSON-RPC (/rpc), иначе путь .../mcp → streamable.
+is_streamable_url() {
+    local url="$1"
+    [[ "$url" != *"/hs/"* && "${url%/}" == *"/mcp" ]]
+}
+
 normalize_rpc_url() {
     local base="${1%/}"
+    if is_streamable_url "$base"; then
+        printf '%s' "$base"
+        return 0
+    fi
     if [[ "$base" == *"$RPC_PATH" ]]; then
         printf '%s' "$base"
     else
@@ -113,6 +126,8 @@ resolve_endpoint() {
 
     if [[ -n "$URL" ]]; then
         ENDPOINT_URL="$(normalize_rpc_url "$(url_for_sandbox_if_needed "$URL")")"
+        STREAMABLE=0
+        if is_streamable_url "$ENDPOINT_URL"; then STREAMABLE=1; fi
         return 0
     fi
 
@@ -142,6 +157,8 @@ resolve_endpoint() {
     )
 
     ENDPOINT_URL="$(normalize_rpc_url "$(url_for_sandbox_if_needed "$base_url")")"
+    STREAMABLE=0
+    if is_streamable_url "$ENDPOINT_URL"; then STREAMABLE=1; fi
     return 0
 }
 
@@ -149,13 +166,18 @@ resolve_endpoint() {
 post_jsonrpc_file() {
     local url="$1"
     local payload_file="$2"
+    # StreamableHTTP требует Accept с text/event-stream, иначе 406 (JSON-RPC 1С — нет)
+    local accept="application/json"
+    if [[ "${STREAMABLE:-0}" == "1" ]]; then
+        accept="application/json, text/event-stream"
+    fi
     local -a curl_args=(
         -sS
         -X POST
         "$url"
         --data-binary "@${payload_file}"
         -H "Content-Type: application/json; charset=utf-8"
-        -H "Accept: application/json"
+        -H "Accept: $accept"
         --max-time "$TIMEOUT"
         -w $'\n%{http_code}'
     )
@@ -178,6 +200,16 @@ post_jsonrpc_file() {
         eprint "HTTP $http_code при обращении к $url"
         [[ -n "$body" ]] && eprint "$body"
         return "$EXIT_NETWORK_ERROR"
+    fi
+
+    # StreamableHTTP отвечает SSE-потоком; достаём сообщение с нашим id
+    if [[ "$body" == *"data:"* ]]; then
+        local unwrapped
+        unwrapped="$(printf '%s' "$body" | tr -d '\r' | sed -n 's/^data: //p' \
+            | jq -s --argjson id "$REQUEST_ID" '[.[] | select(.id == $id)] | last // empty' 2>/dev/null || true)"
+        if [[ -n "$unwrapped" ]]; then
+            body="$unwrapped"
+        fi
     fi
 
     if ! jq -e . >/dev/null 2>&1 <<<"$body"; then
