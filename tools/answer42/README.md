@@ -37,6 +37,39 @@ Windows-вариант создаёт `.venv-answer42` в корне проек�
 `answer42[screenshot,windows-window-control]`. Каталог venv обязан быть в
 `.gitignore` потребителя.
 
+### Сборка из форка
+
+Если нужны локальные патчи, ставится не PyPI-релиз, а форк
+(`<https://github.com/pZayash/answer42-mcp>`, ветка `kpsr`; ветка `beta` —
+зеркало upstream). Мотив и состав патчей — `FORK.md` в чекауте форка.
+
+Важно: чек-аут и venv должны лежать в **латинском пути** — кириллица в пути
+ломает editable-установку (`.pth` с не-ASCII путём не подхватывается, `import
+mcp_1c` падает).
+
+```bash
+# чекаут: C:\GitHub\pzayash\answer42-mcp
+python -m venv .venv
+.venv/Scripts/python.exe -m pip install -e ".[screenshot,windows-window-control]"
+
+# в editable-сборке нет готовых CF (их инжектит CI) — собираем из XML локально,
+# иначе start_session не найдёт CF при рабочем каталоге вне чекаута
+.venv/Scripts/python.exe scripts/build_cf.py src/cf src/mcp_1c/assets/MCPTestManager.cf
+.venv/Scripts/python.exe scripts/build_cf.py src/client_cf src/mcp_1c/assets/MCPTestClient.cf
+```
+
+Затем `ANSWER42_BIN` в `.env` потребителя указывает на бинарь venv форка.
+Обновление с upstream:
+
+```bash
+git fetch upstream --tags && git switch kpsr && git rebase <новый-тег>
+git push --force-with-lease origin kpsr
+```
+
+Проверка патча: ответ на заведомо битую ссылку
+(`open_navigation_link "e1cib/list/Catalog.Missing"`) должен содержать текст
+ошибки 1С, а не голое `Error executing tool ...`.
+
 ## Ключи `.env`
 
 | Ключ | Зачем |
@@ -45,7 +78,7 @@ Windows-вариант создаёт `.venv-answer42` в корне проек�
 | `ANSWER42_ACCOUNT_ID` | namespace credential-стора; **должен совпадать** с account в `~/.answer42-credentials.json` |
 | `ANSWER42_TOKEN` | Bearer для StreamableHTTP; только в `.env` |
 | `ANSWER42_EXTRA_ARGS` | доп. аргументы сервера; по умолчанию `--disable-rag` — RAG задерживает готовность |
-| `ANSWER42_BIN` | опционально: путь к `answer42(.exe)`, если venv нестандартный |
+| `ANSWER42_BIN` | опционально: путь к `answer42(.exe)` — напр. бинарь venv форк-сборки |
 
 Схема ключей — [`.env.example`](../../.env.example) потребителя.
 
@@ -138,6 +171,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
   `full`, `all`). `credentials_list` рекомендуется исключать из выдачи агенту.
 - `1С window geometry was not detected` — скриншот уходит в `fallback:
   full_display` (снимок всего экрана), это не ошибка запуска.
+- **Форк-сборка требует латинского пути** (editable `.pth` с кириллицей не
+  читается) и локальной сборки CF в `src/mcp_1c/assets/`.
+- **После неудачной навигации остаётся модальное окно ошибки** — следующая
+  навигация в той же сессии падает. Закрыть окно (`click_button` с `OK`) или
+  перезапустить сессию.
+- **`stop`/`restart`:** pid в pid-файле — лаунчер, слушает порт другой pid,
+  поэтому останавливаем и по pid, и по владельцу порта (`Get-NetTCPConnection`).
 
 ## Ограничения upstream (0.5.3)
 

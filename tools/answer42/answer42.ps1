@@ -106,17 +106,40 @@ function Get-PortState {
 }
 
 function Stop-Answer42Http {
-    if (-not (Test-Path -LiteralPath $pidFile)) {
-        Write-Host "PID-файла нет - HTTP-сервер Answer42 не запущен"
-        return
+    $config = Get-Config
+    $stopped = @()
+    # pid-файл может содержать pid лаунчера (уже вышел) — ошибки taskkill не фатальны
+    if (Test-Path -LiteralPath $pidFile) {
+        $pidValue = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+        if ($pidValue) {
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            & taskkill /PID $pidValue /T /F *> $null
+            $ErrorActionPreference = $previous
+            $stopped += "pid $pidValue"
+        }
+        Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
     }
-    $pidValue = (Get-Content -LiteralPath $pidFile -Raw).Trim()
-    if ($pidValue) {
-        # /T - вместе с процессами 1С сессий, если они остались
-        & taskkill /PID $pidValue /T /F 2>$null | Out-Null
+    # добиваем того, кто реально слушает порт (pid лаунчера и рабочего процесса различаются)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $owners = Get-NetTCPConnection -LocalPort ([int]$config.Port) -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique
+    $ErrorActionPreference = $previous
+    foreach ($owner in $owners) {
+        if ($owner -and $owner -ne $PID) {
+            $ErrorActionPreference = "Continue"
+            & taskkill /PID $owner /T /F *> $null
+            $ErrorActionPreference = $previous
+            $stopped += "port $($config.Port) → pid $owner"
+        }
     }
-    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
-    Write-Host "Answer42 HTTP остановлен (pid $pidValue)"
+    if ($stopped.Count -gt 0) {
+        Write-Host "Answer42 HTTP остановлен ($($stopped -join ', '))"
+    }
+    else {
+        Write-Host "Answer42 HTTP не запущен"
+    }
 }
 
 switch ($Action) {
