@@ -51,6 +51,7 @@
     { "id": "claude-commands", "kind": "alias", "source": ".cursor/commands", "target": ".claude/commands" },
     { "id": "pi-skills", "kind": "alias", "source": ".cursor/skills", "target": ".pi/skills" },
     { "id": "pi-prompts", "kind": "alias", "source": ".cursor/commands", "target": ".pi/prompts" },
-    { "id": "pi-extensions", "kind": "alias", "source": "harness/pi/extensions", "target": ".pi/extensions" }
+    { "id": "pi-extensions", "kind": "alias", "source": "harness/pi/extensions", "target": ".pi/extensions" },
+    { "id": "kilo-plugin", "kind": "alias", "source": "harness/kilo/plugin", "target": ".kilo/plugin" }
   ]
 }

@@ -70,10 +70,12 @@ python harness/tools/kit-agent/kit_agent.py check-command "git add harness/x"  #
 - **pi** (TUI и RPC/ACP — bb, Zed): `pi/extensions/kit-hooks.ts` →
   `.pi/extensions`; session-start подсказки (notify + разовый инжект),
   block/warn на bash-команды по guards, команда `/kit`.
+- **Kilo Code / OpenCode**: `kilo/plugin/kit-hooks.ts` → `.kilo/plugin`;
+  guard-block через `tool.execute.before`, session-start →
+  `experimental.chat.system.transform` (OpenCode-совместимый plugin API).
 - **Универсальный**: managed-секция `kit-agent-loop` в AGENTS.md
   (инструкция прогнать session-start и сверяться с check-command) —
-  для Zed direct, Kilo и любых читателей AGENTS.md.
-- **Kilo Code / OpenCode** (в планах): plugin API, `.kilo/plugin/`.
+  для Zed direct, любых читателей AGENTS.md и headless-режимов.
 
 Parent git: `fatal: not a git repository: harness/../.git/modules/harness` —
 сначала `fix-harness-gitdir` (worktree file-gitdir):

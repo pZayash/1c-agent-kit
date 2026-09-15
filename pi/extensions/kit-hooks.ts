@@ -68,15 +68,25 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function runCoreSessionStart(cwd: string, onHint: (hint: string) => void): void {
-		if (!corePath) return;
+	function runCoreSessionStart(
+		cwd: string,
+		onHint: (hint: string) => void,
+	): void {
+		const core = corePath;
+		if (!core) return;
 		execFile(
 			"python",
-			[corePath, "session-start", "--root", cwd],
+			[core, "session-start", "--root", cwd],
 			{ timeout: CORE_TIMEOUT_MS },
 			(err, stdout) => {
-				if (err || !stdout || !stdout.trim()) return;
-				onHint(stdout.trim());
+				// Никогда не трогаем ctx/host-объекты здесь: после завершения
+				// сессии/команды они становятся stale. Только данные.
+				try {
+					if (err || !stdout || !stdout.trim()) return;
+					onHint(stdout.trim());
+				} catch {
+					/* no-op */
+				}
 			},
 		);
 	}
@@ -85,9 +95,16 @@ export default function (pi: ExtensionAPI) {
 		try {
 			init(ctx.cwd);
 			if (!corePath) return;
+			const hasUI = ctx.hasUI;
+			const ui = ctx.ui;
 			runCoreSessionStart(ctx.cwd, (hint) => {
 				pendingHint = hint;
-				if (ctx.hasUI) ctx.ui.notify(hint, "warning");
+				if (!hasUI) return;
+				try {
+					ui.notify(hint, "warning");
+				} catch {
+					/* stale ui — skip */
+				}
 			});
 		} catch {
 			/* no-op */
@@ -112,12 +129,20 @@ export default function (pi: ExtensionAPI) {
 			if (event.toolName !== "bash" || guards.length === 0) return undefined;
 			const cmd = (event.input as { command?: string })?.command;
 			if (!cmd) return undefined;
+			const hasUI = ctx.hasUI;
+			const ui = ctx.ui;
 			for (const { re, rule } of guards) {
 				if (!re.test(cmd)) continue;
 				if (rule.action === "block") {
 					return { block: true, reason: `BLOCK [${rule.id}]: ${rule.message}` };
 				}
-				if (ctx.hasUI) ctx.ui.notify(`WARN [${rule.id}]: ${rule.message}`, "warning");
+				if (hasUI) {
+					try {
+						ui.notify(`WARN [${rule.id}]: ${rule.message}`, "warning");
+					} catch {
+						/* stale ui — skip */
+					}
+				}
 			}
 		} catch {
 			/* no-op */
@@ -128,26 +153,40 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("kit", {
 		description: "kit-agent: прогнать session-start проверки harness",
 		handler: async (_args, ctx) => {
-			if (!corePath) init(ctx.cwd);
-			if (!corePath) {
-				if (ctx.hasUI) ctx.ui.notify("kit не подключен (нет harness/)", "info");
-				return;
+			try {
+				if (!corePath) init(ctx.cwd);
+				if (!corePath) {
+					if (ctx.hasUI) ctx.ui.notify("kit не подключен (нет harness/)", "info");
+					return;
+				}
+				const cwd = ctx.cwd;
+				const hasUI = ctx.hasUI;
+				const ui = ctx.ui;
+				const core = corePath;
+				execFile(
+					"python",
+					[core, "session-start", "--root", cwd],
+					{ timeout: CORE_TIMEOUT_MS },
+					(err, stdout) => {
+						// ctx в колбэке может быть stale — работаем только с
+						// зафиксированными hasUI/ui, любые сбои — no-op.
+						try {
+							if (!hasUI) return;
+							if (err) {
+								ui.notify("kit-agent: ошибка ядра (no-op)", "warning");
+							} else if (stdout && stdout.trim()) {
+								ui.notify(stdout.trim(), "warning");
+							} else {
+								ui.notify("kit-agent: harness в порядке", "info");
+							}
+						} catch {
+							/* stale ui — skip */
+						}
+					},
+				);
+			} catch {
+				/* no-op */
 			}
-			execFile(
-				"python",
-				[corePath, "session-start", "--root", ctx.cwd],
-				{ timeout: CORE_TIMEOUT_MS },
-				(err, stdout) => {
-					if (!ctx.hasUI) return;
-					if (err) {
-						ctx.ui.notify("kit-agent: ошибка ядра (no-op)", "warning");
-					} else if (stdout && stdout.trim()) {
-						ctx.ui.notify(stdout.trim(), "warning");
-					} else {
-						ctx.ui.notify("kit-agent: harness в порядке", "info");
-					}
-				},
-			);
 		},
 	});
 }

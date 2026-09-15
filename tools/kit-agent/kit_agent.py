@@ -22,12 +22,14 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 GUARDS_FILE = HERE / 'guards.json'
+GIT = shutil.which('git')  # None в контейнерах без git → git-проверки no-op
 
 
 def harness_root(root, harness_rel):
@@ -35,6 +37,8 @@ def harness_root(root, harness_rel):
 
 
 def git(root, *args):
+    if not GIT:
+        return None
     try:
         r = subprocess.run(['git', '-C', str(root), *args],
                            capture_output=True, text=True, timeout=15)
@@ -52,6 +56,8 @@ def cmd_session_start(a):
     if not harness.is_dir():
         hints.append(f'harness/ отсутствует в {root} — kit не подключен '
                      f'(git submodule update --init).')
+    elif not GIT:
+        pass  # git недоступен (sandbox/контейнер) — git-проверки no-op
     else:
         head = git(harness, 'rev-parse', 'HEAD')
         if head is None:
