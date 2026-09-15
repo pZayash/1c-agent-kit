@@ -77,4 +77,7 @@ Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {
     Write-Host "LINK: $name"
 }
 
+# Prune kit-owned junctions whose skill vanished upstream (tombstones).
+Remove-KitStaleLinks -LinkRoot $cursorSkills -KitSource $kitSkills -Local $local -DryRun:$DryRun
+
 Write-Host "Done."

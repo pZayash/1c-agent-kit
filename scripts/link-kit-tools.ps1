@@ -116,4 +116,7 @@ if (-not $local.ContainsKey("git-partial-stage.py")) {
     }
 }
 
+# Prune kit-owned links whose tool vanished upstream (tombstones).
+Remove-KitStaleLinks -LinkRoot $consumerTools -KitSource $kitTools -Local $local -DryRun:$DryRun
+
 Write-Host "Done."

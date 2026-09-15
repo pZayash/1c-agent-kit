@@ -41,4 +41,7 @@ for d in "$KIT_SKILLS"/*; do
   kit_ln_sfn "$d" "$CURSOR_SKILLS/$name"
 done
 
+# Prune kit-owned links whose skill vanished upstream (tombstones).
+kit_prune_stale_links "$CURSOR_SKILLS" "$KIT_SKILLS" local_names
+
 echo "Done."

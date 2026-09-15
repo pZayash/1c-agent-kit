@@ -98,6 +98,7 @@ if (Test-Path $skillsSrc) {
         }
         New-DirJunction (Join-Path $skillsDst $_.Name) $_.FullName $_.Name
     }
+    Remove-KitStaleLinks -LinkRoot $skillsDst -KitSource $skillsSrc -Local $local -DryRun:$DryRun
 }
 
 $rulesSrc = Join-Path $overlay "rules"
@@ -110,6 +111,7 @@ if (Test-Path $rulesSrc) {
         }
         New-FileLink (Join-Path $rulesDst $_.Name) $_.FullName $_.Name
     }
+    Remove-KitStaleLinks -LinkRoot $rulesDst -KitSource $rulesSrc -Local $local -DryRun:$DryRun
 }
 
 $cmdSrc = Join-Path $overlay "commands"
@@ -122,6 +124,7 @@ if (Test-Path $cmdSrc) {
         }
         New-FileLink (Join-Path $cmdDst $_.Name) $_.FullName $_.Name
     }
+    Remove-KitStaleLinks -LinkRoot $cmdDst -KitSource $cmdSrc -Local $local -DryRun:$DryRun
 }
 
 Write-Host "Done."

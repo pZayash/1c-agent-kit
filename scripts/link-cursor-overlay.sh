@@ -42,6 +42,7 @@ if [[ -d "$OVERLAY/skills" ]]; then
     fi
     kit_ln_sfn "$d" "$CONSUMER_ROOT/.cursor/skills/$name"
   done
+  kit_prune_stale_links "$CONSUMER_ROOT/.cursor/skills" "$OVERLAY/skills" local_names
 fi
 
 if [[ -d "$OVERLAY/rules" ]]; then
@@ -54,6 +55,7 @@ if [[ -d "$OVERLAY/rules" ]]; then
     fi
     kit_ln_sfn "$f" "$CONSUMER_ROOT/.cursor/rules/$name"
   done
+  kit_prune_stale_links "$CONSUMER_ROOT/.cursor/rules" "$OVERLAY/rules" local_names
 fi
 
 if [[ -d "$OVERLAY/commands" ]]; then
@@ -66,6 +68,7 @@ if [[ -d "$OVERLAY/commands" ]]; then
     fi
     kit_ln_sfn "$f" "$CONSUMER_ROOT/.cursor/commands/$name"
   done
+  kit_prune_stale_links "$CONSUMER_ROOT/.cursor/commands" "$OVERLAY/commands" local_names
 fi
 
 echo "Done."

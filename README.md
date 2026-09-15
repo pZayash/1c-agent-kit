@@ -45,6 +45,11 @@ powershell -NoProfile -File harness/scripts/fix-harness-gitdir.ps1 `
 (`.agents/skills`, `.claude/skills|commands`) → pi roots (`.pi/*`), при
 необходимости пишет thin `load-changed-files.sh`, затем `verify-kit-links`.
 
+Link-скрипты заодно делают **prune** (tombstones): kit-ссылка, чей
+skill/tool/rule удалён или переименован upstream, снимается (`PRUNE:`).
+Локальные копии и чужие ссылки не трогаются; имена из `local-*.txt`
+пропускаются. Dry-run: `DRY_RUN=1` / `-DryRun` → `WOULD PRUNE:`.
+
 - Linux: нативные `link-*.sh` (`ln -sfn`).
 - Windows: `link-*.ps1` (`mklink /J`; file `mklink` / copy-fallback).
 - Git Bash на Windows: `link-*.sh` делегируют в `.ps1`.

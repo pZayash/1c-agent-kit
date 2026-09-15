@@ -53,3 +53,34 @@ kit_ln_sfn() {
   fi
   echo "LINK: $(basename "$link_path")"
 }
+
+# Tombstones (idea: teamai .removed) — prune stale kit-owned links.
+# Removes symlinks in $1 (link_root) that point into $2 (kit_source) but whose
+# basename no longer exists in kit_source (skill/tool removed or renamed upstream).
+# Only kit-owned symlinks are touched: local copies and foreign links stay.
+# $3 = nameref to assoc array of local names to skip (pass an empty one if none).
+kit_prune_stale_links() {
+  local link_root="$1"
+  local kit_source="$2"
+  local -n _kpl_local="$3"
+  [[ -d "$link_root" ]] || return 0
+  local entry name target
+  for entry in "$link_root"/*; do
+    [[ -L "$entry" ]] || continue
+    name="$(basename "$entry")"
+    [[ -n "${_kpl_local[$name]:-}" ]] && continue
+    target="$(readlink "$entry")" || continue
+    case "$target" in
+      "$kit_source"/*|"$kit_source") ;;
+      *) continue ;;
+    esac
+    if [[ ! -e "$kit_source/$name" ]]; then
+      if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo "WOULD PRUNE: $name"
+      else
+        rm -f "$entry"
+        echo "PRUNE: $name"
+      fi
+    fi
+  done
+}

@@ -45,4 +45,7 @@ if [[ -z "${local_names[git-partial-stage.py]:-}" && -f "$KIT_TOOLS/git-partial-
   kit_ln_sfn "$KIT_TOOLS/git-partial-stage.py" "$CONSUMER_TOOLS/git-partial-stage.py"
 fi
 
+# Prune kit-owned links whose tool vanished upstream (tombstones).
+kit_prune_stale_links "$CONSUMER_TOOLS" "$KIT_TOOLS" local_names
+
 echo "Done."
