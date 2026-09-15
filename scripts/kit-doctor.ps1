@@ -143,14 +143,17 @@ if (Test-Path -LiteralPath $harness) {
         }
     }
 
-    # 7. ps1 ASCII hygiene (PS 5.1 + ANSI host ParserError guard)
-    $nonAscii = @(Get-ChildItem -LiteralPath $scriptsDir -Filter *.ps1 -File | Where-Object {
-        ((Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8) -match '[^\x00-\x7F]')
+    # 7. ps1 encoding hygiene (BOM-less ps1 must be ASCII: PS 5.1 ParserError guard)
+    $nonAscii = @(Get-ChildItem -LiteralPath $harness -Filter *.ps1 -File -Recurse | Where-Object {
+        $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+        $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+        -not $hasBom -and ((Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8) -match '[^\x00-\x7F]')
     })
     if ($nonAscii.Count -eq 0) {
-        Write-Ok "ps1 ASCII hygiene"
+        Write-Ok "ps1 encoding hygiene"
     } else {
-        Write-Bad "non-ASCII in $HarnessRel/scripts/*.ps1 - PS 5.1 ParserError risk: $($nonAscii.Name -join ', ')"
+        $rel = $nonAscii.FullName | ForEach-Object { $_.Substring($harness.Length + 1) }
+        Write-Bad "non-ASCII in BOM-less *.ps1 - PS 5.1 ParserError risk: $($rel -join ', ')"
     }
 
     # 8. copy-fallback paths (tombstones blind spot: prune touches reparse only)

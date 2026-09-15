@@ -125,11 +125,11 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     fi
   fi
 
-  # 7. ps1 ASCII hygiene (PS 5.1 + ANSI host ParserError guard)
-  if bash "$SCRIPT_DIR/check-ps1-ascii.sh" "$HARNESS_ROOT/scripts" >/dev/null 2>&1; then
-    ok "ps1 ASCII hygiene"
+  # 7. ps1 encoding hygiene (BOM-less ps1 must be ASCII: PS 5.1 ParserError guard)
+  if bash "$SCRIPT_DIR/check-ps1-ascii.sh" "$HARNESS_ROOT" >/dev/null 2>&1; then
+    ok "ps1 encoding hygiene"
   else
-    bad "non-ASCII in $HARNESS_REL/scripts/*.ps1 - PS 5.1 ParserError risk (check-ps1-ascii)"
+    bad "non-ASCII in BOM-less *.ps1 under $HARNESS_REL - PS 5.1 ParserError risk (check-ps1-ascii)"
   fi
 
   # 8. copy-fallback paths (tombstones blind spot: prune touches reparse only)
