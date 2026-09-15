@@ -182,11 +182,13 @@ function Update-Answer42Fork {
         $cfSource = Join-Path $dir $pair[0]
         $cfTarget = Join-Path (Join-Path $dir "src\mcp_1c\assets") $pair[1]
         $buildProcess = Start-Process -FilePath $python -Wait -PassThru -NoNewWindow `
+            -WorkingDirectory $stateDir `
             -ArgumentList @($buildScript, $cfSource, $cfTarget)
         if ($buildProcess.ExitCode -ne 0) { throw "Сборка $($pair[1]) не прошла (код $($buildProcess.ExitCode))" }
     }
     $editable = $dir + "[screenshot,windows-window-control]"
     $pipProcess = Start-Process -FilePath $python -Wait -PassThru -NoNewWindow `
+        -WorkingDirectory $stateDir `
         -ArgumentList @("-m", "pip", "install", "-q", "-e", $editable)
     if ($pipProcess.ExitCode -ne 0) { throw "pip install -e не прошёл (код $($pipProcess.ExitCode))" }
 
