@@ -63,6 +63,17 @@ if [[ -e "$HARNESS_ROOT" ]]; then
   else
     bad "git -C $HARNESS_REL broken (worktree file-gitdir?) - run fix-harness-gitdir"
   fi
+
+  # 2b. gitlink vs HEAD drift (' M harness')
+  recorded="$(git -C "$CONSUMER_ROOT" ls-files -s -- "$HARNESS_REL" 2>/dev/null | awk '{print $2}' | head -1)"
+  full="$(git -C "$HARNESS_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$recorded" && -n "$full" ]]; then
+    if [[ "$recorded" != "$full" ]]; then
+      warn "harness HEAD (${full:0:7}) != recorded gitlink (${recorded:0:7}) - ' M harness'; submodule update or bump gitlink"
+    else
+      ok "harness HEAD matches recorded gitlink"
+    fi
+  fi
 fi
 
 # 3. parent git alive
@@ -119,6 +130,34 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     ok "ps1 ASCII hygiene"
   else
     bad "non-ASCII in $HARNESS_REL/scripts/*.ps1 - PS 5.1 ParserError risk (check-ps1-ascii)"
+  fi
+
+  # 8. copy-fallback paths (tombstones blind spot: prune touches reparse only)
+  copies=""
+  declare -A overlay_local=() tools_local=()
+  kit_load_manifest "$SYNC_DIR/local-overlay.txt" overlay_local
+  kit_load_manifest "$SYNC_DIR/local-tools.txt" tools_local
+  for sub in rules commands; do
+    src="$HARNESS_ROOT/cursor/$sub"
+    [[ -d "$src" ]] || continue
+    for f in "$src"/*; do
+      [[ -f "$f" ]] || continue
+      name="$(basename "$f")"
+      [[ -n "${overlay_local[$name]:-}" ]] && continue
+      dst="$CONSUMER_ROOT/.cursor/$sub/$name"
+      [[ -e "$dst" && ! -L "$dst" ]] && copies+=".cursor/$sub/$name"$'\n'
+    done
+  done
+  if [[ -z "${tools_local[git-partial-stage.py]:-}" && -f "$HARNESS_ROOT/tools/git-partial-stage.py" ]]; then
+    dst="$CONSUMER_ROOT/tools/git-partial-stage.py"
+    [[ -e "$dst" && ! -L "$dst" ]] && copies+="tools/git-partial-stage.py"$'\n'
+  fi
+  if [[ -n "$copies" ]]; then
+    n="$(grep -c . <<<"$copies")"
+    warn "$n kit path(s) are copy-fallback (no symlink privilege) - prune blind; content still refreshed on bootstrap:"
+    grep . <<<"$copies" | sed 's/^/       /'
+  else
+    ok "no copy-fallback kit paths"
   fi
 fi
 

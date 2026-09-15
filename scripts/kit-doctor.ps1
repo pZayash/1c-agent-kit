@@ -81,6 +81,17 @@ if (Test-Path -LiteralPath $harness) {
     } else {
         Write-Bad "git -C $HarnessRel broken (worktree file-gitdir?) - run fix-harness-gitdir"
     }
+
+    # 2b. gitlink vs HEAD drift (' M harness')
+    $recorded = (& git -C $root ls-files -s -- $HarnessRel 2>$null | ForEach-Object { ($_ -split '\s+')[1] } | Select-Object -First 1)
+    $full = (& git -C $harness rev-parse HEAD 2>$null)
+    if ($recorded -and $full) {
+        if ($recorded -ne $full) {
+            Write-WarnX "harness HEAD ($($full.Substring(0,7))) != recorded gitlink ($($recorded.Substring(0,7))) - ' M harness'; submodule update or bump gitlink"
+        } else {
+            Write-Ok "harness HEAD matches recorded gitlink"
+        }
+    }
 }
 
 # 3. parent git alive
@@ -140,6 +151,49 @@ if (Test-Path -LiteralPath $harness) {
         Write-Ok "ps1 ASCII hygiene"
     } else {
         Write-Bad "non-ASCII in $HarnessRel/scripts/*.ps1 - PS 5.1 ParserError risk: $($nonAscii.Name -join ', ')"
+    }
+
+    # 8. copy-fallback paths (tombstones blind spot: prune touches reparse only)
+    . (Join-Path $scriptsDir "_win-reparse.ps1")
+    $copies = @()
+    $overlayLocal = @{}
+    $mp = Join-Path $syncDir "local-overlay.txt"
+    if (Test-Path -LiteralPath $mp) {
+        Get-Content -LiteralPath $mp -Encoding UTF8 | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -and -not $line.StartsWith("#")) { $overlayLocal[$line] = $true }
+        }
+    }
+    foreach ($sub in @("rules", "commands")) {
+        $src = Join-Path $harness "cursor\$sub"
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        Get-ChildItem -LiteralPath $src -File | ForEach-Object {
+            if ($overlayLocal.ContainsKey($_.Name)) { return }
+            $dst = Join-Path $root ".cursor\$sub\$($_.Name)"
+            if ((Test-Path -LiteralPath $dst) -and -not (Test-KitReparse $dst)) {
+                $copies += ".cursor\$sub\$($_.Name)"
+            }
+        }
+    }
+    $toolsLocal = @{}
+    $mp = Join-Path $syncDir "local-tools.txt"
+    if (Test-Path -LiteralPath $mp) {
+        Get-Content -LiteralPath $mp -Encoding UTF8 | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -and -not $line.StartsWith("#")) { $toolsLocal[$line] = $true }
+        }
+    }
+    $pyDst = Join-Path $root "tools\git-partial-stage.py"
+    if (-not $toolsLocal.ContainsKey("git-partial-stage.py") -and
+        (Test-Path -LiteralPath (Join-Path $harness "tools\git-partial-stage.py")) -and
+        (Test-Path -LiteralPath $pyDst) -and -not (Test-KitReparse $pyDst)) {
+        $copies += "tools\git-partial-stage.py"
+    }
+    if ($copies.Count -gt 0) {
+        Write-WarnX "$($copies.Count) kit path(s) are copy-fallback (no symlink privilege) - prune blind; content still refreshed on bootstrap:"
+        $copies | ForEach-Object { Write-Host "       $_" }
+    } else {
+        Write-Ok "no copy-fallback kit paths"
     }
 }
 
