@@ -8,6 +8,7 @@
 #   FORCE_WRAPPER=1   — replace fat load-changed-files.sh with thin wrapper
 #   SKIP_VERIFY=1
 #   SKIP_DEPS=1       — не звать init-kit-deps
+#   SKIP_SECTIONS=1   — не патчить managed-секции AGENTS.md
 #   HARNESS_REL=harness
 set -euo pipefail
 
@@ -28,6 +29,7 @@ if kit_is_windows; then
   [[ "$FORCE_WRAPPER" == "1" ]] && args+=(-ForceWrapper)
   [[ "$SKIP_VERIFY" == "1" ]] && args+=(-SkipVerify)
   [[ "${SKIP_DEPS:-0}" == "1" ]] && args+=(-SkipDeps)
+  [[ "${SKIP_SECTIONS:-0}" == "1" ]] && args+=(-SkipSections)
   exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi
 
@@ -50,6 +52,21 @@ bash "$SCRIPT_DIR/link-editor-roots.sh" "$CONSUMER_ROOT"
 
 echo "=== link-pi-roots ==="
 HARNESS_REL="$HARNESS_REL" bash "$SCRIPT_DIR/link-pi-roots.sh" "$CONSUMER_ROOT"
+
+if [[ "${SKIP_SECTIONS:-0}" != "1" && -d "$HARNESS_ROOT/templates/sections" && -f "$CONSUMER_ROOT/AGENTS.md" ]]; then
+  PY="$(command -v python || command -v python3 || true)"
+  if [[ -n "$PY" ]]; then
+    echo "=== section-patch (AGENTS.md) ==="
+    for sf in "$HARNESS_ROOT/templates/sections/"*.md; do
+      [[ -f "$sf" ]] || continue
+      args=(apply "$CONSUMER_ROOT/AGENTS.md" --slug "$(basename "$sf" .md)" --body-file "$sf")
+      [[ "$DRY_RUN" == "1" ]] && args+=(--dry-run)
+      "$PY" "$HARNESS_ROOT/tools/section-patch/section-patch.py" "${args[@]}"
+    done
+  else
+    echo "WARN: no python on PATH - skip section-patch" >&2
+  fi
+fi
 
 WRAPPER="$CONSUMER_ROOT/load-changed-files.sh"
 ENGINE="$HARNESS_ROOT/tools/load-changed-files/load-changed-files.sh"

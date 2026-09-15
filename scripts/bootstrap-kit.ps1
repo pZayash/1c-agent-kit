@@ -15,7 +15,9 @@ param(
 
     [switch]$SkipVerify,
 
-    [switch]$SkipDeps
+    [switch]$SkipDeps,
+
+    [switch]$SkipSections
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +54,23 @@ Write-Host "=== link-pi-roots ==="
 $pi = @{ ConsumerRoot = $root; HarnessRel = $HarnessRel }
 if ($DryRun) { $pi["DryRun"] = $true }
 & (Join-Path $scripts "link-pi-roots.ps1") @pi
+
+$sectionsDir = Join-Path $harness "templates\sections"
+$agentsMd = Join-Path $root "AGENTS.md"
+if (-not $SkipSections -and (Test-Path $sectionsDir) -and (Test-Path $agentsMd)) {
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($py) {
+        Write-Host "=== section-patch (AGENTS.md) ==="
+        Get-ChildItem -LiteralPath $sectionsDir -Filter *.md -File | ForEach-Object {
+            $spArgs = @("apply", $agentsMd, "--slug", $_.BaseName, "--body-file", $_.FullName)
+            if ($DryRun) { $spArgs += "--dry-run" }
+            & $py.Source (Join-Path $harness "tools\section-patch\section-patch.py") @spArgs
+        }
+    } else {
+        Write-Host "WARN: no python on PATH - skip section-patch"
+    }
+}
 
 $wrapper = Join-Path $root "load-changed-files.sh"
 $engine = Join-Path $harness "tools\load-changed-files\load-changed-files.sh"

@@ -54,6 +54,13 @@ skill/tool/rule удалён или переименован upstream, сним�
 Локальные копии и чужие ссылки не трогаются; имена из `local-*.txt`
 пропускаются. Dry-run: `DRY_RUN=1` / `-DryRun` → `WOULD PRUNE:`.
 
+`bootstrap-kit` также патчит **managed-секции** `AGENTS.md` (idea: teamai
+section-patcher): тела из `templates/sections/*.md` живут между якорями
+`<!-- kit-section: <slug>, hash: ... -->` и обновляются при bootstrap.
+Правки пользователя внутри секции не затираются — `SKIP (drift)`; аудит:
+`python harness/tools/section-patch/section-patch.py check AGENTS.md`
+(exit 1 при drift). Отключить шаг: `SKIP_SECTIONS=1` / `-SkipSections`.
+
 - Linux: нативные `link-*.sh` (`ln -sfn`).
 - Windows: `link-*.ps1` (`mklink /J`; file `mklink` / copy-fallback).
 - Git Bash на Windows: `link-*.sh` делегируют в `.ps1`.
