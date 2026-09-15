@@ -119,6 +119,31 @@ bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 120 session_status
 `tools/mcp-call` подстановку `${VAR}` **не делает** — ему нужен literal-конфиг
 (`.cursor/mcp.json` потребителя, gitignored) с фактическими URL и токеном.
 
+## Обновление форк-сборки
+
+```powershell
+# подтянуть релизы upstream, ребейзнуть kpsr, пересобрать CF, переустановить пакет
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 update
+# плюс пуш ветки в origin и перезапуск сервиса
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 update -Push -RestartService
+```
+
+Ключи `.env`: `ANSWER42_FORK_DIR` (чекаут форка), `ANSWER42_FORK_BRANCH`
+(`kpsr`), `ANSWER42_FORK_REMOTE` (`upstream` — источник релизов),
+`ANSWER42_FORK_PUSH_REMOTE` (`origin`).
+
+Что делает действие:
+
+- без `-Ref` берёт новейший тег upstream; если ветка уже основана на нём —
+  сообщает «обновлять нечего» (повторный запуск безопасен);
+- ребейзит ветку с патчами и проверяет, что патч (`_tool_error_text`) на месте;
+  конфликт останавливает действие с подсказкой `git rebase --continue | --abort`;
+- пересобирает `MCPTestManager.cf` / `MCPTestClient.cf` и делает
+  `pip install -e`;
+- на время переустановки останавливает HTTP-сервис (на Windows работающий
+  сервис держит `answer42.exe` → WinError 32) и поднимает его обратно, если он
+  был запущен.
+
 ## Вызовы
 
 ```bash
