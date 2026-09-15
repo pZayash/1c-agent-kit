@@ -159,6 +159,20 @@ if [[ -e "$HARNESS_ROOT" ]]; then
   else
     ok "no copy-fallback kit paths"
   fi
+
+  # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only)
+  PY="$(command -v python || command -v python3 || true)"
+  if [[ -n "$PY" && -f "$HARNESS_ROOT/tools/skill-frontmatter/skill-frontmatter.py" ]]; then
+    sflog="$(mktemp)"
+    if "$PY" "$HARNESS_ROOT/tools/skill-frontmatter/skill-frontmatter.py" lint \
+         "$HARNESS_ROOT/skills" "$HARNESS_ROOT/cursor/skills" >"$sflog" 2>&1; then
+      ok "skill frontmatter"
+    else
+      warn "skill frontmatter issues (fix: python harness/tools/skill-frontmatter/skill-frontmatter.py fix ...):"
+      sed 's/^/       /' "$sflog"
+    fi
+    rm -f "$sflog"
+  fi
 fi
 
 echo "=== kit-doctor: $([ "$FAIL" -eq 0 ] && echo PASS || echo FAIL) ==="

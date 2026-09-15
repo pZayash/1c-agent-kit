@@ -14,6 +14,9 @@ description: >-
    Перед commit — OPSEC self-check: kit публичный, не течёт внутренняя
    инфра (IP/хосты/пути/кодовые имена/секреты). Канон:
    [commit-hygiene.md](../../../docs/ai/commit-hygiene.md).
+   Перед commit skills — frontmatter lint:
+   `python tools/skill-frontmatter/skill-frontmatter.py lint skills cursor/skills`
+   (fixable-проблемы: `... fix skills cursor/skills`).
 3. В репо проекта: `git add harness` (только gitlink SHA). Сообщение:
    `chore(harness): bump kit to <short-sha>`.
 4. Не делать `git add harness/README.md` и не копировать файлы kit в

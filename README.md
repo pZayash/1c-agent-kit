@@ -61,6 +61,12 @@ section-patcher): тела из `templates/sections/*.md` живут между 
 `python harness/tools/section-patch/section-patch.py check AGENTS.md`
 (exit 1 при drift). Отключить шаг: `SKIP_SECTIONS=1` / `-SkipSections`.
 
+Frontmatter skills (`name`/`description` в `SKILL.md`) —
+`tools/skill-frontmatter/skill-frontmatter.py lint|fix` (idea: teamai
+ensureSkillFrontmatter): fix инжектирует блок или дописывает поля перед
+закрывающим `---`, не переформатируя YAML; `name` ≠ каталога — только
+ручной fix. Входит WARN-чеком в `kit-doctor` и шагом в `harness-promote`.
+
 - Linux: нативные `link-*.sh` (`ln -sfn`).
 - Windows: `link-*.ps1` (`mklink /J`; file `mklink` / copy-fallback).
 - Git Bash на Windows: `link-*.sh` делегируют в `.ps1`.

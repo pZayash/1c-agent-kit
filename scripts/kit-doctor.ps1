@@ -195,6 +195,20 @@ if (Test-Path -LiteralPath $harness) {
     } else {
         Write-Ok "no copy-fallback kit paths"
     }
+
+    # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only)
+    $sfTool = Join-Path $harness "tools\skill-frontmatter\skill-frontmatter.py"
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($py -and (Test-Path -LiteralPath $sfTool)) {
+        $sfOut = & $py.Source $sfTool lint (Join-Path $harness "skills") (Join-Path $harness "cursor\skills") 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "skill frontmatter"
+        } else {
+            Write-WarnX "skill frontmatter issues (fix: python harness/tools/skill-frontmatter/skill-frontmatter.py fix ...):"
+            $sfOut | ForEach-Object { Write-Host "       $_" }
+        }
+    }
 }
 
 if ($script:Failed) {
