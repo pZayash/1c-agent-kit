@@ -82,6 +82,19 @@ skill/tool/rule удалён или переименован upstream, сним�
   merge `upstream/dev`. Host `git worktree list` помечает
   `/srv/wt/agent-N` как **prunable** — **не** `prune`.
 - **CRLF в `.sh` на Linux** — `sed -i 's/\r$//'` или `tr -d '\r'`.
+- **`.ps1` только ASCII** — PS 5.1 читает BOM-less файл как ANSI
+  (CP1251): байты `—`/кириллицы дают `”`, парсер рвёт строку →
+  `ParserError TerminatorExpectedAtEndOfString`. Guard:
+  `bash harness/scripts/check-ps1-ascii.sh` (в kit CI/pre-push).
+- **Downgrade сабмодуля + bootstrap = PRUNE более новых ссылок** —
+  tombstones честно снимет ссылки на skills/tools, которых нет в старом
+  SHA harness. После возврата на актуальный SHA — повторный
+  `bootstrap-kit` (или link-скрипты) перелинкует (`LINK:`/`JUNCTION:`).
+- **Copy-fallback не чистится prune** — на хостах без прав на file
+  symlink rules/commands падают в копию (`WARN: file symlink failed`).
+  Копии — не reparse, prune их не видит: стухшая копия останется.
+  Лечение: Developer Mode / SeCreateSymbolicLinkPrivilege, либо ручная
+  чистка при переименовании rules.
 - **Старый worktree** — merge → hydrate harness → `bootstrap-kit` → verify.
 - **Cursor UI не видит skill (slash)** — junctions в `.cursor/skills`, UI
   читает `.agents/skills`. `bootstrap-kit` делает junction/symlink

@@ -96,7 +96,7 @@ if (-not $SkipDeps) {
     $dep = Join-Path $scripts "init-kit-deps.ps1"
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dep -ConsumerRoot $root
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARN host deps incomplete — harness/docs/ai/kit-host-deps.md (-Install). Links still done."
+        Write-Host "WARN host deps incomplete - harness/docs/ai/kit-host-deps.md (-Install). Links still done."
     }
 }
 

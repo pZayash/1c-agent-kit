@@ -96,7 +96,7 @@ $rtkOk = Test-OnPath "rtk"
 if ($rtkOk) {
     Write-Host "OK rtk"
 } else {
-    Write-Host "FAIL missing: rtk  (https://github.com/rtk-ai/rtk — поставь вручную, как удобно)"
+    Write-Host "FAIL missing: rtk  (https://github.com/rtk-ai/rtk - install manually, any way you like)"
     $fail = 1
 }
 

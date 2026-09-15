@@ -29,7 +29,7 @@ function Remove-KitReparseOrTree([string]$path) {
     }
 }
 
-# Tombstones (idea: teamai .removed) — prune stale kit-owned links.
+# Tombstones (idea: teamai .removed) - prune stale kit-owned links.
 # Removes reparse points in $LinkRoot that point into $KitSource but whose name
 # no longer exists in $KitSource (skill/tool removed or renamed upstream).
 # Local copies and foreign links are kept; fallback copies are not reparse
