@@ -56,6 +56,25 @@ Windows-раскладке): ссылка, указывающая вне consume
 `SKIP FOREIGN-NS` и никогда не перелинковывается. `plan --strict` —
 exit 1 при pending-действиях (гейт паритета для CI/валидации).
 
+### kit-agent: хуки и guard-правила для агентов
+
+Ядро `tools/kit-agent/kit_agent.py` (idea: teamai hooks, harness-агностично):
+
+```bash
+python harness/tools/kit-agent/kit_agent.py session-start       # подсказки (пусто = ок)
+python harness/tools/kit-agent/kit_agent.py check-command "git add harness/x"  # guards
+```
+
+Адаптеры (тонкие, логика — только в ядре; правила — `guards.json`):
+
+- **pi** (TUI и RPC/ACP — bb, Zed): `pi/extensions/kit-hooks.ts` →
+  `.pi/extensions`; session-start подсказки (notify + разовый инжект),
+  block/warn на bash-команды по guards, команда `/kit`.
+- **Универсальный**: managed-секция `kit-agent-loop` в AGENTS.md
+  (инструкция прогнать session-start и сверяться с check-command) —
+  для Zed direct, Kilo и любых читателей AGENTS.md.
+- **Kilo Code / OpenCode** (в планах): plugin API, `.kilo/plugin/`.
+
 Parent git: `fatal: not a git repository: harness/../.git/modules/harness` —
 сначала `fix-harness-gitdir` (worktree file-gitdir):
 

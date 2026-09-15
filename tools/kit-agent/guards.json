@@ -1,0 +1,29 @@
+{
+  "comment": "Guard rules for agent bash commands (single source of truth). Read by kit_agent.py check-command, the pi adapter (pi/extensions/kit-hooks.ts) and the kilo adapter. action: block = forbid, warn = allow but tell the agent.",
+  "rules": [
+    {
+      "id": "harness-blob-add",
+      "match": "\\bgit\\s+add\\b[^|;&\\n]*\\bharness/\\S",
+      "action": "block",
+      "message": "Файлы kit нельзя коммитить как blob проекта. Канон: правки внутри harness/ коммитятся в репо kit, в проекте — только gitlink (git add harness). См. skill harness-promote."
+    },
+    {
+      "id": "openspec-init",
+      "match": "\\bopenspec\\s+init\\b",
+      "action": "block",
+      "message": "openspec init запрещён: у потребителя kit свои openspec/ + kit skills. Дока: harness/docs/ai/kit-host-deps.md."
+    },
+    {
+      "id": "rtk-init",
+      "match": "\\brtk\\s+init\\b",
+      "action": "block",
+      "message": "rtk init запрещён (перезапишет CLAUDE.md). rtk ставится глобально, не в репо. Дока: harness/docs/ai/kit-host-deps.md."
+    },
+    {
+      "id": "rm-junction-roots",
+      "match": "\\brm\\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)[a-zA-Z]*\\s+[^|;&\\n]*(\\.cursor|\\.pi|\\.agents|\\.claude)(/|\\s|$)",
+      "action": "warn",
+      "message": "Рекурсивный rm по каталогам с junction/symlink kit опасен (уйдёт внутрь ссылок). Канон на Windows: cmd /c rmdir <junction>. Дока: harness/README.md, pitfalls."
+    }
+  ]
+}
