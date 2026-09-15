@@ -90,6 +90,16 @@ def make_file_link(target, link):
         return 'COPY'
 
 
+def is_within(path, root):
+    """True if path is inside root (lexical, case-insensitive on Windows)."""
+    try:
+        os.path.normcase(str(path)).startswith(os.path.normcase(str(root)) + os.sep)
+        common = os.path.commonpath([str(path), str(root)])
+        return os.path.normcase(common) == os.path.normcase(str(root))
+    except (ValueError, OSError):
+        return False
+
+
 def remove_link_or_tree(path):
     """Reparse points are removed as links (os.rmdir/os.remove never recurse
     into the junction target); plain copies are removed as trees."""
@@ -112,6 +122,7 @@ class Ctx:
         self.harness_rel = harness_rel
         self.dry_run = dry_run
         self.actions = []   # (level, message); level: ACT/WARN/FAIL/OK
+        self.pending = 0    # would-be mutations in plan mode
 
     def say(self, level, msg):
         self.actions.append((level, msg))
@@ -125,6 +136,7 @@ class Ctx:
     def act(self, verb, fn):
         """Run fn or print WOULD verb in dry-run."""
         if self.dry_run:
+            self.pending += 1
             self.say('ACT', f'WOULD {verb}')
             return None
         result = fn()
@@ -151,9 +163,21 @@ def link_one(ctx, target, link, is_dir):
     if link.exists() or is_link(link):
         if is_link(link):
             cur = read_link(link)
-            if cur and Path(cur).resolve() == target.resolve():
-                ctx.say('OK', f'OK: {label}')
-                return True
+            if cur:
+                cur_path = Path(cur)
+                if not cur_path.is_absolute():
+                    cur_path = link.parent / cur_path
+                # Foreign namespace: the link target is outside the consumer
+                # root as this process sees it (e.g. engine runs in a Linux
+                # sandbox over a layout created by Windows scripts). Relinking
+                # it would rewrite all links to this namespace's paths and
+                # break the original tools - skip instead.
+                if not is_within(cur_path, ctx.root):
+                    ctx.say('WARN', f'SKIP FOREIGN-NS: {label} -> {cur} (layout from another namespace)')
+                    return True
+                if cur_path.resolve() == target.resolve():
+                    ctx.say('OK', f'OK: {label}')
+                    return True
             ctx.act(f'RELINK: {label} -> {target}',
                     lambda: remove_link_or_tree(link))
         else:
@@ -167,6 +191,7 @@ def link_one(ctx, target, link, is_dir):
                 return True
     if ctx.dry_run:
         if not (link.exists() or is_link(link)):
+            ctx.pending += 1
             ctx.say('ACT', f'WOULD LINK: {label} -> {target}')
         return True
     link.parent.mkdir(parents=True, exist_ok=True)
@@ -286,6 +311,8 @@ def main(argv=None):
     p.add_argument('consumer_root', nargs='?', default='.')
     p.add_argument('--harness-rel', default=os.environ.get('HARNESS_REL', 'harness'))
     p.add_argument('--layout', default=str(Path(__file__).with_name('layout.json')))
+    p.add_argument('--strict', action='store_true',
+                   help='plan: exit 1 if any pending action (parity gate)')
     a = p.parse_args(argv)
 
     layout = json.loads(Path(a.layout).read_text(encoding='utf-8'))
@@ -304,6 +331,11 @@ def main(argv=None):
             failed |= not runner(ctx, res)
 
     fails = sum(1 for lvl, _ in ctx.actions if lvl == 'FAIL')
+    if a.command == 'plan':
+        foreign = sum(1 for _, m in ctx.actions if m.startswith('SKIP FOREIGN-NS:'))
+        print(f'kit-layout plan: {ctx.pending} pending action(s), {foreign} foreign-ns skip(s)')
+        if a.strict and ctx.pending:
+            return 1
     if a.command == 'verify':
         print(f'kit-layout verify: {"FAIL" if fails else "OK"}')
     return 1 if (failed or fails) else 0

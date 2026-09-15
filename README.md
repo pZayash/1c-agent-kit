@@ -50,6 +50,11 @@ python harness/tools/kit-layout/kit_layout.py verify .
 Паритет с link-скриптами проверен синтетикой (440 путей идентично);
 дефолт bootstrap — пока legacy-скрипты.
 
+Движок безопасен при запуске из другого namespace (Linux sandbox по
+Windows-раскладке): ссылка, указывающая вне consumer root, помечается
+`SKIP FOREIGN-NS` и никогда не перелинковывается. `plan --strict` —
+exit 1 при pending-действиях (гейт паритета для CI/валидации).
+
 Parent git: `fatal: not a git repository: harness/../.git/modules/harness` —
 сначала `fix-harness-gitdir` (worktree file-gitdir):
 
