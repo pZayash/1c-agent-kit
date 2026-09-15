@@ -34,6 +34,7 @@ import argparse
 import filecmp
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,26 @@ from pathlib import Path
 
 WIN = sys.platform == 'win32'
 REPARSE_ATTR = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def is_wsl():
+    """Linux userland under Windows (WSL)."""
+    if not sys.platform.startswith('linux'):
+        return False
+    if os.environ.get('WSL_DISTRO_NAME'):
+        return True
+    try:
+        with open('/proc/version', encoding='utf-8', errors='replace') as f:
+            return 'microsoft' in f.read().lower()
+    except OSError:
+        return False
+
+
+def wsl_windows_path(root):
+    """WSL path on a Windows drive: /mnt/c/... (links would be visible only
+    inside WSL and broken for Windows-side tools)."""
+    s = str(root)
+    return bool(re.match(r'^/mnt/[A-Za-z](/|$)', s))
 
 
 # ── platform primitives ─────────────────────────────────────────────
@@ -317,6 +338,13 @@ def main(argv=None):
 
     layout = json.loads(Path(a.layout).read_text(encoding='utf-8'))
     ctx = Ctx(a.consumer_root, a.harness_rel, dry_run=(a.command == 'plan'))
+    if is_wsl() and wsl_windows_path(ctx.root) and os.environ.get('WSL_ALLOW') != '1':
+        print(
+            'ERROR: WSL + Windows project path (/mnt/<drive>/...). Links created here\n'
+            'would point into WSL paths and break Windows-side tools.\n'
+            'Run from Windows Git Bash or PowerShell instead; set WSL_ALLOW=1 to force.',
+            file=sys.stderr)
+        return 2
     if not ctx.resolve('harness').is_dir():
         print(f'missing harness: {ctx.resolve("harness")} (git submodule update --init?)',
               file=sys.stderr)

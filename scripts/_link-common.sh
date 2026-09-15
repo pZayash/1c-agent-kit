@@ -10,6 +10,22 @@ kit_is_windows() {
   esac
 }
 
+# WSL-bash (Linux userland под Windows).
+kit_is_wsl() {
+  [[ -n "${WSL_DISTRO_NAME:-}" ]] && return 0
+  [[ -r /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null && return 0
+  return 1
+}
+
+# WSL-bash + проект на Windows-диске (/mnt/<drive>/...): Linux-ветка создаст
+# symlink'и на /mnt/..., невидимые из Windows-инструментов. Такой запуск
+# опасен — нужен Windows Git Bash или .ps1 (bootstrap-kit это проверяет).
+kit_wsl_windows_fs() {
+  local root="$1"
+  kit_is_wsl || return 1
+  [[ "$root" == /mnt/[a-zA-Z]/* || "$root" == /mnt/[a-zA-Z] ]]
+}
+
 kit_load_manifest() {
   # $1=file $2=nameref assoc array
   local manifest_file="$1"

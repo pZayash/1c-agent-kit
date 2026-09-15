@@ -146,6 +146,13 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   merge `upstream/dev`. Host `git worktree list` помечает
   `/srv/wt/agent-N` как **prunable** — **не** `prune`.
 - **CRLF в `.sh` на Linux** — `sed -i 's/\r$//'` или `tr -d '\r'`.
+  Корень: у потребителя `core.autocrlf=true` без `.gitattributes`.
+  Kit шлёт `.gitattributes` (`*.sh text eol=lf`) — обнови submodule,
+  и CRLF в скриптах больше не появится.
+- **WSL-bash + Windows-проект (`/mnt/<drive>/...`)** — Linux-ветка
+  создаёт symlink'и на `/mnt/...`, невидимые из Windows. `bootstrap-kit`
+  и `kit-layout` отказываются работать (WSL_ALLOW=1 — осознанный обход).
+  Правильно: Git Bash (`bash.exe`) или PowerShell (.ps1).
 - **`.ps1` только ASCII** — PS 5.1 читает BOM-less файл как ANSI
   (CP1251): байты `—`/кириллицы дают `”`, парсер рвёт строку →
   `ParserError TerminatorExpectedAtEndOfString`. Guard:

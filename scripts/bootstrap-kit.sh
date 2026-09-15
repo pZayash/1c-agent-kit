@@ -38,6 +38,18 @@ fi
 CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
 HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
 
+if [[ "${WSL_ALLOW:-0}" != "1" ]] && kit_wsl_windows_fs "$CONSUMER_ROOT"; then
+  cat >&2 <<'EOS'
+ERROR: WSL-bash + Windows-проект (/mnt/<drive>/...). Linux-ветка создаст symlink'и
+на /mnt/..., которые не резолвятся из Windows-инструментов.
+Запусти bootstrap из Windows:
+  Git Bash:   "C:\Program Files\Git\bin\bash.exe" harness/scripts/bootstrap-kit.sh .
+  PowerShell: powershell -File harness/scripts/bootstrap-kit.ps1 -ConsumerRoot .
+Осознанно продолжить в WSL: WSL_ALLOW=1.
+EOS
+  exit 1
+fi
+
 [[ -d "$HARNESS_ROOT" ]] || { echo "missing harness: $HARNESS_ROOT (git submodule update --init?)" >&2; exit 1; }
 
 if [[ "${LEGACY_LINKS:-0}" != "1" ]]; then

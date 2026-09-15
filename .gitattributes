@@ -1,0 +1,21 @@
+# Kit runs on Windows (Git Bash / PowerShell) and Linux.
+# Consumers with core.autocrlf=true would otherwise check out CRLF into .sh:
+# bash then fails ("set: pipefail: invalid option name") and WSL/Git-Bash break.
+# Keep scripts and data LF; PowerShell tolerates CRLF.
+* text=auto
+*.sh            text eol=lf
+hooks/*         text eol=lf
+*.py            text eol=lf
+*.json          text eol=lf
+*.jsonc         text eol=lf
+*.md            text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+*.ts            text eol=lf
+*.mjs           text eol=lf
+*.svg           text eol=lf
+*.ps1           text
+*.bat           text eol=crlf
+*.png           binary
+*.jpg           binary
+*.ico           binary
