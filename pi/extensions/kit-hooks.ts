@@ -124,15 +124,47 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
+	function recordFriction(
+		cwd: string,
+		ruleId: string,
+		kind: "block" | "warn",
+		cmd: string,
+	): void {
+		const core = corePath;
+		if (!core) return;
+		// fire-and-forget: сигнал в memory/rule-friction (канон kit), не ждём
+		execFile(
+			"python",
+			[
+				core,
+				"record-friction",
+				"--root",
+				cwd,
+				"--rule-id",
+				ruleId,
+				"--kind",
+				kind,
+				"--command",
+				cmd.slice(0, 300),
+			],
+			{ timeout: 5000 },
+			() => {
+				/* best-effort */
+			},
+		);
+	}
+
 	pi.on("tool_call", async (event, ctx) => {
 		try {
 			if (event.toolName !== "bash" || guards.length === 0) return undefined;
 			const cmd = (event.input as { command?: string })?.command;
 			if (!cmd) return undefined;
+			const cwd = ctx.cwd;
 			const hasUI = ctx.hasUI;
 			const ui = ctx.ui;
 			for (const { re, rule } of guards) {
 				if (!re.test(cmd)) continue;
+				recordFriction(cwd, rule.id, rule.action, cmd);
 				if (rule.action === "block") {
 					return { block: true, reason: `BLOCK [${rule.id}]: ${rule.message}` };
 				}

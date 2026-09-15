@@ -86,6 +86,30 @@ const server: Plugin = async ({ directory, worktree }) => {
 		);
 	}
 
+	function recordFriction(ruleId: string, kind: "block" | "warn", cmd: string): void {
+		if (!existsSync(core)) return;
+		// fire-and-forget: сигнал в memory/rule-friction (канон kit)
+		execFile(
+			"python",
+			[
+				core,
+				"record-friction",
+				"--root",
+				cwd,
+				"--rule-id",
+				ruleId,
+				"--kind",
+				kind,
+				"--command",
+				cmd.slice(0, 300),
+			],
+			{ timeout: 5000 },
+			() => {
+				/* best-effort */
+			},
+		);
+	}
+
 	return {
 		event: async ({ event }: { event: { type?: string } }) => {
 			try {
@@ -126,6 +150,7 @@ const server: Plugin = async ({ directory, worktree }) => {
 				if (!cmd) return;
 				for (const { re, rule } of guards) {
 					if (!re.test(cmd)) continue;
+					recordFriction(rule.id, rule.action, cmd);
 					if (rule.action === "block") {
 						throw new Error(`BLOCK [${rule.id}]: ${rule.message}`);
 					}

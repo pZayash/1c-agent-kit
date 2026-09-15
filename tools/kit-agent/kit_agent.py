@@ -19,6 +19,7 @@ Exit codes: 0 ok, 1 blocked (check-command), 2 usage/internal error
 (adapters must treat 2 as "no-op", never break the session).
 """
 import argparse
+import datetime
 import json
 import os
 import re
@@ -104,6 +105,18 @@ def cmd_session_start(a):
             except (OSError, subprocess.TimeoutExpired):
                 pass  # layout check is best-effort
 
+        # friction-сигналы, ждущие разбора (memory/rule-friction, ленивая папка)
+        fdir = root / 'memory' / 'rule-friction'
+        if fdir.is_dir():
+            pending = sorted(fdir.glob('*.md'))
+            if pending:
+                names = ', '.join(p.name for p in pending[:5])
+                more = '' if len(pending) <= 5 else f' и ещё {len(pending) - 5}'
+                hints.append(
+                    f'{len(pending)} friction-сигнал(ов) ждут разбора в '
+                    f'memory/rule-friction/ ({names}{more}). Канон: '
+                    f'memory-format.md § Разлад, skill evolve.')
+
     for h in hints:
         print(f'[!] {h}')
     return 0
@@ -111,6 +124,61 @@ def cmd_session_start(a):
 
 def load_guards():
     return json.loads(GUARDS_FILE.read_text(encoding='utf-8'))['rules']
+
+
+def cmd_record_friction(a):
+    """Записать friction-сигнал (memory/rule-friction) по канону kit.
+
+    Ленивая папка; один файл на (дата, rule-id); повторные срабатывания
+    увеличивают счётчик и добавляют строку-факт.
+    """
+    root = Path(a.root).resolve()
+    rules = {r['id']: r for r in load_guards()}
+    rule = rules.get(a.rule_id)
+    fdir = root / 'memory' / 'rule-friction'
+    fdir.mkdir(parents=True, exist_ok=True)
+    today = datetime.date.today().isoformat()
+    now = datetime.datetime.now().strftime('%H:%M')
+    rule_msg = rule['message'] if rule else 'См. guards.json в kit.'
+    path = fdir / f'{today}-{a.rule_id}.md'
+    cmd = (a.command or '-')[:300]
+
+    if path.exists():
+        text = path.read_text(encoding='utf-8')
+        m = re.search(r'^Повторы: (\d+)$', text, re.M)
+        n = int(m.group(1)) + 1 if m else 2
+        if m:
+            text = text[:m.start()] + f'Повторы: {n}' + text[m.end():]
+        else:
+            text = text.rstrip() + f'\n\nПовторы: {n}\n'
+        text = text.rstrip() + f'\n- {now} {a.kind}: `{cmd}`\n'
+        path.write_text(text, encoding='utf-8')
+        print(f'friction updated: memory/rule-friction/{path.name} (повторы: {n})')
+        return 0
+
+    body = f'''# kit guard: {a.rule_id}
+
+## Контекст
+Агент выполнил команду, на которую сработало guard-правило kit ({a.kind}).
+Команда: `{cmd}`
+
+## Факт
+Правило `{a.rule_id}` из harness/tools/kit-agent/guards.json сработало.
+
+## Решение / правило
+{rule_msg}
+
+## Теги
+kit, guard, {a.rule_id}
+
+## Дата и источник
+{today}, kit-agent{', сессия ' + a.session_id if a.session_id else ''}
+
+Повторы: 1
+'''
+    path.write_text(body, encoding='utf-8')
+    print(f'friction recorded: memory/rule-friction/{path.name}')
+    return 0
 
 
 def cmd_check_command(a):
@@ -150,6 +218,14 @@ def main(argv=None):
     pc = sub.add_parser('check-command', help='evaluate a bash command against guards')
     pc.add_argument('command')
     pc.set_defaults(fn=cmd_check_command)
+
+    pf = sub.add_parser('record-friction', help='append a friction signal to memory/rule-friction')
+    pf.add_argument('--rule-id', required=True)
+    pf.add_argument('--kind', choices=['block', 'warn'], default='block')
+    pf.add_argument('--command', default='')
+    pf.add_argument('--session-id', default='')
+    pf.add_argument('--root', default='.')
+    pf.set_defaults(fn=cmd_record_friction)
 
     pg = sub.add_parser('guards', help='dump guards.json')
     pg.set_defaults(fn=cmd_guards)

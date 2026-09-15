@@ -78,6 +78,12 @@ python harness/tools/kit-agent/kit_agent.py check-command "git add harness/x"  #
   (инструкция прогнать session-start и сверяться с check-command) —
   для Zed direct, любых читателей AGENTS.md и headless-режимов.
 
+Все срабатывания guards (block/warn) автоматически фиксируются
+friction-сигналом в `memory/rule-friction/` (канон `memory-format.md`
+§ Разлад; разбор — skill `evolve`), session-start напоминает про
+неразобранные. Ручная запись:
+`kit_agent.py record-friction --rule-id … --kind block --command …`.
+
 Parent git: `fatal: not a git repository: harness/../.git/modules/harness` —
 сначала `fix-harness-gitdir` (worktree file-gitdir):
 
