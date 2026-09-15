@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "comment": "Declarative layout of the kit harness into a consumer (idea: teamai ResourceHandler table). Engine: tools/kit-layout/kit_layout.py. Paths are consumer-relative; 'harness/' prefix = inside the kit submodule (HARNESS_REL).",
+  "resources": [
+    {
+      "id": "cc-1c-skills",
+      "kind": "child-dirs",
+      "source": "harness/skills/cc-1c",
+      "target": ".cursor/skills",
+      "local_manifest": "tools/cc-1c-skills-sync/local-skills.txt"
+    },
+    {
+      "id": "overlay-skills",
+      "kind": "child-dirs",
+      "source": "harness/cursor/skills",
+      "target": ".cursor/skills",
+      "local_manifest": "tools/cc-1c-skills-sync/local-overlay.txt"
+    },
+    {
+      "id": "overlay-rules",
+      "kind": "child-files",
+      "source": "harness/cursor/rules",
+      "target": ".cursor/rules",
+      "local_manifest": "tools/cc-1c-skills-sync/local-overlay.txt"
+    },
+    {
+      "id": "overlay-commands",
+      "kind": "child-files",
+      "source": "harness/cursor/commands",
+      "target": ".cursor/commands",
+      "local_manifest": "tools/cc-1c-skills-sync/local-overlay.txt"
+    },
+    {
+      "id": "kit-tools",
+      "kind": "child-dirs",
+      "source": "harness/tools",
+      "target": "tools",
+      "include": ["mailbox", "bsl-check", "sandbox", "load-changed-files", "mcp-call", "answer42"],
+      "local_manifest": "tools/cc-1c-skills-sync/local-tools.txt"
+    },
+    {
+      "id": "kit-tools-files",
+      "kind": "child-files",
+      "source": "harness/tools",
+      "target": "tools",
+      "include": ["git-partial-stage.py"],
+      "local_manifest": "tools/cc-1c-skills-sync/local-tools.txt"
+    },
+    { "id": "agents-skills", "kind": "alias", "source": ".cursor/skills", "target": ".agents/skills" },
+    { "id": "claude-skills", "kind": "alias", "source": ".cursor/skills", "target": ".claude/skills" },
+    { "id": "claude-commands", "kind": "alias", "source": ".cursor/commands", "target": ".claude/commands" },
+    { "id": "pi-skills", "kind": "alias", "source": ".cursor/skills", "target": ".pi/skills" },
+    { "id": "pi-prompts", "kind": "alias", "source": ".cursor/commands", "target": ".pi/prompts" },
+    { "id": "pi-extensions", "kind": "alias", "source": "harness/pi/extensions", "target": ".pi/extensions" }
+  ]
+}

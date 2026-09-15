@@ -17,7 +17,9 @@ param(
 
     [switch]$SkipDeps,
 
-    [switch]$SkipSections
+    [switch]$SkipSections,
+
+    [switch]$LayoutEngine
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,24 +38,36 @@ $common = @{
 }
 if ($DryRun) { $common["DryRun"] = $true }
 
-Write-Host "=== link-cc-1c-skills ==="
-& (Join-Path $scripts "link-cc-1c-skills.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-skills.txt")
+if ($LayoutEngine) {
+    Write-Host "=== kit-layout (engine) ==="
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $py) { throw "LayoutEngine needs python on PATH" }
+    $lcmd = "apply"
+    if ($DryRun) { $lcmd = "plan" }
+    $env:HARNESS_REL = $HarnessRel
+    & $py.Source (Join-Path $harness "tools\kit-layout\kit_layout.py") $lcmd $root
+    if ($LASTEXITCODE -ne 0) { throw "kit-layout $lcmd failed" }
+} else {
+    Write-Host "=== link-cc-1c-skills ==="
+    & (Join-Path $scripts "link-cc-1c-skills.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-skills.txt")
 
-Write-Host "=== link-cursor-overlay ==="
-& (Join-Path $scripts "link-cursor-overlay.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-overlay.txt")
+    Write-Host "=== link-cursor-overlay ==="
+    & (Join-Path $scripts "link-cursor-overlay.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-overlay.txt")
 
-Write-Host "=== link-kit-tools ==="
-& (Join-Path $scripts "link-kit-tools.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-tools.txt")
+    Write-Host "=== link-kit-tools ==="
+    & (Join-Path $scripts "link-kit-tools.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-tools.txt")
 
-Write-Host "=== link-editor-roots ==="
-$editor = @{ ConsumerRoot = $root }
-if ($DryRun) { $editor["DryRun"] = $true }
-& (Join-Path $scripts "link-editor-roots.ps1") @editor
+    Write-Host "=== link-editor-roots ==="
+    $editor = @{ ConsumerRoot = $root }
+    if ($DryRun) { $editor["DryRun"] = $true }
+    & (Join-Path $scripts "link-editor-roots.ps1") @editor
 
-Write-Host "=== link-pi-roots ==="
-$pi = @{ ConsumerRoot = $root; HarnessRel = $HarnessRel }
-if ($DryRun) { $pi["DryRun"] = $true }
-& (Join-Path $scripts "link-pi-roots.ps1") @pi
+    Write-Host "=== link-pi-roots ==="
+    $pi = @{ ConsumerRoot = $root; HarnessRel = $HarnessRel }
+    if ($DryRun) { $pi["DryRun"] = $true }
+    & (Join-Path $scripts "link-pi-roots.ps1") @pi
+}
 
 $sectionsDir = Join-Path $harness "templates\sections"
 $agentsMd = Join-Path $root "AGENTS.md"

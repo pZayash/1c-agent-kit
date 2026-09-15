@@ -31,6 +31,25 @@ bash harness/scripts/verify-kit-links.sh .
 bash harness/scripts/kit-doctor.sh .
 ```
 
+### Движок раскладки kit-layout (opt-in)
+
+Альтернатива link-скриптам — декларативная таблица
+`tools/kit-layout/layout.json` + движок `kit_layout.py` (idea: teamai
+ResourceHandler): один кроссплатформенный код вместо пар sh/ps1,
+встроенные tombstones и идемпотентность (`OK` без перелинковки).
+
+```bash
+# посмотреть план, ничего не меняя
+python harness/tools/kit-layout/kit_layout.py plan .
+# раскладка через движок в bootstrap
+LAYOUT_ENGINE=1 bash harness/scripts/bootstrap-kit.sh .
+# проверка
+python harness/tools/kit-layout/kit_layout.py verify .
+```
+
+Паритет с link-скриптами проверен синтетикой (440 путей идентично);
+дефолт bootstrap — пока legacy-скрипты.
+
 Parent git: `fatal: not a git repository: harness/../.git/modules/harness` —
 сначала `fix-harness-gitdir` (worktree file-gitdir):
 

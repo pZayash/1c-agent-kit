@@ -9,6 +9,7 @@
 #   SKIP_VERIFY=1
 #   SKIP_DEPS=1       — не звать init-kit-deps
 #   SKIP_SECTIONS=1   — не патчить managed-секции AGENTS.md
+#   LAYOUT_ENGINE=1   — раскладка через tools/kit-layout (вместо link-скриптов)
 #   HARNESS_REL=harness
 set -euo pipefail
 
@@ -30,6 +31,7 @@ if kit_is_windows; then
   [[ "$SKIP_VERIFY" == "1" ]] && args+=(-SkipVerify)
   [[ "${SKIP_DEPS:-0}" == "1" ]] && args+=(-SkipDeps)
   [[ "${SKIP_SECTIONS:-0}" == "1" ]] && args+=(-SkipSections)
+  [[ "${LAYOUT_ENGINE:-0}" == "1" ]] && args+=(-LayoutEngine)
   exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi
 
@@ -38,20 +40,29 @@ HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
 
 [[ -d "$HARNESS_ROOT" ]] || { echo "missing harness: $HARNESS_ROOT (git submodule update --init?)" >&2; exit 1; }
 
-echo "=== link-cc-1c-skills ==="
-bash "$SCRIPT_DIR/link-cc-1c-skills.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-skills.txt"
+if [[ "${LAYOUT_ENGINE:-0}" == "1" ]]; then
+  echo "=== kit-layout (engine) ==="
+  PY="$(command -v python || command -v python3 || true)"
+  [[ -n "$PY" ]] || { echo "LAYOUT_ENGINE needs python on PATH" >&2; exit 1; }
+  lcmd=apply
+  [[ "$DRY_RUN" == "1" ]] && lcmd=plan
+  HARNESS_REL="$HARNESS_REL" "$PY" "$HARNESS_ROOT/tools/kit-layout/kit_layout.py" "$lcmd" "$CONSUMER_ROOT"
+else
+  echo "=== link-cc-1c-skills ==="
+  bash "$SCRIPT_DIR/link-cc-1c-skills.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-skills.txt"
 
-echo "=== link-cursor-overlay ==="
-bash "$SCRIPT_DIR/link-cursor-overlay.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-overlay.txt"
+  echo "=== link-cursor-overlay ==="
+  bash "$SCRIPT_DIR/link-cursor-overlay.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-overlay.txt"
 
-echo "=== link-kit-tools ==="
-bash "$SCRIPT_DIR/link-kit-tools.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-tools.txt"
+  echo "=== link-kit-tools ==="
+  bash "$SCRIPT_DIR/link-kit-tools.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-tools.txt"
 
-echo "=== link-editor-roots ==="
-bash "$SCRIPT_DIR/link-editor-roots.sh" "$CONSUMER_ROOT"
+  echo "=== link-editor-roots ==="
+  bash "$SCRIPT_DIR/link-editor-roots.sh" "$CONSUMER_ROOT"
 
-echo "=== link-pi-roots ==="
-HARNESS_REL="$HARNESS_REL" bash "$SCRIPT_DIR/link-pi-roots.sh" "$CONSUMER_ROOT"
+  echo "=== link-pi-roots ==="
+  HARNESS_REL="$HARNESS_REL" bash "$SCRIPT_DIR/link-pi-roots.sh" "$CONSUMER_ROOT"
+fi
 
 if [[ "${SKIP_SECTIONS:-0}" != "1" && -d "$HARNESS_ROOT/templates/sections" && -f "$CONSUMER_ROOT/AGENTS.md" ]]; then
   PY="$(command -v python || command -v python3 || true)"
