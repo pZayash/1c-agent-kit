@@ -40,7 +40,7 @@ Windows-вариант создаёт `.venv-answer42` в корне проек�
 ### Сборка из форка
 
 Если нужны локальные патчи, ставится не PyPI-релиз, а форк
-(`<https://github.com/pZayash/answer42-mcp>`, ветка `kpsr`; ветка `beta` —
+(`<https://github.com/pZayash/answer42-mcp>`, ветка `fork-patches`; ветка `beta` —
 зеркало upstream). Мотив и состав патчей — `FORK.md` в чекауте форка.
 
 Важно: чек-аут и venv должны лежать в **латинском пути** — кириллица в пути
@@ -62,8 +62,8 @@ python -m venv .venv
 Обновление с upstream:
 
 ```bash
-git fetch upstream --tags && git switch kpsr && git rebase <новый-тег>
-git push --force-with-lease origin kpsr
+git fetch upstream --tags && git switch fork-patches && git rebase <новый-тег>
+git push --force-with-lease origin fork-patches
 ```
 
 Проверка патча: ответ на заведомо битую ссылку
@@ -122,14 +122,14 @@ bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 120 session_status
 ## Обновление форк-сборки
 
 ```powershell
-# подтянуть релизы upstream, ребейзнуть kpsr, пересобрать CF, переустановить пакет
+# подтянуть релизы upstream, ребейзнуть fork-patches, пересобрать CF, переустановить пакет
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 update
 # плюс пуш ветки в origin и перезапуск сервиса
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 update -Push -RestartService
 ```
 
 Ключи `.env`: `ANSWER42_FORK_DIR` (чекаут форка), `ANSWER42_FORK_BRANCH`
-(`kpsr`), `ANSWER42_FORK_REMOTE` (`upstream` — источник релизов),
+(`fork-patches`), `ANSWER42_FORK_REMOTE` (`upstream` — источник релизов),
 `ANSWER42_FORK_PUSH_REMOTE` (`origin`).
 
 Что делает действие:

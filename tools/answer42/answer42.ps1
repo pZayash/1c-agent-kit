@@ -88,7 +88,7 @@ function Get-Config {
         Bin       = & $get "ANSWER42_BIN" $answer42Exe
         # Форк-сборка: чекаут, ветка с патчами и удалённые репозитории
         ForkDir    = & $get "ANSWER42_FORK_DIR" ""
-        ForkBranch = & $get "ANSWER42_FORK_BRANCH" "kpsr"
+        ForkBranch = & $get "ANSWER42_FORK_BRANCH" "fork-patches"
         ForkRemote = & $get "ANSWER42_FORK_REMOTE" "upstream"
         PushRemote = & $get "ANSWER42_FORK_PUSH_REMOTE" "origin"
     }
