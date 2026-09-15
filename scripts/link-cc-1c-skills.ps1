@@ -33,9 +33,13 @@ if (-not (Test-Path $cursorSkills)) {
 }
 
 $local = @{}
-Get-Content -LiteralPath $LocalManifest -Encoding UTF8 | ForEach-Object {
-    $line = $_.Trim()
-    if ($line -and -not $line.StartsWith("#")) { $local[$line] = $true }
+if (Test-Path -LiteralPath $LocalManifest) {
+    Get-Content -LiteralPath $LocalManifest -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith("#")) { $local[$line] = $true }
+    }
+} else {
+    Write-Host "WARN: local manifest missing, treating all skills as kit-owned: $LocalManifest"
 }
 
 Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {

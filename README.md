@@ -25,6 +25,10 @@ powershell -NoProfile -File harness/scripts/init-kit-deps.ps1 -ConsumerRoot . -I
 
 # Проверка links (копия ≠ kit link)
 bash harness/scripts/verify-kit-links.sh .
+
+# Сводная диагностика (read-only): gitlink, gitdir, links,
+# stale-ссылки (WOULD PRUNE), host deps, ps1-ASCII
+bash harness/scripts/kit-doctor.sh .
 ```
 
 Parent git: `fatal: not a git repository: harness/../.git/modules/harness` —
