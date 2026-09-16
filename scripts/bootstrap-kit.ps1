@@ -114,7 +114,11 @@ if (Test-Path $engine) {
             Write-Host "WOULD write thin load-changed-files.sh"
         } else {
             Write-Host "write thin load-changed-files.sh"
-            Set-Content -LiteralPath $wrapper -Value ($thinLines -join "`n") -Encoding utf8
+            # PS 5.1 'Set-Content -Encoding utf8' writes a UTF-8 BOM; bash then
+            # chokes on the shebang ("#!/bin/bash: No such file or directory").
+            # Write BOM-less UTF-8 explicitly.
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($wrapper, ($thinLines -join "`n"), $utf8NoBom)
         }
     }
 }
