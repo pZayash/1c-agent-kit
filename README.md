@@ -164,6 +164,10 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   создаёт symlink'и на `/mnt/...`, невидимые из Windows. `bootstrap-kit`
   и `kit-layout` отказываются работать (WSL_ALLOW=1 — осознанный обход).
   Правильно: Git Bash (`bash.exe`) или PowerShell (.ps1).
+- **Новые alias-каталоги в `git status`** — `.kilo/plugin`,
+  `.opencode/plugin` (и ранее `.pi/*`) — junction'ы kit. Если у
+  потребителя они не в `.gitignore` — добавить: `/.kilo/plugin`,
+  `/.opencode/plugin` (аналогично `.pi`).
 - **`.ps1` только ASCII** — PS 5.1 читает BOM-less файл как ANSI
   (CP1251): байты `—`/кириллицы дают `”`, парсер рвёт строку →
   `ParserError TerminatorExpectedAtEndOfString`. Guard:
