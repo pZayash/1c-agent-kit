@@ -11,15 +11,19 @@ set -euo pipefail
 DIR="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 fail=0
 
+# Символы вне printable ASCII + tab + CR (CRLF допустим).
+# ANSI-C quoting — tab/CR подставляются реальными байтами (POSIX-классы их не понимают).
+NONASCII=$'[^\t -~\r]'
+
 while IFS= read -r f; do
   # skip files with UTF-8 BOM
   if [[ "$(head -c3 "$f" | od -An -tx1 | tr -d ' \n')" == "efbbbf" ]]; then
     continue
   fi
-  # bytes outside printable ASCII + tab/CR/LF
-  if LC_ALL=C grep -q '[^ -~	]' "$f"; then
+  # bytes outside printable ASCII + tab + CR
+  if LC_ALL=C grep -q "$NONASCII" "$f"; then
     echo "FAIL non-ASCII (BOM-less): $f" >&2
-    LC_ALL=C grep -n '[^ -~	]' "$f" | head -5 >&2 || true
+    LC_ALL=C grep -n "$NONASCII" "$f" | head -5 >&2 || true
     fail=1
   fi
 done < <(find "$DIR" -name '*.ps1' -type f)

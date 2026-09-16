@@ -153,8 +153,13 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   `/srv/wt/agent-N` как **prunable** — **не** `prune`.
 - **CRLF в `.sh` на Linux** — `sed -i 's/\r$//'` или `tr -d '\r'`.
   Корень: у потребителя `core.autocrlf=true` без `.gitattributes`.
-  Kit шлёт `.gitattributes` (`*.sh text eol=lf`) — обнови submodule,
-  и CRLF в скриптах больше не появится.
+  Kit шлёт `.gitattributes` (`*.sh text eol=lf`), но `git checkout -f <sha>`
+  **не** перезаписывает уже существующие файлы. Один раз материализовать LF:
+  ```bash
+  git -C harness config core.autocrlf false
+  git -C harness checkout -f <sha>
+  git -C harness checkout-index -a -f   # переписать рабочее дерево по атрибутам
+  ```
 - **WSL-bash + Windows-проект (`/mnt/<drive>/...`)** — Linux-ветка
   создаёт symlink'и на `/mnt/...`, невидимые из Windows. `bootstrap-kit`
   и `kit-layout` отказываются работать (WSL_ALLOW=1 — осознанный обход).

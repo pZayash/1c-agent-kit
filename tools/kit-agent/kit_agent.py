@@ -105,17 +105,18 @@ def cmd_session_start(a):
             except (OSError, subprocess.TimeoutExpired):
                 pass  # layout check is best-effort
 
-        # friction-сигналы, ждущие разбора (memory/rule-friction, ленивая папка)
-        fdir = root / 'memory' / 'rule-friction'
-        if fdir.is_dir():
-            pending = sorted(fdir.glob('*.md'))
-            if pending:
-                names = ', '.join(p.name for p in pending[:5])
-                more = '' if len(pending) <= 5 else f' и ещё {len(pending) - 5}'
-                hints.append(
-                    f'{len(pending)} friction-сигнал(ов) ждут разбора в '
-                    f'memory/rule-friction/ ({names}{more}). Канон: '
-                    f'memory-format.md § Разлад, skill evolve.')
+    # friction-сигналы, ждущие разбора (memory/rule-friction, ленивая папка)
+    # ВНЕ git-ветки: работает и в sandbox/контейнере без git.
+    fdir = root / 'memory' / 'rule-friction'
+    if fdir.is_dir():
+        pending = sorted(fdir.glob('*.md'))
+        if pending:
+            names = ', '.join(p.name for p in pending[:5])
+            more = '' if len(pending) <= 5 else f' и ещё {len(pending) - 5}'
+            hints.append(
+                f'{len(pending)} friction-сигнал(ов) ждут разбора в '
+                f'memory/rule-friction/ ({names}{more}). Канон: '
+                f'memory-format.md § Разлад, skill evolve.')
 
     for h in hints:
         print(f'[!] {h}')
