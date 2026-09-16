@@ -264,6 +264,22 @@ if (Test-Path -LiteralPath $harness) {
             $sfOut | ForEach-Object { Write-Host "       $_" }
         }
     }
+
+    # 10. kit links tracked in the consumer index (Windows junction traversal:
+    #     git follows reparse points with core.symlinks=false and records kit
+    #     content as ordinary blobs -> fresh clone gets stale copies, not links).
+    $layoutTool = Join-Path $harness "tools\kit-layout\kit_layout.py"
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($py -and (Test-Path -LiteralPath $layoutTool)) {
+        $tkOut = & $py.Source $layoutTool tracked $root --harness-rel $HarnessRel 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "no kit links tracked in consumer index"
+        } else {
+            Write-WarnX "kit links tracked as blobs (git follows junction; run bootstrap-kit to untrack):"
+            $tkOut | Select-Object -First 20 | ForEach-Object { Write-Host "       $_" }
+        }
+    }
 }
 
 if ($script:Failed) {

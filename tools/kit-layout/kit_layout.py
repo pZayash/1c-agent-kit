@@ -29,13 +29,18 @@ Fallback lifecycle (consumer consequences of "no symlink privilege"):
   * a fallback whose content was edited by the consumer is NOT overwritten
     (KEEP LOCAL EDITS) - bootstrap no longer silently discards local changes;
   * a managed `.gitignore` block is regenerated so fallbacks do not show up as
-    untracked kit paths in `git status`.
+    untracked kit paths in `git status`;
+  * on Windows git follows directory junctions (core.symlinks=false), so kit
+    content gets tracked as consumer blobs; apply untracks those paths from the
+    index (`git rm --cached`, worktree untouched), verify warns about them.
 
 Commands:
   plan    [consumer-root]   dry-run of apply, exit 0
   apply   [consumer-root]
   verify  [consumer-root]   all expected links exist and are links; exit 1 on FAIL
                             (file copy-fallback = WARN, dir copies = FAIL)
+  tracked [consumer-root]   list kit link paths tracked in the consumer index;
+                            exit 1 if any (junction traversal on Windows)
 
 Stdlib only. Windows: dirs -> mklink /J junctions (no admin needed),
 files -> symlink with copy fallback. Junction removal via os.rmdir
@@ -169,6 +174,45 @@ def is_within(path, root):
         return False
 
 
+def git_run(root, *args):
+    """Run git in the consumer root; never raises (no git -> rc 127)."""
+    try:
+        r = subprocess.run(['git', '-C', str(root), *args],
+                           capture_output=True, text=True)
+        return r.returncode, r.stdout, r.stderr
+    except OSError:
+        return 127, '', 'git not found'
+
+
+def tracked_under(root, rels):
+    """Subset of rels that the consumer's git index tracks.
+
+    Only meaningful for a repo root that is exactly the consumer root. On
+    Windows kit dirs are junctions; git (core.symlinks=false) follows the
+    reparse point and records kit content as ordinary blobs. Such paths must
+    be untracked, otherwise a fresh clone gets stale kit copies, not links.
+    """
+    rels = [r.replace('\\', '/').rstrip('/') for r in rels if r]
+    if not rels:
+        return []
+    rc, out, _ = git_run(root, 'rev-parse', '--is-inside-work-tree')
+    if rc != 0 or out.strip() != 'true':
+        return []
+    rc, top, _ = git_run(root, 'rev-parse', '--show-toplevel')
+    if rc != 0:
+        return []
+    if os.path.normcase(str(Path(top.strip()).resolve())) != os.path.normcase(str(root)):
+        return []
+    tracked = set()
+    for i in range(0, len(rels), 100):
+        rc, out, _ = git_run(root, 'ls-files', '-z', '--', *rels[i:i + 100])
+        if rc != 0:
+            return []
+        tracked.update(p for p in out.split('\0') if p)
+    return [rel for rel in rels
+            if any(t == rel or t.startswith(rel + '/') for t in tracked)]
+
+
 def remove_link_or_tree(path):
     """Reparse points are removed as links (os.rmdir/os.remove never recurse
     into the junction target); plain copies are removed as trees."""
@@ -187,11 +231,13 @@ def remove_link_or_tree(path):
 
 class Ctx:
     def __init__(self, root, harness_rel, dry_run=False, gitignore=True,
-                 manifest_rel=FALLBACK_MANIFEST_REL):
+                 manifest_rel=FALLBACK_MANIFEST_REL, quiet=False, untrack=True):
         self.root = Path(root).resolve()
         self.harness_rel = harness_rel
         self.dry_run = dry_run
         self.gitignore = gitignore
+        self.quiet = quiet
+        self.untrack = untrack
         self.actions = []   # (level, message); level: ACT/WARN/FAIL/OK
         self.pending = 0    # would-be mutations in plan mode
         self.managed = set()      # consumer-rel paths owned by the kit
@@ -202,7 +248,8 @@ class Ctx:
 
     def say(self, level, msg):
         self.actions.append((level, msg))
-        print(msg)
+        if not self.quiet:
+            print(msg)
 
     def resolve(self, rel):
         if rel.startswith('harness/'):
@@ -376,6 +423,7 @@ def verify_resource(ctx, res):
         return True
     if res['kind'] == 'alias':
         target = ctx.resolve(res['target'])
+        ctx.note_managed(rel_posix(target, ctx.root))
         if is_link(target):
             ctx.say('OK', f'OK {res["target"]}')
         elif target.exists():
@@ -398,6 +446,7 @@ def verify_resource(ctx, res):
             continue
         link = target / child.name
         rel = f'{res["target"]}/{child.name}'
+        ctx.note_managed(rel)
         if is_link(link):
             ctx.say('OK', f'OK {rel}')
         elif link.exists():
@@ -454,6 +503,38 @@ def prune_stale_fallbacks(ctx):
                 ctx.say('WARN', f'stale fallback has local edits, kept: {rel}')
 
 
+def untrack_links(ctx):
+    """Remove kit link paths from the consumer index (index only).
+
+    Windows junction traversal makes git track kit content as consumer blobs;
+    without this the submodule is duplicated in the index and a fresh clone
+    materialises stale copies instead of links. --cached never touches the
+    working tree (junctions stay in place).
+    """
+    if ctx.dry_run or not ctx.untrack:
+        return
+    rels = tracked_under(ctx.root, sorted(ctx.managed))
+    if not rels:
+        return
+    for i in range(0, len(rels), 100):
+        chunk = rels[i:i + 100]
+        rc, out, err = git_run(ctx.root, 'rm', '-r', '-q', '-f', '--cached',
+                               '--ignore-unmatch', '--', *chunk)
+        if rc != 0:
+            ctx.say('WARN', f'untrack failed: {(err or out).strip()}')
+            continue
+        for rel in chunk:
+            ctx.say('ACT', f'UNTRACK: {rel}')
+
+
+def verify_tracked(ctx):
+    """WARN about kit link paths still tracked in the consumer index."""
+    for rel in tracked_under(ctx.root, sorted(ctx.managed)):
+        ctx.say('WARN', f'WARN kit link tracked in consumer index '
+                       f'(git follows junction): {rel}')
+    return True
+
+
 def write_fallback_manifest(ctx):
     if ctx.dry_run:
         return
@@ -499,7 +580,7 @@ def write_managed_gitignore(ctx):
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog='kit-layout', description=__doc__.split('\n')[0])
-    p.add_argument('command', choices=['plan', 'apply', 'verify'])
+    p.add_argument('command', choices=['plan', 'apply', 'verify', 'tracked'])
     p.add_argument('consumer_root', nargs='?', default='.')
     p.add_argument('--harness-rel', default=os.environ.get('HARNESS_REL', 'harness'))
     p.add_argument('--layout', default=str(Path(__file__).with_name('layout.json')))
@@ -507,14 +588,18 @@ def main(argv=None):
                    help='plan: exit 1 if any pending action (parity gate)')
     p.add_argument('--no-gitignore', action='store_true',
                    help='do not (re)generate the kit-managed .gitignore block')
+    p.add_argument('--no-untrack', action='store_true',
+                   help='do not untrack kit link paths from the consumer index')
     a = p.parse_intermixed_args(argv)
 
     layout = json.loads(Path(a.layout).read_text(encoding='utf-8'))
     gitignore = (not a.no_gitignore
                  and os.environ.get('KIT_NO_GITIGNORE') != '1'
                  and bool(layout.get('gitignore', True)))
-    ctx = Ctx(a.consumer_root, a.harness_rel, dry_run=(a.command == 'plan'),
-              gitignore=gitignore,
+    ctx = Ctx(a.consumer_root, a.harness_rel,
+              dry_run=(a.command in ('plan', 'tracked')),
+              gitignore=gitignore, quiet=(a.command == 'tracked'),
+              untrack=(not a.no_untrack),
               manifest_rel=layout.get('fallback_manifest', FALLBACK_MANIFEST_REL))
     if is_wsl() and wsl_windows_path(ctx.root) and os.environ.get('WSL_ALLOW') != '1':
         print(
@@ -529,19 +614,27 @@ def main(argv=None):
         return 2
 
     failed = False
-    if a.command != 'verify':
-        load_fallback_manifest(ctx)
-    for res in layout['resources']:
-        if a.command == 'verify':
+    if a.command == 'verify':
+        for res in layout['resources']:
             failed |= not verify_resource(ctx, res)
-        else:
+        verify_tracked(ctx)
+    elif a.command == 'tracked':
+        for res in layout['resources']:
+            runner = run_alias if res['kind'] == 'alias' else run_child
+            runner(ctx, res)
+        tracked = tracked_under(ctx.root, sorted(ctx.managed))
+        for rel in tracked:
+            print(rel)
+        return 1 if tracked else 0
+    else:
+        load_fallback_manifest(ctx)
+        for res in layout['resources']:
             runner = run_alias if res['kind'] == 'alias' else run_child
             failed |= not runner(ctx, res)
-
-    if a.command != 'verify':
         prune_stale_fallbacks(ctx)
         write_fallback_manifest(ctx)
         write_managed_gitignore(ctx)
+        untrack_links(ctx)
 
     fails = sum(1 for lvl, _ in ctx.actions if lvl == 'FAIL')
     if a.command == 'plan':

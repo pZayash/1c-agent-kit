@@ -219,6 +219,21 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     fi
     rm -f "$sflog"
   fi
+
+  # 10. kit links tracked in the consumer index (Windows junction traversal:
+  #     git follows reparse points with core.symlinks=false and records kit
+  #     content as ordinary blobs -> fresh clone gets stale copies, not links).
+  if [[ -n "$PY" && -f "$HARNESS_ROOT/tools/kit-layout/kit_layout.py" ]]; then
+    tklog="$(mktemp)"
+    if "$PY" "$HARNESS_ROOT/tools/kit-layout/kit_layout.py" tracked "$CONSUMER_ROOT" \
+         --harness-rel "$HARNESS_REL" >"$tklog" 2>&1; then
+      ok "no kit links tracked in consumer index"
+    else
+      warn "kit links tracked as blobs (git follows junction; run bootstrap-kit to untrack):"
+      sed 's/^/       /' "$tklog" | head -20
+    fi
+    rm -f "$tklog"
+  fi
 fi
 
 echo "=== kit-doctor: $([ "$FAIL" -eq 0 ] && echo PASS || echo FAIL) ==="
