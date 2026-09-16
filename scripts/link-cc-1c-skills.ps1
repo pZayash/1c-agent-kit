@@ -41,6 +41,7 @@ if (Test-Path -LiteralPath $LocalManifest) {
 } else {
     Write-Host "WARN: local manifest missing, treating all skills as kit-owned: $LocalManifest"
 }
+$script:ManagedPaths = New-Object System.Collections.Generic.List[string]
 
 Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {
     $name = $_.Name
@@ -79,9 +80,14 @@ Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {
         return
     }
     Write-Host "LINK: $name"
+    [void]$script:ManagedPaths.Add(".cursor/skills/$name")
 }
 
 # Prune kit-owned junctions whose skill vanished upstream (tombstones).
 Remove-KitStaleLinks -LinkRoot $cursorSkills -KitSource $kitSkills -Local $local -DryRun:$DryRun
+
+if (-not $DryRun) {
+    Update-KitGitignore -Root $root -Paths $script:ManagedPaths -Id "cc-1c-skills"
+}
 
 Write-Host "Done."

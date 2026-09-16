@@ -49,15 +49,23 @@ function New-EditorJunction([string]$link, [string]$target, [string]$name) {
     Write-Host "JUNCTION: $name"
 }
 
+$managed = New-Object System.Collections.Generic.List[string]
 if (Test-Path -LiteralPath $cursorSkills) {
     New-EditorJunction (Join-Path $root ".agents\skills") $cursorSkills ".agents/skills"
     New-EditorJunction (Join-Path $root ".claude\skills") $cursorSkills ".claude/skills"
+    [void]$managed.Add(".agents/skills")
+    [void]$managed.Add(".claude/skills")
 } else {
     Write-Host "SKIP editor skill roots (no .cursor/skills)"
 }
 
 if (Test-Path -LiteralPath $cursorCommands) {
     New-EditorJunction (Join-Path $root ".claude\commands") $cursorCommands ".claude/commands"
+    [void]$managed.Add(".claude/commands")
+}
+
+if (-not $DryRun -and $managed.Count -gt 0) {
+    Update-KitGitignore -Root $root -Paths $managed -Id "editor-roots"
 }
 
 Write-Host "Done."

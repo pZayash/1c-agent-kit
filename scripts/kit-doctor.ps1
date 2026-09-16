@@ -92,6 +92,15 @@ if (Test-Path -LiteralPath $harness) {
             Write-Ok "harness HEAD matches recorded gitlink"
         }
     }
+
+    # 2c. harness working tree dirty: with hardlink fallback a consumer edit to a
+    #     kit-owned file lands in harness/ and is otherwise invisible here.
+    $hfDirty = @(& git -C $harness status --porcelain -uno 2>$null)
+    if ($hfDirty.Count -gt 0) {
+        Write-WarnX "harness working tree dirty ($($hfDirty.Count) tracked file(s)) - hardlink fallback edit? git -C $HarnessRel status"
+    } else {
+        Write-Ok "harness working tree clean"
+    }
 }
 
 # 3. parent git alive
@@ -156,26 +165,28 @@ if (Test-Path -LiteralPath $harness) {
         Write-Bad "non-ASCII in BOM-less *.ps1 - PS 5.1 ParserError risk: $($rel -join ', ')"
     }
 
-    # 8. copy-fallback paths (tombstones blind spot: prune touches reparse only)
+    # 8. file fallbacks (hardlink then copy when no symlink privilege). A fallback
+    #    in sync is fine; a stale/drifted one is visible now (manifest + hash) and
+    #    prune can clean orphans, unlike the old "prune blind" copy-fallback.
     . (Join-Path $scriptsDir "_win-reparse.ps1")
-    $copies = @()
+    $manifestPath = Join-Path $syncDir "kit-fallback.txt"
+    $recorded = @{}
+    if (Test-Path -LiteralPath $manifestPath) {
+        Get-Content -LiteralPath $manifestPath -Encoding UTF8 | ForEach-Object {
+            $line = $_.Trim()
+            if (-not $line -or $line.StartsWith("#")) { return }
+            $parts = $line -split "`t"
+            if ($parts.Count -ge 3) {
+                $recorded[$parts[0].Replace('\', '/')] = @{ source = $parts[1]; sha = $parts[2] }
+            }
+        }
+    }
     $overlayLocal = @{}
     $mp = Join-Path $syncDir "local-overlay.txt"
     if (Test-Path -LiteralPath $mp) {
         Get-Content -LiteralPath $mp -Encoding UTF8 | ForEach-Object {
             $line = $_.Trim()
             if ($line -and -not $line.StartsWith("#")) { $overlayLocal[$line] = $true }
-        }
-    }
-    foreach ($sub in @("rules", "commands")) {
-        $src = Join-Path $harness "cursor\$sub"
-        if (-not (Test-Path -LiteralPath $src)) { continue }
-        Get-ChildItem -LiteralPath $src -File | ForEach-Object {
-            if ($overlayLocal.ContainsKey($_.Name)) { return }
-            $dst = Join-Path $root ".cursor\$sub\$($_.Name)"
-            if ((Test-Path -LiteralPath $dst) -and -not (Test-KitReparse $dst)) {
-                $copies += ".cursor\$sub\$($_.Name)"
-            }
         }
     }
     $toolsLocal = @{}
@@ -186,17 +197,58 @@ if (Test-Path -LiteralPath $harness) {
             if ($line -and -not $line.StartsWith("#")) { $toolsLocal[$line] = $true }
         }
     }
-    $pyDst = Join-Path $root "tools\git-partial-stage.py"
-    if (-not $toolsLocal.ContainsKey("git-partial-stage.py") -and
-        (Test-Path -LiteralPath (Join-Path $harness "tools\git-partial-stage.py")) -and
-        (Test-Path -LiteralPath $pyDst) -and -not (Test-KitReparse $pyDst)) {
-        $copies += "tools\git-partial-stage.py"
+    $pairs = New-Object System.Collections.Generic.List[object]
+    foreach ($sub in @("rules", "commands")) {
+        $srcDir = Join-Path $harness "cursor\$sub"
+        if (-not (Test-Path -LiteralPath $srcDir)) { continue }
+        Get-ChildItem -LiteralPath $srcDir -File | ForEach-Object {
+            if ($overlayLocal.ContainsKey($_.Name)) { return }
+            $pairs.Add([pscustomobject]@{ rel = ".cursor/$sub/$($_.Name)"; src = $_.FullName })
+        }
     }
-    if ($copies.Count -gt 0) {
-        Write-WarnX "$($copies.Count) kit path(s) are copy-fallback (no symlink privilege) - prune blind; content still refreshed on bootstrap:"
-        $copies | ForEach-Object { Write-Host "       $_" }
+    $pySrc = Join-Path $harness "tools\git-partial-stage.py"
+    if (-not $toolsLocal.ContainsKey("git-partial-stage.py") -and (Test-Path -LiteralPath $pySrc)) {
+        $pairs.Add([pscustomobject]@{ rel = "tools/git-partial-stage.py"; src = $pySrc })
+    }
+    $staleFallback = @()
+    $inSync = 0
+    $pairRels = @{}
+    foreach ($p in $pairs) {
+        $pairRels[$p.rel] = $true
+        $dst = Join-Path $root ($p.rel -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $dst)) {
+            $staleFallback += "$($p.rel) (fallback missing - run bootstrap-kit)"
+            continue
+        }
+        if (Test-KitReparse $dst) { continue }
+        $srcHash = Get-KitFileHash $p.src
+        $dstHash = Get-KitFileHash $dst
+        if ($srcHash -eq $dstHash) { $inSync++ } else {
+            $staleFallback += "$($p.rel) (content differs from kit - run bootstrap-kit)"
+        }
+    }
+    foreach ($rel in $recorded.Keys) {
+        if ($pairRels.ContainsKey($rel)) { continue }
+        $dst = Join-Path $root ($rel -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $dst)) { continue }
+        if (Test-KitReparse $dst) { continue }
+        $info = $recorded[$rel]
+        $srcPath = Join-Path $root ($info.source -replace '/', '\')
+        if (Test-Path -LiteralPath $srcPath) { continue }
+        $dstHash = Get-KitFileHash $dst
+        if ($dstHash -eq $info.sha) {
+            $staleFallback += "$rel (orphan: source removed upstream - bootstrap-kit will prune)"
+        } else {
+            $staleFallback += "$rel (orphan with local edits - kept)"
+        }
+    }
+    if ($staleFallback.Count -gt 0) {
+        Write-WarnX "$($staleFallback.Count) file fallback(s) out of sync:"
+        $staleFallback | ForEach-Object { Write-Host "       $_" }
+    } elseif ($inSync -gt 0) {
+        Write-Ok "$inSync file fallback(s) in sync (hardlink/copy; no symlink privilege)"
     } else {
-        Write-Ok "no copy-fallback kit paths"
+        Write-Ok "no file fallback kit paths"
     }
 
     # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only)

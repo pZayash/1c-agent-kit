@@ -27,9 +27,11 @@ CURSOR_SKILLS="$CONSUMER_ROOT/.cursor/skills"
 CURSOR_CMDS="$CONSUMER_ROOT/.cursor/commands"
 KIT_EXT="$HARNESS_ROOT/pi/extensions"
 
+managed=()
 if [[ -d "$CURSOR_SKILLS" ]]; then
   mkdir -p "$CONSUMER_ROOT/.pi"
   kit_ln_sfn "$CURSOR_SKILLS" "$CONSUMER_ROOT/.pi/skills"
+  managed+=(".pi/skills")
 else
   echo "SKIP .pi/skills (no .cursor/skills)"
 fi
@@ -37,6 +39,7 @@ fi
 if [[ -d "$CURSOR_CMDS" ]]; then
   mkdir -p "$CONSUMER_ROOT/.pi"
   kit_ln_sfn "$CURSOR_CMDS" "$CONSUMER_ROOT/.pi/prompts"
+  managed+=(".pi/prompts")
 else
   echo "SKIP .pi/prompts (no .cursor/commands)"
 fi
@@ -44,8 +47,11 @@ fi
 if [[ -d "$KIT_EXT" ]]; then
   mkdir -p "$CONSUMER_ROOT/.pi"
   kit_ln_sfn "$KIT_EXT" "$CONSUMER_ROOT/.pi/extensions"
+  managed+=(".pi/extensions")
 else
   echo "SKIP .pi/extensions (no $KIT_EXT)"
 fi
+
+kit_update_gitignore "$CONSUMER_ROOT" "pi-roots" ${managed[@]+"${managed[@]}"}
 
 echo "Done."

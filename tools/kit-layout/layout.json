@@ -1,6 +1,8 @@
 {
-  "version": 1,
-  "comment": "Declarative layout of the kit harness into a consumer (idea: teamai ResourceHandler table). Engine: tools/kit-layout/kit_layout.py. Paths are consumer-relative; 'harness/' prefix = inside the kit submodule (HARNESS_REL).",
+  "version": 2,
+  "comment": "Declarative layout of the kit harness into a consumer (idea: teamai ResourceHandler table). Engine: tools/kit-layout/kit_layout.py. Paths are consumer-relative; 'harness/' prefix = inside the kit submodule (HARNESS_REL). gitignore=true regenerates the kit-managed .gitignore block; fallback_manifest records hardlink/copy fallbacks for tombstones + drift checks.",
+  "gitignore": true,
+  "fallback_manifest": "tools/cc-1c-skills-sync/kit-fallback.txt",
   "resources": [
     {
       "id": "cc-1c-skills",

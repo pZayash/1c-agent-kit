@@ -21,10 +21,12 @@ CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
 CURSOR_SKILLS="$CONSUMER_ROOT/.cursor/skills"
 CURSOR_CMDS="$CONSUMER_ROOT/.cursor/commands"
 
+managed=()
 if [[ -d "$CURSOR_SKILLS" ]]; then
   mkdir -p "$CONSUMER_ROOT/.agents" "$CONSUMER_ROOT/.claude"
   kit_ln_sfn "$CURSOR_SKILLS" "$CONSUMER_ROOT/.agents/skills"
   kit_ln_sfn "$CURSOR_SKILLS" "$CONSUMER_ROOT/.claude/skills"
+  managed+=(".agents/skills" ".claude/skills")
 else
   echo "SKIP editor skill roots (no .cursor/skills)"
 fi
@@ -32,6 +34,9 @@ fi
 if [[ -d "$CURSOR_CMDS" ]]; then
   mkdir -p "$CONSUMER_ROOT/.claude"
   kit_ln_sfn "$CURSOR_CMDS" "$CONSUMER_ROOT/.claude/commands"
+  managed+=(".claude/commands")
 fi
+
+kit_update_gitignore "$CONSUMER_ROOT" "editor-roots" ${managed[@]+"${managed[@]}"}
 
 echo "Done."

@@ -24,6 +24,7 @@ HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
 KIT_TOOLS="$HARNESS_ROOT/tools"
 CONSUMER_TOOLS="$CONSUMER_ROOT/tools"
 MANIFEST="$CONSUMER_ROOT/$LOCAL_MANIFEST"
+managed=()
 
 [[ -d "$KIT_TOOLS" ]] || { echo "missing kit tools: $KIT_TOOLS" >&2; exit 1; }
 mkdir -p "$CONSUMER_TOOLS"
@@ -39,13 +40,17 @@ for name in mailbox bsl-check sandbox load-changed-files mcp-call answer42; do
   target="$KIT_TOOLS/$name"
   [[ -d "$target" ]] || { echo "SKIP missing in kit: $name"; continue; }
   kit_ln_sfn "$target" "$CONSUMER_TOOLS/$name"
+  managed+=("tools/$name")
 done
 
 if [[ -z "${local_names[git-partial-stage.py]:-}" && -f "$KIT_TOOLS/git-partial-stage.py" ]]; then
   kit_ln_sfn "$KIT_TOOLS/git-partial-stage.py" "$CONSUMER_TOOLS/git-partial-stage.py"
+  managed+=("tools/git-partial-stage.py")
 fi
 
 # Prune kit-owned links whose tool vanished upstream (tombstones).
 kit_prune_stale_links "$CONSUMER_TOOLS" "$KIT_TOOLS" local_names
+
+kit_update_gitignore "$CONSUMER_ROOT" "kit-tools" ${managed[@]+"${managed[@]}"}
 
 echo "Done."

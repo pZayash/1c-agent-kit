@@ -52,22 +52,30 @@ function New-PiJunction([string]$link, [string]$target, [string]$name) {
     Write-Host "JUNCTION: $name"
 }
 
+$managed = New-Object System.Collections.Generic.List[string]
 if (Test-Path -LiteralPath $cursorSkills) {
     New-PiJunction (Join-Path $root ".pi\skills") $cursorSkills ".pi/skills"
+    [void]$managed.Add(".pi/skills")
 } else {
     Write-Host "SKIP .pi/skills (no .cursor/skills)"
 }
 
 if (Test-Path -LiteralPath $cursorCommands) {
     New-PiJunction (Join-Path $root ".pi\prompts") $cursorCommands ".pi/prompts"
+    [void]$managed.Add(".pi/prompts")
 } else {
     Write-Host "SKIP .pi/prompts (no .cursor/commands)"
 }
 
 if (Test-Path -LiteralPath $kitExtensions) {
     New-PiJunction (Join-Path $root ".pi\extensions") $kitExtensions ".pi/extensions"
+    [void]$managed.Add(".pi/extensions")
 } else {
     Write-Host "SKIP .pi/extensions (no harness/pi/extensions)"
+}
+
+if (-not $DryRun -and $managed.Count -gt 0) {
+    Update-KitGitignore -Root $root -Paths $managed -Id "pi-roots"
 }
 
 Write-Host "Done."

@@ -51,7 +51,7 @@ function New-DirJunction([string]$link, [string]$target, [string]$name) {
     Write-Host "JUNCTION: $name"
 }
 
-function New-FileLink([string]$link, [string]$target, [string]$name) {
+function New-FileLink([string]$link, [string]$target, [string]$name, [string]$rel, [string]$sourceRel) {
     if ($DryRun) {
         Write-Host "WOULD FILELINK: $link -> $target"
         return
@@ -66,18 +66,28 @@ function New-FileLink([string]$link, [string]$target, [string]$name) {
         } elseif ($NoReplaceCopies) {
             Write-Host "SKIP exists: $link"
             return
+        } elseif (Test-KitFileEqual $link $target) {
+            Write-Host "OK (fallback, in sync): $name"
+            Set-KitFallbackEntry -Map $script:FallbackMap -Rel $rel -Source $sourceRel -Sha (Get-KitFileHash $target)
+            return
         } else {
+            $rec = $script:FallbackMap[$rel]
+            $linkHash = Get-KitFileHash $link
+            if ($rec -and $linkHash -ne $rec.sha -and $linkHash -ne (Get-KitFileHash $target)) {
+                Write-Host "WARN KEEP LOCAL EDITS in fallback: $name (not overwritten; move it to local manifest to own it)"
+                return
+            }
+            Write-Host "WARN REFRESH stale fallback: $name"
             Remove-KitReparseOrTree $link
         }
     }
-    cmd /c "mklink `"$link`" `"$target`"" | Out-Host
-    if ($LASTEXITCODE -eq 0) {
+    $how = New-KitFileLink $target $link
+    if ($how -eq 'FILELINK') {
         Write-Host "FILELINK: $name"
-        return
+    } else {
+        Write-Host "WARN $how (no symlink privilege): $name"
+        Set-KitFallbackEntry -Map $script:FallbackMap -Rel $rel -Source $sourceRel -Sha (Get-KitFileHash $target)
     }
-    Write-Host "WARN: file symlink failed for $name - copy fallback (enable Developer Mode)"
-    Copy-Item -LiteralPath $target -Destination $link -Force
-    Write-Host "COPY: $name"
 }
 
 $root = (Resolve-Path $ConsumerRoot).Path
@@ -86,6 +96,8 @@ if (-not (Test-Path $overlay)) { throw "overlay not found: $overlay" }
 
 $local = Read-LocalNames $LocalManifest
 $cursor = Join-Path $root ".cursor"
+$script:FallbackMap = Read-KitFallbackManifest $root
+$script:ManagedPaths = New-Object System.Collections.Generic.List[string]
 
 $skillsSrc = Join-Path $overlay "skills"
 if (Test-Path $skillsSrc) {
@@ -97,6 +109,7 @@ if (Test-Path $skillsSrc) {
             return
         }
         New-DirJunction (Join-Path $skillsDst $_.Name) $_.FullName $_.Name
+        [void]$script:ManagedPaths.Add(".cursor/skills/$($_.Name)")
     }
     Remove-KitStaleLinks -LinkRoot $skillsDst -KitSource $skillsSrc -Local $local -DryRun:$DryRun
 }
@@ -109,7 +122,8 @@ if (Test-Path $rulesSrc) {
             Write-Host "SKIP LOCAL: $($_.Name)"
             return
         }
-        New-FileLink (Join-Path $rulesDst $_.Name) $_.FullName $_.Name
+        New-FileLink (Join-Path $rulesDst $_.Name) $_.FullName $_.Name ".cursor/rules/$($_.Name)" "$HarnessRel/cursor/rules/$($_.Name)"
+        [void]$script:ManagedPaths.Add(".cursor/rules/$($_.Name)")
     }
     Remove-KitStaleLinks -LinkRoot $rulesDst -KitSource $rulesSrc -Local $local -DryRun:$DryRun
 }
@@ -122,9 +136,16 @@ if (Test-Path $cmdSrc) {
             Write-Host "SKIP LOCAL: $($_.Name)"
             return
         }
-        New-FileLink (Join-Path $cmdDst $_.Name) $_.FullName $_.Name
+        New-FileLink (Join-Path $cmdDst $_.Name) $_.FullName $_.Name ".cursor/commands/$($_.Name)" "$HarnessRel/cursor/commands/$($_.Name)"
+        [void]$script:ManagedPaths.Add(".cursor/commands/$($_.Name)")
     }
     Remove-KitStaleLinks -LinkRoot $cmdDst -KitSource $cmdSrc -Local $local -DryRun:$DryRun
+}
+
+Remove-KitStaleFallback -Root $root -Map $script:FallbackMap -Prefix ".cursor/" -DryRun:$DryRun
+if (-not $DryRun) {
+    Save-KitFallbackManifest $root $script:FallbackMap
+    Update-KitGitignore -Root $root -Paths $script:ManagedPaths -Id "cursor-overlay"
 }
 
 Write-Host "Done."

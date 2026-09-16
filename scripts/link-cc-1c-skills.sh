@@ -30,6 +30,7 @@ mkdir -p "$CURSOR_SKILLS"
 
 declare -A local_names=()
 kit_load_manifest "$MANIFEST" local_names
+managed=()
 
 for d in "$KIT_SKILLS"/*; do
   [[ -d "$d" ]] || continue
@@ -39,9 +40,12 @@ for d in "$KIT_SKILLS"/*; do
     continue
   fi
   kit_ln_sfn "$d" "$CURSOR_SKILLS/$name"
+  managed+=(".cursor/skills/$name")
 done
 
 # Prune kit-owned links whose skill vanished upstream (tombstones).
 kit_prune_stale_links "$CURSOR_SKILLS" "$KIT_SKILLS" local_names
+
+kit_update_gitignore "$CONSUMER_ROOT" "cc-1c-skills" ${managed[@]+"${managed[@]}"}
 
 echo "Done."

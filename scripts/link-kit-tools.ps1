@@ -53,7 +53,7 @@ function New-DirJunction([string]$link, [string]$target, [string]$name) {
     Write-Host "JUNCTION: $name"
 }
 
-function New-FileLink([string]$link, [string]$target, [string]$name) {
+function New-FileLink([string]$link, [string]$target, [string]$name, [string]$rel, [string]$sourceRel) {
     if ($DryRun) {
         Write-Host "WOULD FILELINK: $link -> $target"
         return
@@ -68,18 +68,28 @@ function New-FileLink([string]$link, [string]$target, [string]$name) {
         } elseif ($NoReplaceCopies) {
             Write-Error "Exists and not link: $link"
             return
+        } elseif (Test-KitFileEqual $link $target) {
+            Write-Host "OK (fallback, in sync): $name"
+            Set-KitFallbackEntry -Map $script:FallbackMap -Rel $rel -Source $sourceRel -Sha (Get-KitFileHash $target)
+            return
         } else {
+            $rec = $script:FallbackMap[$rel]
+            $linkHash = Get-KitFileHash $link
+            if ($rec -and $linkHash -ne $rec.sha -and $linkHash -ne (Get-KitFileHash $target)) {
+                Write-Host "WARN KEEP LOCAL EDITS in fallback: $name (not overwritten; move it to local manifest to own it)"
+                return
+            }
+            Write-Host "WARN REFRESH stale fallback: $name"
             Remove-KitReparseOrTree $link
         }
     }
-    cmd /c "mklink `"$link`" `"$target`"" | Out-Host
-    if ($LASTEXITCODE -eq 0) {
+    $how = New-KitFileLink $target $link
+    if ($how -eq 'FILELINK') {
         Write-Host "FILELINK: $name"
-        return
+    } else {
+        Write-Host "WARN $how (no symlink privilege): $name"
+        Set-KitFallbackEntry -Map $script:FallbackMap -Rel $rel -Source $sourceRel -Sha (Get-KitFileHash $target)
     }
-    Write-Host "WARN: file symlink failed for $name - copy fallback"
-    Copy-Item -LiteralPath $target -Destination $link -Force
-    Write-Host "COPY: $name"
 }
 
 $root = (Resolve-Path $ConsumerRoot).Path
@@ -94,6 +104,8 @@ if (-not (Test-Path $consumerTools)) {
 }
 
 $local = Read-LocalNames $LocalManifest
+$script:FallbackMap = Read-KitFallbackManifest $root
+$script:ManagedPaths = New-Object System.Collections.Generic.List[string]
 $dirNames = @("mailbox", "bsl-check", "sandbox", "load-changed-files", "mcp-call", "answer42")
 
 foreach ($name in $dirNames) {
@@ -107,16 +119,24 @@ foreach ($name in $dirNames) {
         continue
     }
     New-DirJunction (Join-Path $consumerTools $name) $target $name
+    [void]$script:ManagedPaths.Add("tools/$name")
 }
 
 if (-not $local.ContainsKey("git-partial-stage.py")) {
     $pyTarget = Join-Path $kitTools "git-partial-stage.py"
     if (Test-Path $pyTarget) {
-        New-FileLink (Join-Path $consumerTools "git-partial-stage.py") $pyTarget "git-partial-stage.py"
+        New-FileLink (Join-Path $consumerTools "git-partial-stage.py") $pyTarget "git-partial-stage.py" "tools/git-partial-stage.py" "$HarnessRel/tools/git-partial-stage.py"
+        [void]$script:ManagedPaths.Add("tools/git-partial-stage.py")
     }
 }
 
 # Prune kit-owned links whose tool vanished upstream (tombstones).
 Remove-KitStaleLinks -LinkRoot $consumerTools -KitSource $kitTools -Local $local -DryRun:$DryRun
+
+Remove-KitStaleFallback -Root $root -Map $script:FallbackMap -Prefix "tools/" -DryRun:$DryRun
+if (-not $DryRun) {
+    Save-KitFallbackManifest $root $script:FallbackMap
+    Update-KitGitignore -Root $root -Paths $script:ManagedPaths -Id "kit-tools"
+}
 
 Write-Host "Done."

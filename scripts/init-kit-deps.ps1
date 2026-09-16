@@ -170,18 +170,24 @@ if (-not $bsllsPy) {
 
 $probe = Join-Path $env:TEMP ("kit-mklink-" + [guid]::NewGuid().ToString("n"))
 $probeT = "$probe-t"
+$probeH = "$probe-h"
 try {
     Set-Content -LiteralPath $probeT -Value "x" -Encoding ascii
     cmd /c "mklink `"$probe`" `"$probeT`"" | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "OK file mklink (Developer Mode)"
+        Write-Host "OK file symlink (Developer Mode / SeCreateSymbolicLinkPrivilege)"
     } else {
-        Write-Host "WARN no file mklink - rules .mdc will copy-fallback"
+        cmd /c "mklink /H `"$probeH`" `"$probeT`"" | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "OK file hardlink fallback (no symlink privilege; rules .mdc are hardlinked)"
+        } else {
+            Write-Host "WARN no file symlink/hardlink (cross-volume?) - rules .mdc copy-fallback"
+        }
     }
 } catch {
-    Write-Host "WARN no file mklink - rules .mdc will copy-fallback"
+    Write-Host "WARN no file symlink probe - rules .mdc copy-fallback"
 }
-Remove-Item -LiteralPath $probe, $probeT -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $probe, $probeT, $probeH -Force -ErrorAction SilentlyContinue
 
 if ($Install) {
     Sync-EnvPath

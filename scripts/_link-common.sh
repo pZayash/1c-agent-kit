@@ -70,6 +70,63 @@ kit_ln_sfn() {
   echo "LINK: $(basename "$link_path")"
 }
 
+# File fallback chain when a symlink is not available: hardlink (same volume,
+# no privilege), then copy. Linux symlinks rarely fail, but this keeps parity
+# with the Windows/engine path and documents the policy.
+kit_ln_file_fallback() {
+  local target="$1"
+  local link_path="$2"
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "WOULD FILELINK: $link_path -> $target"
+    return 0
+  fi
+  if ln -f "$target" "$link_path" 2>/dev/null; then
+    echo "HARDLINK: $(basename "$link_path")"
+  else
+    cp -f "$target" "$link_path"
+    echo "COPY: $(basename "$link_path")"
+  fi
+}
+
+# Regenerate a kit-managed .gitignore block (one marker id per link script) so
+# kit links/fallbacks do not show up as untracked paths in the consumer repo.
+# $1=consumer root $2=id; remaining args = consumer-rel managed paths.
+kit_update_gitignore() {
+  local root="$1" id="$2"; shift 2
+  local gi="$root/.gitignore"
+  local begin="# >>> kit-managed: $id (bootstrap-kit) >>>"
+  local end="# <<< kit-managed: $id <<<"
+  [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+  local kept
+  kept="$(mktemp)"
+  if [[ -f "$gi" ]]; then
+    local skip=0 line s
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      s="${line#"${line%%[![:space:]]*}"}"
+      s="${s%"${s##*[![:space:]]}"}"
+      if [[ "$s" == "$begin" ]]; then skip=1; continue; fi
+      if [[ "$s" == "$end" ]]; then skip=0; continue; fi
+      [[ "$skip" == "1" ]] && continue
+      printf '%s\n' "$line" >> "$kept"
+    done < "$gi"
+  fi
+  {
+    awk '
+      { a[n++] = $0 }
+      END {
+        last = -1
+        for (i = 0; i < n; i++) if (a[i] ~ /[^[:space:]]/) last = i
+        for (i = 0; i <= last; i++) print a[i]
+      }' "$kept"
+    if grep -q '[^[:space:]]' "$kept" 2>/dev/null; then echo; fi
+    echo "$begin"
+    printf '%s\n' "$@" | sed 's#\\#/#g' | sed 's#^#/#' | LC_ALL=C sort -u
+    echo "/tools/cc-1c-skills-sync/kit-fallback.txt"
+    echo "$end"
+  } > "$gi"
+  rm -f "$kept"
+}
+
 # Tombstones (idea: teamai .removed) — prune stale kit-owned links.
 # Removes symlinks in $1 (link_root) that point into $2 (kit_source) but whose
 # basename no longer exists in kit_source (skill/tool removed or renamed upstream).

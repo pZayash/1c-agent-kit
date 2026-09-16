@@ -25,6 +25,7 @@ CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
 HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
 OVERLAY="$HARNESS_ROOT/cursor"
 MANIFEST="$CONSUMER_ROOT/$LOCAL_MANIFEST"
+managed=()
 
 [[ -d "$OVERLAY" ]] || { echo "missing overlay: $OVERLAY" >&2; exit 1; }
 mkdir -p "$CONSUMER_ROOT/.cursor/skills" "$CONSUMER_ROOT/.cursor/rules" "$CONSUMER_ROOT/.cursor/commands"
@@ -41,6 +42,7 @@ if [[ -d "$OVERLAY/skills" ]]; then
       continue
     fi
     kit_ln_sfn "$d" "$CONSUMER_ROOT/.cursor/skills/$name"
+    managed+=(".cursor/skills/$name")
   done
   kit_prune_stale_links "$CONSUMER_ROOT/.cursor/skills" "$OVERLAY/skills" local_names
 fi
@@ -54,6 +56,7 @@ if [[ -d "$OVERLAY/rules" ]]; then
       continue
     fi
     kit_ln_sfn "$f" "$CONSUMER_ROOT/.cursor/rules/$name"
+    managed+=(".cursor/rules/$name")
   done
   kit_prune_stale_links "$CONSUMER_ROOT/.cursor/rules" "$OVERLAY/rules" local_names
 fi
@@ -67,8 +70,11 @@ if [[ -d "$OVERLAY/commands" ]]; then
       continue
     fi
     kit_ln_sfn "$f" "$CONSUMER_ROOT/.cursor/commands/$name"
+    managed+=(".cursor/commands/$name")
   done
   kit_prune_stale_links "$CONSUMER_ROOT/.cursor/commands" "$OVERLAY/commands" local_names
 fi
+
+kit_update_gitignore "$CONSUMER_ROOT" "cursor-overlay" ${managed[@]+"${managed[@]}"}
 
 echo "Done."

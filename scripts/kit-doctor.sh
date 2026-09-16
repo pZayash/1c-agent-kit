@@ -74,6 +74,14 @@ if [[ -e "$HARNESS_ROOT" ]]; then
       ok "harness HEAD matches recorded gitlink"
     fi
   fi
+
+  # 2c. harness working tree dirty: hardlink fallback edits land in the kit
+  hf_dirty="$(git -C "$HARNESS_ROOT" status --porcelain -uno 2>/dev/null || true)"
+  if [[ -n "$hf_dirty" ]]; then
+    warn "harness working tree dirty ($(grep -c . <<<"$hf_dirty") tracked file(s)) - hardlink fallback edit? git -C $HARNESS_REL status"
+  else
+    ok "harness working tree clean"
+  fi
 fi
 
 # 3. parent git alive
@@ -132,11 +140,37 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     bad "non-ASCII in BOM-less *.ps1 under $HARNESS_REL - PS 5.1 ParserError risk (check-ps1-ascii)"
   fi
 
-  # 8. copy-fallback paths (tombstones blind spot: prune touches reparse only)
-  copies=""
+  # 8. file fallbacks (hardlink then copy when no symlink privilege). In sync is
+  #    fine; drift/orphans are visible via manifest + hash (no longer prune blind).
+  _sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'; fi
+  }
+  declare -A recorded=() pair_rels=()
+  manifest="$SYNC_DIR/kit-fallback.txt"
+  if [[ -f "$manifest" ]]; then
+    while IFS=$'\t' read -r r s h || [[ -n "$r" ]]; do
+      [[ -z "$r" || "$r" == \#* ]] && continue
+      [[ -n "$h" ]] && recorded["$r"]="$s|$h"
+    done < "$manifest"
+  fi
   declare -A overlay_local=() tools_local=()
   kit_load_manifest "$SYNC_DIR/local-overlay.txt" overlay_local
   kit_load_manifest "$SYNC_DIR/local-tools.txt" tools_local
+  stale=""
+  in_sync=0
+  check_fallback() { # $1=rel $2=src
+    local rel="$1" src="$2" dst="$CONSUMER_ROOT/$1"
+    pair_rels["$rel"]=1
+    if [[ ! -e "$dst" ]]; then
+      stale+="$rel (fallback missing - run bootstrap-kit)"$'\n'; return
+    fi
+    [[ -L "$dst" ]] && return
+    if [[ -f "$src" ]] && cmp -s "$dst" "$src"; then
+      in_sync=$((in_sync + 1)); return
+    fi
+    stale+="$rel (content differs from kit - run bootstrap-kit)"$'\n'
+  }
   for sub in rules commands; do
     src="$HARNESS_ROOT/cursor/$sub"
     [[ -d "$src" ]] || continue
@@ -144,20 +178,32 @@ if [[ -e "$HARNESS_ROOT" ]]; then
       [[ -f "$f" ]] || continue
       name="$(basename "$f")"
       [[ -n "${overlay_local[$name]:-}" ]] && continue
-      dst="$CONSUMER_ROOT/.cursor/$sub/$name"
-      [[ -e "$dst" && ! -L "$dst" ]] && copies+=".cursor/$sub/$name"$'\n'
+      check_fallback ".cursor/$sub/$name" "$f"
     done
   done
   if [[ -z "${tools_local[git-partial-stage.py]:-}" && -f "$HARNESS_ROOT/tools/git-partial-stage.py" ]]; then
-    dst="$CONSUMER_ROOT/tools/git-partial-stage.py"
-    [[ -e "$dst" && ! -L "$dst" ]] && copies+="tools/git-partial-stage.py"$'\n'
+    check_fallback "tools/git-partial-stage.py" "$HARNESS_ROOT/tools/git-partial-stage.py"
   fi
-  if [[ -n "$copies" ]]; then
-    n="$(grep -c . <<<"$copies")"
-    warn "$n kit path(s) are copy-fallback (no symlink privilege) - prune blind; content still refreshed on bootstrap:"
-    grep . <<<"$copies" | sed 's/^/       /'
+  for rel in "${!recorded[@]}"; do
+    [[ -n "${pair_rels[$rel]:-}" ]] && continue
+    dst="$CONSUMER_ROOT/$rel"
+    [[ -e "$dst" && ! -L "$dst" ]] || continue
+    src="$CONSUMER_ROOT/${recorded[$rel]%%|*}"
+    [[ -e "$src" ]] && continue
+    if [[ "$(_sha256 "$dst")" == "${recorded[$rel]##*|}" ]]; then
+      stale+="$rel (orphan: source removed upstream - bootstrap-kit will prune)"$'\n'
+    else
+      stale+="$rel (orphan with local edits - kept)"$'\n'
+    fi
+  done
+  if [[ -n "$stale" ]]; then
+    n="$(grep -c . <<<"$stale")"
+    warn "$n file fallback(s) out of sync:"
+    grep . <<<"$stale" | sed 's/^/       /'
+  elif [[ "$in_sync" -gt 0 ]]; then
+    ok "$in_sync file fallback(s) in sync (hardlink/copy; no symlink privilege)"
   else
-    ok "no copy-fallback kit paths"
+    ok "no file fallback kit paths"
   fi
 
   # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only)
