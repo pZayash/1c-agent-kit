@@ -199,6 +199,15 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   (CP1251): байты `—`/кириллицы дают `”`, парсер рвёт строку →
   `ParserError TerminatorExpectedAtEndOfString`. Guard:
   `bash harness/scripts/check-ps1-ascii.sh` (в kit CI/pre-push).
+- **Кириллица в выводе `.ps1` → cp866.** PS 5.1 пишет stdout в
+  OEM-кодировке хоста, поэтому при перенаправлении (`> file`) лог приходит
+  нечитаемым (агент видит кракозябры). Лечение в скрипте:
+  `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false`
+  (или читать лог через `iconv -f cp866`).
+- **`Invoke-WebRequest` в PS 5.1 виснет на неотвечающем SSE-эндпоинте** —
+  `-TimeoutSec` не срабатывает, вызов блокируется. Готовность HTTP-сервиса
+  проверять TCP-чеком или через [tools/mcp-call](tools/mcp-call/README.md),
+  а не `Invoke-WebRequest`.
 - **Downgrade сабмодуля + bootstrap = PRUNE более новых ссылок** —
   tombstones честно снимет ссылки на skills/tools, которых нет в старом
   SHA harness. После возврата на актуальный SHA — повторный
@@ -294,7 +303,10 @@ Zed/ACP — `node harness/pi/scripts/patch-pi-acp-session-title.mjs`.
 ## Workflow tools (срез B)
 
 `tools/mailbox`, `tools/bsl-check`, `tools/sandbox`, `tools/load-changed-files`,
-`tools/git-partial-stage.py` — в [tools/](tools/). Load engine:
+`tools/mcp-call` (JSON-RPC к MCP-серверам 1С, в т.ч. streamable HTTP),
+`tools/answer42` (UI 1С через клиент тестирования: [README](tools/answer42/README.md),
+[канон](docs/ai/answer42.md)), `tools/git-partial-stage.py` — в [tools/](tools/).
+Load engine:
 `tools/load-changed-files/load-changed-files.sh`; корень потребителя — wrapper.
 
 **Потребитель** после overlay link:

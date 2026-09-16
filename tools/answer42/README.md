@@ -204,14 +204,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 - **`stop`/`restart`:** pid в pid-файле — лаунчер, слушает порт другой pid,
   поэтому останавливаем и по pid, и по владельцу порта (`Get-NetTCPConnection`).
 
-## Ограничения upstream (0.5.3)
+## Ограничения сборок
 
-- **Текст ошибки tool-call пустой**: при сбое BSL-части ответ приходит как
-  `Error executing tool <name>` без причины (`structured_content: null`).
-  Воспроизводится на `open_navigation_link` с несуществующей ссылкой и на
-  повторном `start_session`; собственный `E2E_SCENARIO=smoke` upstream падает
-  на ассерте ожидаемого текста. Диагностику смотреть через `current_error_info`,
-  `user_messages`, `window_command_interface` и лог сервера.
+- **Пустой текст ошибки tool-call — только у PyPI-сборки** (0.5.3): при сбое
+  ответ приходит как `Error executing tool <name>` без причины
+  (`structured_content: null`) — MCP-SDK 2.x сохраняет текст лишь у `ToolError`.
+  В **ветке патчей форка** это исправлено: ответ несёт сообщение 1С и
+  `client_diagnostics`. Если текст снова пустой — работает не форк-сборка:
+  проверить `ANSWER42_BIN` и выполнить `answer42.ps1 update`.
+  Диагностика для PyPI-сборки: `current_error_info`, `user_messages`,
+  `window_command_interface`, лог сервера.
 - Форма пользовательской настройки «Изменить форму» автоматизируется частично
   (кнопка «Добавить поля» может не находиться).
 
