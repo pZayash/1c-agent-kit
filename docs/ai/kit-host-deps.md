@@ -63,7 +63,8 @@ CLI: `npm install -g @fission-ai/openspec@1.2.0` (пин как в
   ([qmd-search.md](qmd-search.md), шаблон [env-qmd.example](../../templates/env-qmd.example))
 - `unzip` + `gh`/`curl` (скачать BSLLS **в кэш хоста**, не в worktree:
   `bash harness/tools/bsl-check/update-bsl-language-server.sh`)
-- Windows Developer Mode (file `mklink` для `.mdc`; иначе copy-fallback)
+- Windows Developer Mode (file `mklink` для `.mdc`; без прав — hardlink,
+  в крайнем случае copy-fallback; учёт в `kit-fallback.txt`)
 - `harness/.git` file-gitdir — `fix-harness-gitdir`
 - 42 HTTP git: GCM без TTY; fetch с `D:\git-data\repositories\team\proj.git`
 
