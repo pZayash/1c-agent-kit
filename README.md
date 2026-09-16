@@ -43,13 +43,27 @@ ResourceHandler): один кроссплатформенный код вмес�
 python harness/tools/kit-layout/kit_layout.py plan .
 # раскладка через движок в bootstrap
 LAYOUT_ENGINE=1 bash harness/scripts/bootstrap-kit.sh .
-# проверка
+# проверка (все ресурсы; verify-kit-links.sh — только spot-check)
 python harness/tools/kit-layout/kit_layout.py verify .
+# kit-пути, всё ещё трекнутые в индексе потребителя (Windows/junction)
+python harness/tools/kit-layout/kit_layout.py tracked .
 ```
 
 Паритет с link-скриптами проверен синтетикой (440 путей идентично) и на
 живом потребителе (нулевой plan). Движок — **дефолт** bootstrap; откат на
 legacy-скрипты: `LEGACY_LINKS=1` / `-LegacyLinks`.
+
+`apply` ведёт **fallback-манифест** `tools/cc-1c-skills-sync/kit-fallback.txt`
+(hardlink/copy + sha256) и регенерирует managed-блок `.gitignore`, чтобы
+ссылки и фолбэки не попадали в `git status` потребителя.
+
+**Windows (junction).** Без symlink-привилегии каталоги линкуются через
+`mklink /J`. Git при `core.symlinks=false` идёт **внутрь** junction и трекает
+содержимое kit как обычные blob'ы потребителя — на свежем `git clone` вышли
+бы устаревшие копии вместо ссылок. Поэтому `apply` делает `UNTRACK`
+(index-only `git rm --cached`; рабочее дерево/junction не трогаются), а
+`verify` предупреждает, `tracked` — exit 1 и список. Отключить:
+`--no-untrack`.
 
 Движок безопасен при запуске из другого namespace (Linux sandbox по
 Windows-раскладке): ссылка, указывающая вне consumer root, помечается
@@ -121,7 +135,10 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
 ручной fix. Входит WARN-чеком в `kit-doctor` и шагом в `harness-promote`.
 
 - Linux: нативные `link-*.sh` (`ln -sfn`).
-- Windows: `link-*.ps1` (`mklink /J`; file `mklink` / copy-fallback).
+- Windows: `link-*.ps1` (`mklink /J`; file `mklink`, при отсутствии прав —
+  **hardlink**, в крайнем случае copy). File-fallback'и пишутся в
+  `tools/cc-1c-skills-sync/kit-fallback.txt`, поэтому prune и `kit-doctor`
+  их видят (см. § Pitfalls «File symlink без прав»).
 - Git Bash на Windows: `link-*.sh` делегируют в `.ps1`.
 
 ### Pitfalls
@@ -130,6 +147,16 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   Linux: `readlink` / `verify-kit-links`.
 - **Сотни `D` в git после link** — сначала merge ветки, где skills
   **untrack**; потом bootstrap (иначе REPLACE COPY).
+  - Linux: kit-ссылка — symlink (mode `120000`), старые трекнутые копии
+    дают `D` в `.cursor/skills/*` и `tools/*`.
+  - Windows без symlink-привилегии: junction git не считает symlink'ом,
+    поэтому kit-файлы не удаляются, а **перезаписываются** (`M`), а `D`
+    приходят в основном от потребительских файлов внутри kit-каталогов
+    (vendored BSLLS, примеры `mcp-call`). До `UNTRACK` (см. kit-layout)
+    `git add -A` затянет содержимое kit как blob'ы потребителя.
+- **`verify-kit-links` — spot-check**, а не полный обход: несколько
+  репрезентативных ссылок + алиасы. Полная проверка — `kit_layout.py
+  verify` и `kit-doctor` (в т.ч. пункт «kit links tracked in index»).
 - **`Remove-Item` / NullRef на junction** — канон `cmd /c rmdir` (уже в `.ps1`).
 - **`git status` ломается на harness в worktree** — `harness/.git` →
   `<main>/.git/worktrees/<name>/modules/harness` (не относительный
@@ -176,11 +203,24 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   tombstones честно снимет ссылки на skills/tools, которых нет в старом
   SHA harness. После возврата на актуальный SHA — повторный
   `bootstrap-kit` (или link-скрипты) перелинкует (`LINK:`/`JUNCTION:`).
-- **Copy-fallback не чистится prune** — на хостах без прав на file
-  symlink rules/commands падают в копию (`WARN: file symlink failed`).
-  Копии — не reparse, prune их не видит: стухшая копия останется.
-  Лечение: Developer Mode / SeCreateSymbolicLinkPrivilege, либо ручная
-  чистка при переименовании rules.
+- **File symlink без прав** — Developer Mode / `SeCreateSymbolicLinkPrivilege`
+  нужны только для symlink. Порядок fallback: symlink → **hardlink**
+  (`mklink /H`, без прав, на том же томе) → copy (cross-volume). Каждый
+  fallback фиксируется в `tools/cc-1c-skills-sync/kit-fallback.txt`
+  (rel path, source, sha256), поэтому:
+  - prune (tombstones) снимает и fallback-копии по манифесту, а не только
+    reparse (старый «prune blind» для copy закрыт);
+  - `kit-doctor` различает «in sync» и «stale / content differs»
+    (раньше умел только сказать «есть копии»);
+  - правка потребителя в fallback **не затирается** молча — `KEEP LOCAL
+    EDITS` (перенеси файл в `local-overlay.txt`/`local-tools.txt`, если он
+    должен быть своим);
+  - managed-блок `.gitignore` перегенерируется bootstrap, поэтому ссылки и
+    fallback не висят `??` в `git status`
+    (`KIT_NO_GITIGNORE=1` / `--no-gitignore` — выключить).
+  Hardlink делает правку потребителя видимой как грязь в `harness`
+  (`git -C harness status`); `kit-doctor` предупреждает «harness working
+  tree dirty». Лечение прежнее: Developer Mode / SeCreateSymbolicLinkPrivilege.
 - **Старый worktree** — merge → hydrate harness → `bootstrap-kit` → verify.
 - **Cursor UI не видит skill (slash)** — junctions в `.cursor/skills`, UI
   читает `.agents/skills`. `bootstrap-kit` делает junction/symlink
@@ -233,7 +273,8 @@ DRY_RUN=1 bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/
 bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-overlay.txt
 ```
 
-- Skills: `mklink /J`. Rules/commands: **file** `mklink` (Windows Developer Mode).
+- Skills: `mklink /J`. Rules/commands: **file** `mklink` (Windows Developer
+  Mode); без прав — hardlink, затем copy (см. `kit-fallback.txt`).
 - `sandbox` skill, `web-test` — LOCAL у потребителя.
 
 ## Pi harness (опционально)
