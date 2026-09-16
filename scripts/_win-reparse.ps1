@@ -96,6 +96,24 @@ function New-KitFileLink([string]$target, [string]$link) {
     return 'COPY'
 }
 
+function Test-KitSymlinkPossible {
+    # Can a file symlink be created (Developer Mode / SeCreateSymbolicLinkPrivilege)?
+    # Probes %TEMP% only; used by kit-doctor to hint that in-sync hardlink/copy
+    # fallbacks can now be upgraded to symlinks by bootstrap-kit.
+    $base = Join-Path $env:TEMP ("kit-symprobe-" + [guid]::NewGuid().ToString('N'))
+    $target = "$base.t"
+    $link = "$base.l"
+    try {
+        Set-Content -LiteralPath $target -Value "probe" -Encoding ASCII
+        cmd /c "mklink `"$link`" `"$target`"" 2>&1 | Out-Null
+        return (Test-Path -LiteralPath $link)
+    } catch {
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $target, $link -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Write-KitTextFile([string]$path, [string]$text) {
     $enc = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($path, $text, $enc)

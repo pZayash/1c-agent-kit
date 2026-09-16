@@ -142,6 +142,16 @@ if [[ -e "$HARNESS_ROOT" ]]; then
 
   # 8. file fallbacks (hardlink then copy when no symlink privilege). In sync is
   #    fine; drift/orphans are visible via manifest + hash (no longer prune blind).
+  #    If symlink privilege has appeared (Developer Mode), hint the upgrade.
+  kit_symlink_possible() {
+    local d t l
+    d="$(mktemp -d)"
+    t="$d/t"; l="$d/l"
+    printf 'probe' > "$t"
+    if ln -s "$t" "$l" 2>/dev/null; then rm -rf "$d"; return 0; fi
+    rm -rf "$d"
+    return 1
+  }
   _sha256() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
     else shasum -a 256 "$1" | awk '{print $1}'; fi
@@ -201,7 +211,11 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     warn "$n file fallback(s) out of sync:"
     grep . <<<"$stale" | sed 's/^/       /'
   elif [[ "$in_sync" -gt 0 ]]; then
-    ok "$in_sync file fallback(s) in sync (hardlink/copy; no symlink privilege)"
+    if kit_symlink_possible; then
+      warn "$in_sync in-sync file fallback(s) can be upgraded to symlink - run bootstrap-kit"
+    else
+      ok "$in_sync file fallback(s) in sync (hardlink/copy; no symlink privilege)"
+    fi
   else
     ok "no file fallback kit paths"
   fi

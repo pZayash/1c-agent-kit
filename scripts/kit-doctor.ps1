@@ -246,7 +246,11 @@ if (Test-Path -LiteralPath $harness) {
         Write-WarnX "$($staleFallback.Count) file fallback(s) out of sync:"
         $staleFallback | ForEach-Object { Write-Host "       $_" }
     } elseif ($inSync -gt 0) {
-        Write-Ok "$inSync file fallback(s) in sync (hardlink/copy; no symlink privilege)"
+        if (Test-KitSymlinkPossible) {
+            Write-WarnX "$inSync in-sync file fallback(s) can be upgraded to symlink - run bootstrap-kit"
+        } else {
+            Write-Ok "$inSync file fallback(s) in sync (hardlink/copy; no symlink privilege)"
+        }
     } else {
         Write-Ok "no file fallback kit paths"
     }

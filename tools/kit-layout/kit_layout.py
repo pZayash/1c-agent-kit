@@ -62,6 +62,7 @@ REPARSE_ATTR = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
 FALLBACK_MANIFEST_REL = 'tools/cc-1c-skills-sync/kit-fallback.txt'
 GITIGNORE_BEGIN = '# >>> kit-managed: begin (bootstrap-kit) >>>'
 GITIGNORE_END = '# <<< kit-managed: end <<<'
+_FILE_SYMLINK_OK = None  # cached result of file_symlink_available()
 
 
 def is_wsl():
@@ -117,6 +118,32 @@ def make_dir_link(target, link):
             raise OSError(f'mklink /J failed: {r.stdout.strip()} {r.stderr.strip()}')
     else:
         os.symlink(str(target), str(link))
+
+
+def file_symlink_available():
+    """Whether a file symlink can be created here (Windows Developer Mode /
+    SeCreateSymbolicLinkPrivilege). Probes the system temp dir, never the
+    consumer tree; the result is cached for the process. Privilege can appear
+    mid-life (Developer Mode turned on), so apply uses it to upgrade existing
+    hardlink/copy fallbacks to symlinks.
+    """
+    global _FILE_SYMLINK_OK
+    if _FILE_SYMLINK_OK is None:
+        import tempfile
+        d = tempfile.mkdtemp(prefix='kit-symprobe-')
+        target = os.path.join(d, 'target')
+        linkname = os.path.join(d, 'link')
+        try:
+            with open(target, 'w', encoding='utf-8') as f:
+                f.write('probe')
+            try:
+                os.symlink(target, linkname)
+                _FILE_SYMLINK_OK = True
+            except OSError:
+                _FILE_SYMLINK_OK = False
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    return _FILE_SYMLINK_OK
 
 
 def make_file_link(target, link):
@@ -319,6 +346,26 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
         else:
             src_sha = hash_file(target)
             if file_equal(link, target):
+                # In-sync fallback (hardlink/copy). If symlink privilege has
+                # appeared (Developer Mode), upgrade to a real symlink; this is
+                # the only path that clears the degraded fallback state.
+                if ctx.dry_run:
+                    if file_symlink_available():
+                        ctx.pending += 1
+                        ctx.say('ACT', f'WOULD UPGRADE (symlink): {label}')
+                    else:
+                        ctx.say('OK', f'OK (fallback, in sync): {label}')
+                        ctx.note_fallback(rel, source_rel, src_sha)
+                    return True
+                if file_symlink_available():
+                    remove_link_or_tree(link)
+                    how = make_file_link(target, link)
+                    if how == 'FILELINK':
+                        ctx.say('ACT', f'UPGRADE (symlink): {label}')
+                        return True
+                    ctx.say('WARN', f'upgrade to symlink failed, kept {how}: {label}')
+                    ctx.note_fallback(rel, source_rel, hash_file(target))
+                    return True
                 ctx.say('OK', f'OK (fallback, in sync): {label}')
                 ctx.note_fallback(rel, source_rel, src_sha)
                 return True

@@ -55,7 +55,9 @@ legacy-скрипты: `LEGACY_LINKS=1` / `-LegacyLinks`.
 
 `apply` ведёт **fallback-манифест** `tools/cc-1c-skills-sync/kit-fallback.txt`
 (hardlink/copy + sha256) и регенерирует managed-блок `.gitignore`, чтобы
-ссылки и фолбэки не попадали в `git status` потребителя.
+ссылки и фолбэки не попадали в `git status` потребителя. Если symlink-права
+появились позже (Developer Mode) — `apply` апгрейдит in-sync hardlink/copy
+до symlink, а `kit-doctor` подсказывает это (`can be upgraded to symlink`).
 
 **Windows (junction).** Без symlink-привилегии каталоги линкуются через
 `mklink /J`. Git при `core.symlinks=false` идёт **внутрь** junction и трекает
@@ -322,6 +324,10 @@ bash harness/scripts/link-kit-tools.sh . tools/cc-1c-skills-sync/local-tools.txt
   [tools/bsl-check/README.md](tools/bsl-check/README.md). `bootstrap-kit` не
   качает. На 42: User env `KIT_BSLLS_ROOT=D:\tools\bslls`.
 - Env-шаблон: [templates/env.example](templates/env.example).
+- `-U`, если `/UpdateDBCfg` упал на HTTP-клиентах второй публикации ИБ: авто-retry
+  `-Dynamic- -SessionTerminate force` — гейт `UPDATE_DB_FORCE_SESSIONS` (default
+  `true`) / `--force-sessions` / `--no-force-sessions`. На prod выключайте гейт
+  (`false`), если нельзя рвать сеансы пользователей.
 - Доки: [docs/ai/agent-task-bus.md](docs/ai/agent-task-bus.md),
   [docs/ai/load-config-to-dev.md](docs/ai/load-config-to-dev.md).
 
