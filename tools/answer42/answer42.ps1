@@ -27,6 +27,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Агент читает stdout через перенаправление: PS 5.1 по умолчанию пишет в OEM
+# (cp866) и кириллица в логах превращается в мусор.
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+
 function Find-ProjectRoot {
     param([string]$Start)
     $dir = Get-Item -LiteralPath $Start
