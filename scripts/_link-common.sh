@@ -81,6 +81,9 @@ kit_consumer_link_paths() {
       [[ -L "$p" ]] && printf '%s\n' "$p"
     done
   done
+  # Callers run under `set -e`/`pipefail`: never leak the status of the last
+  # [[ -L ]] test (a non-link last entry would otherwise abort bootstrap).
+  return 0
 }
 
 # Print "<consumer-rel> -> <raw-target>" for kit links outside the consumer
@@ -94,6 +97,7 @@ kit_foreign_links() {
       printf '%s -> %s\n' "$rel" "$(readlink "$p" 2>/dev/null || true)"
     fi
   done
+  return 0
 }
 
 kit_load_manifest() {
