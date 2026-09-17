@@ -87,31 +87,33 @@ def cmd_session_start(a):
                         f'harness (kit) впереди origin/master на {ahead} коммит(ов) — '
                         f'локальная линия? Канон: promote в kit (skill harness-promote).')
 
-        # stale kit links (cheap: engine plan --strict)
-        layout = harness / 'tools' / 'kit-layout' / 'kit_layout.py'
-        if layout.is_file():
-            try:
-                r = subprocess.run(
-                    [sys.executable, str(layout), 'plan', '--strict', str(root)],
-                    capture_output=True, text=True, timeout=60,
-                    env={**os.environ, 'HARNESS_REL': harness_rel})
-                if r.returncode == 2:
-                    # kit-layout refuses a foreign/sandbox namespace (exit 2);
-                    # do not send the agent to bootstrap in the wrong place.
-                    err = next((l for l in (r.stderr or '').splitlines()
-                                if l.startswith('ERROR:')), 'foreign namespace')
-                    hints.append(
-                        f'kit-layout не может работать в этом namespace ({err}). '
-                        f'Запусти на хосте: bash {harness_rel}/scripts/bootstrap-kit.sh .')
-                elif r.returncode != 0:
-                    summary = [l for l in (r.stdout or '').splitlines()
-                               if l.startswith('kit-layout plan:')]
-                    hints.append(
-                        f'есть ожидающие изменения раскладки kit '
-                        f'({summary[0] if summary else "plan --strict exit 1"}). '
-                        f'Выполни: bash {harness_rel}/scripts/bootstrap-kit.sh .')
-            except (OSError, subprocess.TimeoutExpired):
-                pass  # layout check is best-effort
+    # stale kit links + namespace (engine plan --strict).
+    # ВНЕ git-ветки: в sandbox/контейнере git нет, а именно там важно поймать
+    # FOREIGN-NS и не отправить агента перезапускать bootstrap не в том месте.
+    layout = harness / 'tools' / 'kit-layout' / 'kit_layout.py'
+    if layout.is_file():
+        try:
+            r = subprocess.run(
+                [sys.executable, str(layout), 'plan', '--strict', str(root)],
+                capture_output=True, text=True, timeout=60,
+                env={**os.environ, 'HARNESS_REL': harness_rel})
+            if r.returncode == 2:
+                # kit-layout refuses a foreign/sandbox namespace (exit 2);
+                # do not send the agent to bootstrap in the wrong place.
+                err = next((l for l in (r.stderr or '').splitlines()
+                            if l.startswith('ERROR:')), 'foreign namespace')
+                hints.append(
+                    f'kit-layout не может работать в этом namespace ({err}). '
+                    f'Запусти на хосте: bash {harness_rel}/scripts/bootstrap-kit.sh .')
+            elif r.returncode != 0:
+                summary = [l for l in (r.stdout or '').splitlines()
+                           if l.startswith('kit-layout plan:')]
+                hints.append(
+                    f'есть ожидающие изменения раскладки kit '
+                    f'({summary[0] if summary else "plan --strict exit 1"}). '
+                    f'Выполни: bash {harness_rel}/scripts/bootstrap-kit.sh .')
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # layout check is best-effort
 
     # friction-сигналы, ждущие разбора (memory/rule-friction, ленивая папка)
     # ВНЕ git-ветки: работает и в sandbox/контейнере без git.
