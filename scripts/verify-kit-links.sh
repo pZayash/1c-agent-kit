@@ -22,6 +22,8 @@ declare -A local_tools=()
 kit_load_manifest "$LOCAL_TOOLS" local_tools
 
 fail=0
+foreign=0
+inside=0
 check_link() {
   local path="$1"
   local label="$2"
@@ -35,6 +37,14 @@ check_link() {
     fail=1
     return
   fi
+  # A link into another namespace (Windows checkout seen from a Linux
+  # sandbox) cannot be validated here; it is not a broken consumer layout.
+  if kit_link_is_foreign "$CONSUMER_ROOT" "$path"; then
+    echo "SKIP FOREIGN-NS: $label -> $(readlink "$path") (layout from another namespace; run on the host)"
+    foreign=$((foreign + 1))
+    return
+  fi
+  inside=$((inside + 1))
   echo "OK $label -> $(readlink "$path")"
 }
 
@@ -53,6 +63,8 @@ check_link "$CONSUMER_ROOT/.agents/skills" ".agents/skills"
 if [[ -e "$CONSUMER_ROOT/.cursor/skills/explore/SKILL.md" || -L "$CONSUMER_ROOT/.cursor/skills/explore" ]]; then
   if [[ -f "$CONSUMER_ROOT/.agents/skills/explore/SKILL.md" ]]; then
     echo "OK .agents/skills/explore/SKILL.md"
+  elif kit_link_is_foreign "$CONSUMER_ROOT" "$CONSUMER_ROOT/.agents/skills"; then
+    echo "SKIP FOREIGN-NS: .agents/skills/explore/SKILL.md (layout from another namespace; run on the host)"
   else
     echo "FAIL missing: .agents/skills/explore/SKILL.md" >&2
     fail=1
@@ -62,5 +74,10 @@ fi
 check_link "$CONSUMER_ROOT/.pi/skills" ".pi/skills"
 check_link "$CONSUMER_ROOT/.pi/prompts" ".pi/prompts"
 check_link "$CONSUMER_ROOT/.pi/extensions" ".pi/extensions"
+
+if [[ "$foreign" -gt 0 && "$inside" -eq 0 ]]; then
+  echo "WARN: all $foreign checked link(s) are FOREIGN-NS - verify-kit-links cannot validate this namespace" >&2
+  echo "      run on the host (Git Bash / PowerShell), not through tools/sandbox/run.sh" >&2
+fi
 
 exit "$fail"

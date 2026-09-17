@@ -52,6 +52,28 @@ fi
 
 [[ -d "$HARNESS_ROOT" ]] || { echo "missing harness: $HARNESS_ROOT (git submodule update --init?)" >&2; exit 1; }
 
+# Namespace guard: links created by another OS/namespace (Windows checkout seen
+# from a Linux sandbox/WSL) must not be relinked here. Stop before ANY link or
+# file step; otherwise bootstrap is a silent no-op (engine) or creates
+# container-local links and fails verify with a misleading reason.
+foreign_out="$(kit_consumer_link_paths "$CONSUMER_ROOT" | kit_foreign_links "$CONSUMER_ROOT")"
+if [[ -n "$foreign_out" ]]; then
+  n="$(printf '%s\n' "$foreign_out" | grep -c .)"
+  {
+    echo "ERROR: kit-ссылки созданы в другом namespace (target вне $CONSUMER_ROOT):"
+    printf '%s\n' "$foreign_out" | head -5 | sed 's/^/  /'
+    if [[ "$n" -gt 5 ]]; then echo "  ... и ещё $((n - 5))"; fi
+    echo "Это не раскладка потребителя, а ссылки другого OS/namespace (Windows-checkout"
+    echo "внутри Linux-sandbox/WSL). Перезапусти bootstrap на хосте:"
+    echo "  Git Bash:   bash harness/scripts/bootstrap-kit.sh ."
+    echo "  PowerShell: powershell -File harness/scripts/bootstrap-kit.ps1 -ConsumerRoot ."
+  } >&2
+  exit 2
+fi
+if kit_sandbox_namespace "$CONSUMER_ROOT"; then
+  echo "WARN: sandbox namespace (/.dockerenv + /workspace), существующие ссылки внутри root — продолжаю" >&2
+fi
+
 if [[ "${LEGACY_LINKS:-0}" != "1" ]]; then
   echo "=== kit-layout (engine) ==="
   PY="$(command -v python || command -v python3 || true)"

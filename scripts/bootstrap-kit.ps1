@@ -32,6 +32,43 @@ if (-not (Test-Path $harness)) {
     throw "missing harness: $harness (git submodule update --init?)"
 }
 
+# Namespace guard: links created by another namespace (or after the consumer
+# tree was moved) must not be relinked here. The engine also refuses, but this
+# stops legacy link-*.ps1 steps before they touch anything. ASCII only (PS 5.1).
+. (Join-Path $scripts "_win-reparse.ps1")
+$nsCandidates = @(
+    ".agents\skills", ".claude\skills", ".claude\commands",
+    ".pi\skills", ".pi\prompts", ".pi\extensions",
+    ".kilo\plugin", ".opencode\plugin",
+    "tools\mailbox", "tools\bsl-check", "tools\sandbox",
+    "tools\load-changed-files", "tools\mcp-call", "tools\answer42",
+    "tools\git-partial-stage.py"
+)
+foreach ($d in @(".cursor\skills", ".cursor\rules", ".cursor\commands")) {
+    $full = Join-Path $root $d
+    if (Test-Path -LiteralPath $full) {
+        Get-ChildItem -LiteralPath $full -Force | ForEach-Object {
+            if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                $nsCandidates += (Join-Path $d $_.Name)
+            }
+        }
+    }
+}
+$foreignLinks = @()
+foreach ($rel in $nsCandidates) {
+    $p = Join-Path $root $rel
+    if ((Test-Path -LiteralPath $p) -and (Test-KitForeignLink $root $p)) {
+        $foreignLinks += ("{0} -> {1}" -f $rel, (Get-KitReparseTarget $p))
+    }
+}
+if ($foreignLinks.Count -gt 0) {
+    Write-Host "ERROR: kit links point outside $root (foreign namespace):"
+    $foreignLinks | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" }
+    if ($foreignLinks.Count -gt 5) { Write-Host "  ... and $($foreignLinks.Count - 5) more" }
+    Write-Host "Run bootstrap on the host that created the layout (Git Bash / PowerShell)."
+    exit 2
+}
+
 $common = @{
     ConsumerRoot = $root
     HarnessRel   = $HarnessRel

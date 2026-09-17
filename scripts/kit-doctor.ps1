@@ -49,6 +49,45 @@ function Invoke-KitScript([string]$file, [string[]]$scriptArgs) {
 
 Write-Host "=== kit-doctor: $root ==="
 
+# 0. namespace: links created in another namespace (moved tree / another OS)
+#    cannot be diagnosed here - verify/fallback checks would be meaningless.
+$foreignNs = 0
+$reparseLib = Join-Path $scriptsDir "_win-reparse.ps1"
+if (Test-Path -LiteralPath $reparseLib) {
+    . $reparseLib
+    $nsCandidates = @(
+        ".agents\skills", ".claude\skills", ".claude\commands",
+        ".pi\skills", ".pi\prompts", ".pi\extensions",
+        ".kilo\plugin", ".opencode\plugin",
+        "tools\mailbox", "tools\bsl-check", "tools\sandbox",
+        "tools\load-changed-files", "tools\mcp-call", "tools\answer42",
+        "tools\git-partial-stage.py"
+    )
+    foreach ($d in @(".cursor\skills", ".cursor\rules", ".cursor\commands")) {
+        $full = Join-Path $root $d
+        if (Test-Path -LiteralPath $full) {
+            Get-ChildItem -LiteralPath $full -Force | ForEach-Object {
+                if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    $nsCandidates += (Join-Path $d $_.Name)
+                }
+            }
+        }
+    }
+    $foreignLinks = @()
+    foreach ($rel in $nsCandidates) {
+        $p = Join-Path $root $rel
+        if ((Test-Path -LiteralPath $p) -and (Test-KitForeignLink $root $p)) {
+            $foreignLinks += ("{0} -> {1}" -f $rel, (Get-KitReparseTarget $p))
+        }
+    }
+    if ($foreignLinks.Count -gt 0) {
+        $foreignNs = 1
+        Write-Bad "foreign namespace: $($foreignLinks.Count) kit link(s) point outside $root (moved tree / another OS)"
+        $foreignLinks | Select-Object -First 3 | ForEach-Object { Write-Host "       $_" }
+        Write-Info "run on the host that created the layout (Git Bash / PowerShell)"
+    }
+}
+
 # 1. harness presence + gitlink (logic: hooks/pre-commit-harness)
 if (-not (Test-Path -LiteralPath $harness)) {
     Write-Bad "missing $HarnessRel/ (git submodule update --init?)"
@@ -113,12 +152,16 @@ if ($LASTEXITCODE -eq 0) {
 
 if (Test-Path -LiteralPath $harness) {
     # 4. verify links
-    $r = Invoke-KitScript "verify-kit-links.ps1" @("-ConsumerRoot", $root)
-    if ($r[1] -eq 0) {
-        Write-Ok "verify-kit-links"
+    if ($foreignNs -eq 1) {
+        Write-Info "verify-kit-links skipped (foreign namespace; see check 0)"
     } else {
-        Write-Bad "verify-kit-links:"
-        $r[0] | ForEach-Object { Write-Host "       $_" }
+        $r = Invoke-KitScript "verify-kit-links.ps1" @("-ConsumerRoot", $root)
+        if ($r[1] -eq 0) {
+            Write-Ok "verify-kit-links"
+        } else {
+            Write-Bad "verify-kit-links:"
+            $r[0] | ForEach-Object { Write-Host "       $_" }
+        }
     }
 
     # 5. stale kit links (-DryRun prune detection; read-only)
@@ -212,6 +255,9 @@ if (Test-Path -LiteralPath $harness) {
     }
     $staleFallback = @()
     $inSync = 0
+    $links = 0
+    $hardlinks = 0
+    $copies = 0
     $pairRels = @{}
     foreach ($p in $pairs) {
         $pairRels[$p.rel] = $true
@@ -220,10 +266,14 @@ if (Test-Path -LiteralPath $harness) {
             $staleFallback += "$($p.rel) (fallback missing - run bootstrap-kit)"
             continue
         }
-        if (Test-KitReparse $dst) { continue }
+        if (Test-KitReparse $dst) { $links++; continue }
         $srcHash = Get-KitFileHash $p.src
         $dstHash = Get-KitFileHash $dst
-        if ($srcHash -eq $dstHash) { $inSync++ } else {
+        if ($srcHash -eq $dstHash) {
+            $inSync++
+            $lt = (Get-Item -LiteralPath $dst -Force).LinkType
+            if ($lt -eq 'HardLink') { $hardlinks++ } else { $copies++ }
+        } else {
             $staleFallback += "$($p.rel) (content differs from kit - run bootstrap-kit)"
         }
     }
@@ -245,14 +295,12 @@ if (Test-Path -LiteralPath $harness) {
     if ($staleFallback.Count -gt 0) {
         Write-WarnX "$($staleFallback.Count) file fallback(s) out of sync:"
         $staleFallback | ForEach-Object { Write-Host "       $_" }
-    } elseif ($inSync -gt 0) {
-        if (Test-KitSymlinkPossible) {
-            Write-WarnX "$inSync in-sync file fallback(s) can be upgraded to symlink - run bootstrap-kit"
-        } else {
-            Write-Ok "$inSync file fallback(s) in sync (hardlink/copy; no symlink privilege)"
-        }
-    } else {
+    } elseif ($links -eq 0 -and $inSync -eq 0) {
         Write-Ok "no file fallback kit paths"
+    } elseif ($inSync -gt 0 -and (Test-KitSymlinkPossible)) {
+        Write-WarnX "$inSync in-sync file fallback(s) are not links ($hardlinks hardlink(s), $copies copy(ies); $links link(s)) - run bootstrap-kit to upgrade"
+    } else {
+        Write-Ok "$links link(s), $hardlinks hardlink(s), $copies copy(ies) in sync"
     }
 
     # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only)
@@ -282,6 +330,29 @@ if (Test-Path -LiteralPath $harness) {
         } else {
             Write-WarnX "kit links tracked as blobs (git follows junction; run bootstrap-kit to untrack):"
             $tkOut | Select-Object -First 20 | ForEach-Object { Write-Host "       $_" }
+        }
+    }
+
+    # 11. .gitignore hygiene: hand-written paths now covered by the managed block
+    #     (the block is regenerated, the hand lines are dead weight).
+    $gi = Join-Path $root ".gitignore"
+    if (Test-Path -LiteralPath $gi) {
+        $managedKeys = @{}
+        $handKeys = @{}
+        $inManaged = $false
+        foreach ($line in (Get-Content -LiteralPath $gi -Encoding UTF8)) {
+            $s = "$line".Trim()
+            if ($s -eq "# >>> kit-managed: begin (bootstrap-kit) >>>") { $inManaged = $true; continue }
+            if ($s -eq "# <<< kit-managed: end <<<") { $inManaged = $false; continue }
+            $entry = ($line -split '#', 2)[0].Trim()
+            if (-not $entry) { continue }
+            $key = $entry.TrimStart('/').TrimEnd('/')
+            if ($inManaged) { $managedKeys[$key] = $true } else { $handKeys[$key] = $true }
+        }
+        $overlap = @($handKeys.Keys | Where-Object { $managedKeys.ContainsKey($_) } | Sort-Object)
+        if ($overlap.Count -gt 0) {
+            Write-WarnX "$($overlap.Count) hand-written .gitignore line(s) duplicate the kit-managed block (remove them):"
+            $overlap | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
         }
     }
 }

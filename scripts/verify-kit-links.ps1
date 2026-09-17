@@ -14,6 +14,8 @@ $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path $ConsumerRoot).Path
 $fail = 0
+$foreign = 0
+$inside = 0
 
 function Read-LocalNames([string]$path) {
     $map = @{}
@@ -37,6 +39,14 @@ function Assert-KitLink([string]$rel, [string]$label) {
         $script:fail = 1
         return
     }
+    # A link into another namespace (or a moved consumer) cannot be validated
+    # here; it is not a broken consumer layout.
+    if (Test-KitForeignLink $root $path) {
+        Write-Host "SKIP FOREIGN-NS: $label (layout from another namespace; run on the host)"
+        $script:foreign++
+        return
+    }
+    $script:inside++
     Write-Host "OK $label"
 }
 
@@ -58,6 +68,8 @@ $exploreAgents = Join-Path $root ".agents\skills\explore\SKILL.md"
 if (Test-Path -LiteralPath $exploreCursor) {
     if (Test-Path -LiteralPath $exploreAgents) {
         Write-Host "OK .agents/skills/explore/SKILL.md"
+    } elseif (Test-KitForeignLink $root (Join-Path $root ".agents\skills")) {
+        Write-Host "SKIP FOREIGN-NS: .agents/skills/explore/SKILL.md (layout from another namespace; run on the host)"
     } else {
         Write-Host "FAIL missing: .agents/skills/explore/SKILL.md"
         $fail = 1
@@ -67,6 +79,11 @@ if (Test-Path -LiteralPath $exploreCursor) {
 Assert-KitLink ".pi\skills" ".pi/skills"
 Assert-KitLink ".pi\prompts" ".pi/prompts"
 Assert-KitLink ".pi\extensions" ".pi/extensions"
+
+if ($foreign -gt 0 -and $inside -eq 0) {
+    Write-Host "WARN: all $foreign checked link(s) are FOREIGN-NS - verify-kit-links cannot validate this namespace"
+    Write-Host "      run on the host (Git Bash / PowerShell), not through tools/sandbox/run.sh"
+}
 
 if ($fail -ne 0) {
     exit 1

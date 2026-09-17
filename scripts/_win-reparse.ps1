@@ -7,6 +7,32 @@ function Test-KitReparse([string]$path) {
     return [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
 }
 
+# Raw target of a reparse point (junction/symlink), or $null. Works in
+# PS 5.1 where Get-Item exposes .Target (LinkTarget is PS 6+).
+function Get-KitReparseTarget([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return $null }
+    if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $null }
+    if ($item.PSObject.Properties['Target'] -and $item.Target) { return @($item.Target)[0] }
+    if ($item.PSObject.Properties['LinkTarget'] -and $item.LinkTarget) { return @($item.LinkTarget)[0] }
+    return $null
+}
+
+# True when the reparse target lies outside the consumer root (link created in
+# another namespace or the consumer tree was moved).
+function Test-KitForeignLink([string]$Root, [string]$Path) {
+    $target = Get-KitReparseTarget $Path
+    if (-not $target) { return $false }
+    $full = $target
+    if (-not [System.IO.Path]::IsPathRooted($full)) {
+        $full = Join-Path (Split-Path $Path -Parent) $full
+    }
+    $rootFull = $Root.TrimEnd('\', '/') + '\'
+    $full = $full.TrimEnd('\', '/') + '\'
+    return -not $full.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Remove-KitReparseOrTree([string]$path) {
     if (-not (Test-Path -LiteralPath $path)) { return }
     $item = Get-Item -LiteralPath $path -Force

@@ -175,18 +175,19 @@ try {
     Set-Content -LiteralPath $probeT -Value "x" -Encoding ascii
     cmd /c "mklink `"$probe`" `"$probeT`"" | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "OK file symlink (Developer Mode / SeCreateSymbolicLinkPrivilege)"
+        Write-Host "OK file symlink capability (Developer Mode / SeCreateSymbolicLinkPrivilege) - kit file links will use symlinks"
     } else {
         cmd /c "mklink /H `"$probeH`" `"$probeT`"" | Out-Null
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "OK file hardlink fallback (no symlink privilege; rules .mdc are hardlinked)"
+            Write-Host "OK file hardlink capability (no symlink privilege) - kit file links will use hardlinks"
         } else {
-            Write-Host "WARN no file symlink/hardlink (cross-volume?) - rules .mdc copy-fallback"
+            Write-Host "WARN no file symlink/hardlink capability (cross-volume?) - kit file links will fall back to copies"
         }
     }
 } catch {
-    Write-Host "WARN no file symlink probe - rules .mdc copy-fallback"
+    Write-Host "WARN no file symlink capability probe - kit file links will fall back to copies"
 }
+Write-Host "INFO actual file link modes: bash harness/scripts/kit-doctor.sh ."
 Remove-Item -LiteralPath $probe, $probeT, $probeH -Force -ErrorAction SilentlyContinue
 
 if ($Install) {

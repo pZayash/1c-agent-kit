@@ -26,6 +26,76 @@ kit_wsl_windows_fs() {
   [[ "$root" == /mnt/[a-zA-Z]/* || "$root" == /mnt/[a-zA-Z] ]]
 }
 
+# ── namespace helpers ──────────────────────────────────────────────────
+# Kit links created in one OS namespace (e.g. a Windows checkout) read as
+# broken/foreign from another (Linux sandbox/WSL): readlink gives a target
+# outside the consumer root. Detect it and refuse to relink in the wrong
+# namespace instead of silently skipping every action.
+
+# Absolute lexically-resolved target of a symlink (target need not exist).
+kit_abs_link_target() {
+  local path="$1" raw
+  [[ -L "$path" ]] || return 1
+  raw="$(readlink "$path" 2>/dev/null || true)"
+  [[ -n "$raw" ]] || return 1
+  case "$raw" in
+    /*) printf '%s\n' "$raw" ;;
+    *) printf '%s\n' "$(cd "$(dirname "$path")" 2>/dev/null && pwd)/$raw" ;;
+  esac
+}
+
+# 0 = symlink target resolves outside consumer root (foreign namespace).
+# Quoted prefix + unquoted wildcard: metacharacters in the root stay literal.
+kit_link_is_foreign() {
+  local root="$1" path="$2" abs
+  root="${root%/}"
+  abs="$(kit_abs_link_target "$path")" || return 1
+  if [[ "$abs" == "$root" || "$abs" == "$root"/* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# Docker/sandbox marker: container root mounted at /workspace.
+kit_sandbox_namespace() {
+  local root="$1"
+  [[ -f /.dockerenv && ( "$root" == /workspace || "$root" == /workspace/* ) ]]
+}
+
+# Candidate kit-managed link paths (aliases + children of managed dirs).
+# Linux namespace only: Git Bash does not see Windows junctions with -L.
+kit_consumer_link_paths() {
+  local root="$1" d p
+  for p in \
+    "$root/.agents/skills" "$root/.claude/skills" "$root/.claude/commands" \
+    "$root/.pi/skills" "$root/.pi/prompts" "$root/.pi/extensions" \
+    "$root/.kilo/plugin" "$root/.opencode/plugin" \
+    "$root/tools/mailbox" "$root/tools/bsl-check" "$root/tools/sandbox" \
+    "$root/tools/load-changed-files" "$root/tools/mcp-call" "$root/tools/answer42" \
+    "$root/tools/git-partial-stage.py"; do
+    printf '%s\n' "$p"
+  done
+  for d in "$root/.cursor/skills" "$root/.cursor/rules" "$root/.cursor/commands"; do
+    [[ -d "$d" ]] || continue
+    for p in "$d"/*; do
+      [[ -L "$p" ]] && printf '%s\n' "$p"
+    done
+  done
+}
+
+# Print "<consumer-rel> -> <raw-target>" for kit links outside the consumer
+# root. Reads link paths from stdin (kit_consumer_link_paths).
+kit_foreign_links() {
+  local root="$1" p rel
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    if kit_link_is_foreign "$root" "$p"; then
+      rel="${p#"$root"/}"
+      printf '%s -> %s\n' "$rel" "$(readlink "$p" 2>/dev/null || true)"
+    fi
+  done
+}
+
 kit_load_manifest() {
   # $1=file $2=nameref assoc array
   local manifest_file="$1"

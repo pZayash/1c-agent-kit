@@ -35,6 +35,23 @@ info() { echo "[INFO] $*"; }
 
 echo "=== kit-doctor: $CONSUMER_ROOT ==="
 
+# 0. namespace: links created in another OS/namespace (Windows checkout seen
+#    from a Linux sandbox/WSL, or a moved consumer tree) cannot be diagnosed
+#    here - verify/fallback checks would be meaningless (or falsely green).
+FOREIGN_NS=0
+foreign_out="$(kit_consumer_link_paths "$CONSUMER_ROOT" | kit_foreign_links "$CONSUMER_ROOT")"
+if [[ -n "$foreign_out" ]]; then
+  FOREIGN_NS=1
+  n="$(printf '%s\n' "$foreign_out" | grep -c .)"
+  if kit_sandbox_namespace "$CONSUMER_ROOT"; then
+    bad "sandbox namespace: $n kit link(s) point outside $CONSUMER_ROOT (Windows layout in a Linux container)"
+  else
+    bad "foreign namespace: $n kit link(s) point outside $CONSUMER_ROOT (moved tree / another OS)"
+  fi
+  printf '%s\n' "$foreign_out" | head -3 | sed 's/^/       /'
+  info "run on the host (Git Bash / PowerShell), not through tools/sandbox/run.sh"
+fi
+
 # 1. harness presence + gitlink (logic: hooks/pre-commit-harness)
 if [[ ! -e "$HARNESS_ROOT" ]]; then
   bad "missing $HARNESS_REL/ (git submodule update --init?)"
@@ -94,7 +111,9 @@ fi
 if [[ -e "$HARNESS_ROOT" ]]; then
   # 4. verify links
   vlog="$(mktemp)"
-  if bash "$SCRIPT_DIR/verify-kit-links.sh" "$CONSUMER_ROOT" >"$vlog" 2>&1; then
+  if [[ "$FOREIGN_NS" == "1" ]]; then
+    info "verify-kit-links skipped (foreign namespace; see check 0)"
+  elif bash "$SCRIPT_DIR/verify-kit-links.sh" "$CONSUMER_ROOT" >"$vlog" 2>&1; then
     ok "verify-kit-links"
   else
     bad "verify-kit-links:"
@@ -169,15 +188,32 @@ if [[ -e "$HARNESS_ROOT" ]]; then
   kit_load_manifest "$SYNC_DIR/local-tools.txt" tools_local
   stale=""
   in_sync=0
+  links=0
+  hardlinks=0
+  copies=0
+  file_link_kind() { # echo symlink|hardlink|copy
+    local f="$1" n
+    if [[ -L "$f" ]]; then echo symlink; return; fi
+    n="$(stat -c %h "$f" 2>/dev/null || echo 1)"
+    if [[ "$n" =~ ^[0-9]+$ && "$n" -gt 1 ]]; then echo hardlink; else echo copy; fi
+  }
   check_fallback() { # $1=rel $2=src
-    local rel="$1" src="$2" dst="$CONSUMER_ROOT/$1"
+    local rel="$1" src="$2" dst="$CONSUMER_ROOT/$1" kind
     pair_rels["$rel"]=1
     if [[ ! -e "$dst" ]]; then
       stale+="$rel (fallback missing - run bootstrap-kit)"$'\n'; return
     fi
-    [[ -L "$dst" ]] && return
+    kind="$(file_link_kind "$dst")"
+    if [[ "$kind" == "symlink" ]]; then
+      links=$((links + 1)); return
+    fi
     if [[ -f "$src" ]] && cmp -s "$dst" "$src"; then
-      in_sync=$((in_sync + 1)); return
+      in_sync=$((in_sync + 1))
+      case "$kind" in
+        hardlink) hardlinks=$((hardlinks + 1)) ;;
+        *) copies=$((copies + 1)) ;;
+      esac
+      return
     fi
     stale+="$rel (content differs from kit - run bootstrap-kit)"$'\n'
   }
@@ -210,14 +246,12 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     n="$(grep -c . <<<"$stale")"
     warn "$n file fallback(s) out of sync:"
     grep . <<<"$stale" | sed 's/^/       /'
-  elif [[ "$in_sync" -gt 0 ]]; then
-    if kit_symlink_possible; then
-      warn "$in_sync in-sync file fallback(s) can be upgraded to symlink - run bootstrap-kit"
-    else
-      ok "$in_sync file fallback(s) in sync (hardlink/copy; no symlink privilege)"
-    fi
-  else
+  elif [[ "$links" -eq 0 && "$in_sync" -eq 0 ]]; then
     ok "no file fallback kit paths"
+  elif [[ "$in_sync" -gt 0 ]] && kit_symlink_possible; then
+    warn "$in_sync in-sync file fallback(s) are not links ($hardlinks hardlink(s), $copies copy(ies); $links link(s)) - run bootstrap-kit to upgrade"
+  else
+    ok "$links link(s), $hardlinks hardlink(s), $copies copy(ies) in sync"
   fi
 
   # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only)
@@ -247,6 +281,29 @@ if [[ -e "$HARNESS_ROOT" ]]; then
       sed 's/^/       /' "$tklog" | head -20
     fi
     rm -f "$tklog"
+  fi
+
+  # 11. .gitignore hygiene: hand-written kit paths now covered by the managed
+  #     block (the block is regenerated, the hand lines are dead weight).
+  gi="$CONSUMER_ROOT/.gitignore"
+  if [[ -f "$gi" ]]; then
+    overlap="$(awk '
+      /^# >>> kit-managed: begin/ { managed=1; next }
+      /^# <<< kit-managed: end/   { managed=0; next }
+      {
+        line=$0; sub(/#.*/, "", line)
+        gsub(/^[ \t]+|[ \t\r]+$/, "", line)
+        if (line == "") next
+        key=line; sub(/^\/+/, "", key); sub(/\/+$/, "", key)
+        if (managed) m[key]=1; else h[key]=1
+      }
+      END { for (k in h) if (k in m) print k }
+    ' "$gi" | sort)"
+    if [[ -n "$overlap" ]]; then
+      on="$(grep -c . <<<"$overlap")"
+      warn "$on hand-written .gitignore line(s) duplicate the kit-managed block (remove them):"
+      grep . <<<"$overlap" | head -5 | sed 's/^/       /'
+    fi
   fi
 fi
 
