@@ -42,6 +42,14 @@ Commands:
   tracked [consumer-root]   list kit link paths tracked in the consumer index;
                             exit 1 if any (junction traversal on Windows)
 
+Namespace safety:
+  A link whose target is outside the consumer root belongs to another
+  OS/namespace (typically a Windows checkout seen from a Linux sandbox/WSL).
+  plan/apply refuse to touch such a tree (exit 2) instead of silently
+  skipping every action and reporting "nothing to do"; verify reports
+  FOREIGN-NS and FAILs when nothing local can be checked. plan --strict
+  also exits 1 on foreign-ns.
+
 Stdlib only. Windows: dirs -> mklink /J junctions (no admin needed),
 files -> symlink with copy fallback. Junction removal via os.rmdir
 (never recurses into the target).
@@ -83,6 +91,25 @@ def wsl_windows_path(root):
     inside WSL and broken for Windows-side tools)."""
     s = str(root)
     return bool(re.match(r'^/mnt/[A-Za-z](/|$)', s))
+
+
+def is_sandbox_namespace(root):
+    """Docker/sandbox marker: /.dockerenv with the consumer mounted at
+    /workspace (tools/sandbox/run.sh). Only sharpens the message; the actual
+    signal is a link whose target is outside the consumer root."""
+    try:
+        return os.path.exists('/.dockerenv') and str(root) in ('/workspace', '/')
+    except OSError:
+        return False
+
+
+FOREIGN_NS_HINT = (
+    'Foreign namespace: these links were created by another OS/namespace\n'
+    '(e.g. a Windows checkout seen from a Linux sandbox/WSL container).\n'
+    'Run kit-layout in the namespace that created the layout: host Git Bash\n'
+    '(bash harness/scripts/bootstrap-kit.sh .) or PowerShell\n'
+    '(harness/scripts/bootstrap-kit.ps1), not through tools/sandbox/run.sh.'
+)
 
 
 # ── platform primitives ─────────────────────────────────────────────
@@ -258,20 +285,50 @@ def remove_link_or_tree(path):
 
 class Ctx:
     def __init__(self, root, harness_rel, dry_run=False, gitignore=True,
-                 manifest_rel=FALLBACK_MANIFEST_REL, quiet=False, untrack=True):
+                 manifest_rel=FALLBACK_MANIFEST_REL, quiet=False, untrack=True,
+                 upgrade_fallbacks=False):
         self.root = Path(root).resolve()
         self.harness_rel = harness_rel
         self.dry_run = dry_run
         self.gitignore = gitignore
         self.quiet = quiet
         self.untrack = untrack
+        self.upgrade_fallbacks = upgrade_fallbacks
         self.actions = []   # (level, message); level: ACT/WARN/FAIL/OK
         self.pending = 0    # would-be mutations in plan mode
         self.managed = set()      # consumer-rel paths owned by the kit
         self.fallback = {}        # rel -> {'source', 'sha'}
         self.old_fallback = {}    # rel -> {'source', 'sha'} (previous run)
+        self.foreign = []         # [(rel, raw_target)] links outside root
+        self.inside = 0           # links pointing inside root
+        self._foreign_seen = set()
+        self._inside_seen = set()
         self.manifest_rel = manifest_rel
         self.manifest_path = self.root / manifest_rel
+
+    def classify_link(self, link):
+        """('inside'|'foreign'|None, raw_target) for a reparse point."""
+        raw = read_link(link)
+        if raw is None:
+            return None, None
+        target = Path(raw)
+        if not target.is_absolute():
+            target = link.parent / target
+        return ('inside' if is_within(target, self.root) else 'foreign'), raw
+
+    def note_ns(self, rel, link):
+        """Record link namespace (deduped) for the final report."""
+        kind, raw = self.classify_link(link)
+        key = rel.replace('\\', '/')
+        if kind == 'inside':
+            if key not in self._inside_seen:
+                self._inside_seen.add(key)
+                self.inside += 1
+        elif kind == 'foreign':
+            if key not in self._foreign_seen:
+                self._foreign_seen.add(key)
+                self.foreign.append((key, raw))
+        return kind, raw
 
     def say(self, level, msg):
         self.actions.append((level, msg))
@@ -333,6 +390,7 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
                 # it would rewrite all links to this namespace's paths and
                 # break the original tools - skip instead.
                 if not is_within(cur_path, ctx.root):
+                    ctx.note_ns(rel, link)
                     ctx.say('WARN', f'SKIP FOREIGN-NS: {label} -> {cur} (layout from another namespace)')
                     return True
                 if cur_path.resolve() == target.resolve():
@@ -464,22 +522,33 @@ def run_alias(ctx, res):
 
 def verify_resource(ctx, res):
     ok = True
-    source = ctx.resolve(res['source'])
-    if not source.is_dir():
-        ctx.say('OK', f'SKIP verify {res["id"]} (no source)')
-        return True
     if res['kind'] == 'alias':
+        # Verify aliases before the source check: in a foreign namespace the
+        # source may itself be an unresolvable link, but the alias still needs
+        # a FOREIGN-NS report instead of a misleading "no source" SKIP.
+        source = ctx.resolve(res['source'])
         target = ctx.resolve(res['target'])
-        ctx.note_managed(rel_posix(target, ctx.root))
+        rel = rel_posix(target, ctx.root)
+        ctx.note_managed(rel)
         if is_link(target):
-            ctx.say('OK', f'OK {res["target"]}')
+            kind, raw = ctx.note_ns(rel, target)
+            if kind == 'foreign':
+                ctx.say('WARN', f'WARN FOREIGN-NS: {rel} -> {raw}')
+            else:
+                ctx.say('OK', f'OK {res["target"]}')
         elif target.exists():
             ctx.say('FAIL', f'FAIL not link (copy?): {res["target"]}')
             ok = False
+        elif not source.is_dir():
+            ctx.say('OK', f'SKIP verify {res["id"]} (no source)')
         else:
             ctx.say('FAIL', f'FAIL missing: {res["target"]}')
             ok = False
         return ok
+    source = ctx.resolve(res['source'])
+    if not source.is_dir():
+        ctx.say('OK', f'SKIP verify {res["id"]} (no source)')
+        return True
     local = load_local(ctx, res.get('local_manifest'))
     include = set(res.get('include') or [])
     want_dir = res['kind'] == 'child-dirs'
@@ -495,7 +564,11 @@ def verify_resource(ctx, res):
         rel = f'{res["target"]}/{child.name}'
         ctx.note_managed(rel)
         if is_link(link):
-            ctx.say('OK', f'OK {rel}')
+            kind, raw = ctx.note_ns(rel, link)
+            if kind == 'foreign':
+                ctx.say('WARN', f'WARN FOREIGN-NS: {rel} -> {raw}')
+            else:
+                ctx.say('OK', f'OK {rel}')
         elif link.exists():
             if want_dir:
                 ctx.say('FAIL', f'FAIL not link (copy?): {rel}')
@@ -508,6 +581,104 @@ def verify_resource(ctx, res):
             ctx.say('FAIL', f'FAIL missing: {rel}')
             ok = False
     return ok
+
+
+def iter_expected_links(ctx, layout):
+    """Yield consumer paths the layout manages (independent of existence)."""
+    for res in layout['resources']:
+        source = ctx.resolve(res['source'])
+        if not source.is_dir():
+            continue
+        target = ctx.resolve(res['target'])
+        if res['kind'] == 'alias':
+            yield target
+            continue
+        local = load_local(ctx, res.get('local_manifest'))
+        include = set(res.get('include') or [])
+        want_dir = res['kind'] == 'child-dirs'
+        for child in sorted(source.iterdir()):
+            if child.is_dir() != want_dir:
+                continue
+            if include and child.name not in include:
+                continue
+            if child.name in local:
+                continue
+            yield target / child.name
+
+
+def scan_namespace(ctx, layout):
+    """Classify existing managed links as inside/foreign before any action.
+
+    Filesystem-only and side-effect free: lets apply/plan refuse a foreign
+    namespace before the first link is touched (not after 100+ silent skips).
+    """
+    for link in iter_expected_links(ctx, layout):
+        if is_link(link):
+            ctx.note_ns(rel_posix(link, ctx.root), link)
+
+
+def upgrade_fallbacks(ctx):
+    """--upgrade-fallbacks: re-create recorded in-sync copies as links.
+
+    The layout pass already upgrades managed in-sync fallbacks when symlink
+    privilege appears; this also covers manifest entries that the current
+    table no longer produces (paths recorded before the upgrade logic).
+    """
+    if ctx.dry_run or not ctx.upgrade_fallbacks:
+        return
+    for rel in sorted(ctx.old_fallback):
+        path = ctx.root / rel
+        if is_link(path) or not path.is_file():
+            continue
+        rec = ctx.old_fallback[rel]
+        src = ctx.root / rec['source']
+        if not src.is_file() or not file_equal(path, src):
+            continue
+        remove_link_or_tree(path)
+        how = make_file_link(src, path)
+        if how == 'FILELINK':
+            ctx.say('ACT', f'UPGRADE (symlink) fallback: {rel}')
+        else:
+            ctx.say('WARN', f'fallback still {how} (symlink unavailable): {rel}')
+            ctx.note_fallback(rel, rec['source'], hash_file(src))
+
+
+def parse_gitignore_entries(text):
+    """Split .gitignore into (managed, hand) normalized path sets."""
+    managed, hand = set(), set()
+    in_managed = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == GITIGNORE_BEGIN:
+            in_managed = True
+            continue
+        if stripped == GITIGNORE_END:
+            in_managed = False
+            continue
+        entry = line.split('#', 1)[0].strip()
+        if not entry:
+            continue
+        key = entry.lstrip('/').rstrip('/')
+        (managed if in_managed else hand).add(key)
+    return managed, hand
+
+
+def check_gitignore_overlap(ctx):
+    """Hand-written paths already covered by the kit-managed block."""
+    p = ctx.root / '.gitignore'
+    if not p.is_file():
+        return []
+    managed, hand = parse_gitignore_entries(p.read_text(encoding='utf-8'))
+    return sorted(hand & managed)
+
+
+def warn_gitignore_overlap(ctx):
+    overlap = check_gitignore_overlap(ctx)
+    if not overlap:
+        return
+    show = ', '.join(overlap[:5]) + (' ...' if len(overlap) > 5 else '')
+    ctx.say('WARN', f'WARN {len(overlap)} hand-written .gitignore line(s) duplicate '
+                   f'the kit-managed block (remove them; the block is regenerated): {show}')
 
 
 def load_fallback_manifest(ctx):
@@ -632,11 +803,13 @@ def main(argv=None):
     p.add_argument('--harness-rel', default=os.environ.get('HARNESS_REL', 'harness'))
     p.add_argument('--layout', default=str(Path(__file__).with_name('layout.json')))
     p.add_argument('--strict', action='store_true',
-                   help='plan: exit 1 if any pending action (parity gate)')
+                   help='plan: exit 1 if any pending action or foreign-ns link')
     p.add_argument('--no-gitignore', action='store_true',
                    help='do not (re)generate the kit-managed .gitignore block')
     p.add_argument('--no-untrack', action='store_true',
                    help='do not untrack kit link paths from the consumer index')
+    p.add_argument('--upgrade-fallbacks', action='store_true',
+                   help='apply: re-create recorded in-sync hardlink/copy as links')
     a = p.parse_intermixed_args(argv)
 
     layout = json.loads(Path(a.layout).read_text(encoding='utf-8'))
@@ -647,6 +820,8 @@ def main(argv=None):
               dry_run=(a.command in ('plan', 'tracked')),
               gitignore=gitignore, quiet=(a.command == 'tracked'),
               untrack=(not a.no_untrack),
+              upgrade_fallbacks=(a.upgrade_fallbacks
+                                 or os.environ.get('KIT_UPGRADE_FALLBACKS') == '1'),
               manifest_rel=layout.get('fallback_manifest', FALLBACK_MANIFEST_REL))
     if is_wsl() and wsl_windows_path(ctx.root) and os.environ.get('WSL_ALLOW') != '1':
         print(
@@ -660,11 +835,35 @@ def main(argv=None):
               file=sys.stderr)
         return 2
 
+    # Namespace pre-scan: never start link work in a tree owned by another
+    # OS/namespace (silent no-op + green verify is worse than a hard error).
+    scan_namespace(ctx, layout)
+    where = 'sandbox' if is_sandbox_namespace(ctx.root) else 'foreign'
+    if ctx.foreign and a.command in ('plan', 'apply'):
+        print(f'ERROR: kit-layout {where} namespace: {len(ctx.foreign)} kit link(s) '
+              f'point outside {ctx.root}; refusing to relink.', file=sys.stderr)
+        for rel, raw in ctx.foreign[:3]:
+            print(f'  {rel} -> {raw}', file=sys.stderr)
+        if len(ctx.foreign) > 3:
+            print(f'  ... and {len(ctx.foreign) - 3} more', file=sys.stderr)
+        print(FOREIGN_NS_HINT, file=sys.stderr)
+        return 2
+
     failed = False
     if a.command == 'verify':
         for res in layout['resources']:
             failed |= not verify_resource(ctx, res)
         verify_tracked(ctx)
+        warn_gitignore_overlap(ctx)
+        # verify never reports OK on a tree it cannot inspect.
+        if ctx.foreign and ctx.inside == 0:
+            ctx.say('FAIL', f'FAIL all {len(ctx.foreign)} kit link(s) are FOREIGN-NS '
+                            f'({where} namespace); verification is meaningless here')
+            failed = True
+            print(FOREIGN_NS_HINT, file=sys.stderr)
+        elif ctx.foreign:
+            ctx.say('WARN', f'WARN {len(ctx.foreign)} FOREIGN-NS link(s) ignored, '
+                            f'{ctx.inside} local link(s) checked')
     elif a.command == 'tracked':
         for res in layout['resources']:
             runner = run_alias if res['kind'] == 'alias' else run_child
@@ -675,19 +874,21 @@ def main(argv=None):
         return 1 if tracked else 0
     else:
         load_fallback_manifest(ctx)
+        warn_gitignore_overlap(ctx)
         for res in layout['resources']:
             runner = run_alias if res['kind'] == 'alias' else run_child
             failed |= not runner(ctx, res)
         prune_stale_fallbacks(ctx)
+        upgrade_fallbacks(ctx)
         write_fallback_manifest(ctx)
         write_managed_gitignore(ctx)
         untrack_links(ctx)
 
     fails = sum(1 for lvl, _ in ctx.actions if lvl == 'FAIL')
     if a.command == 'plan':
-        foreign = sum(1 for _, m in ctx.actions if m.startswith('SKIP FOREIGN-NS:'))
-        print(f'kit-layout plan: {ctx.pending} pending action(s), {foreign} foreign-ns skip(s)')
-        if a.strict and ctx.pending:
+        print(f'kit-layout plan: {ctx.pending} pending action(s), '
+              f'{len(ctx.foreign)} foreign-ns skip(s)')
+        if a.strict and (ctx.pending or ctx.foreign):
             return 1
     if a.command == 'verify':
         print(f'kit-layout verify: {"FAIL" if fails else "OK"}')
