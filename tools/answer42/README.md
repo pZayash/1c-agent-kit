@@ -17,7 +17,7 @@
 - Windows — **интерактивная desktop-сессия** пользователя: Answer42 запускает
   окна `1cv8c`. Служба и заблокированный RDP-сеанс не подходят.
 - Linux — X11 или Xvfb (`xvfb`, `wmctrl`, `xdotool`), extra
-  `linux-window-control`.
+  `linux-window-control`; для `answer42.sh` — `python3` и `curl` в PATH.
 
 ## Установка
 
@@ -30,12 +30,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 Linux:
 
 ```bash
-bash tools/answer42/answer42.sh install
+bash tools/answer42/answer42.sh install          # PyPI-сборка
+bash tools/answer42/answer42.sh install --fork   # editable-сборка из форка (ANSWER42_FORK_DIR)
 ```
 
 Windows-вариант создаёт `.venv-answer42` в корне проекта-потребителя и ставит
-`answer42[screenshot,windows-window-control]`. Каталог venv обязан быть в
+`answer42[screenshot,windows-window-control]`; Linux-вариант — то же с
+`[screenshot,linux-window-control]`. Каталог venv обязан быть в
 `.gitignore` потребителя.
+
+`answer42.sh` работает и в **Git Bash на Windows**: Windows-пути из `.env`
+нормализуются, сервис запускается через `Start-Process` (фоновый процесс MSYS
+не переживает выход шелла), а `stop` добивает владельца порта через `taskkill`.
+Канонический вариант для Windows — всё же `answer42.ps1`.
 
 ### Сборка из форка
 
@@ -45,7 +52,16 @@ Windows-вариант создаёт `.venv-answer42` в корне проек�
 
 Важно: чек-аут и venv должны лежать в **латинском пути** — кириллица в пути
 ломает editable-установку (`.pth` с не-ASCII путём не подхватывается, `import
-mcp_1c` падает).
+mcp_1c` падает) на Windows.
+
+Linux/Git Bash — одной командой (`ANSWER42_FORK_DIR` в `.env`; делает venv,
+editable-установку и локальную сборку CF из XML):
+
+```bash
+bash tools/answer42/answer42.sh install --fork
+```
+
+Вручную (любая ОС):
 
 ```bash
 # чекаут: C:\GitHub\pzayash\answer42-mcp
@@ -58,8 +74,8 @@ python -m venv .venv
 .venv/Scripts/python.exe scripts/build_cf.py src/client_cf src/mcp_1c/assets/MCPTestClient.cf
 ```
 
-Затем `ANSWER42_BIN` в `.env` потребителя указывает на бинарь venv форка.
-Обновление с upstream:
+Затем `ANSWER42_BIN` в `.env` потребителя указывает на бинарь venv форка;
+обновление с upstream — действием `update` (см. ниже), вручную — так:
 
 ```bash
 git fetch upstream --tags && git switch fork-patches && git rebase <новый-тег>
@@ -99,6 +115,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 stop
 ```
 
+Linux (и Git Bash на Windows) — то же через `.sh`:
+
+```bash
+bash tools/answer42/answer42.sh start|status|stop|restart|smoke
+```
+
 `start` проверяет только то, что процесс поднял порт, и возвращает управление;
 готовность эндпоинта (она наступает позже — инициализация Answer42) проверяется
 канонным способом:
@@ -122,6 +144,16 @@ bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 120 session_status
 ## Обновление форк-сборки
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 update [-Ref тег] [-Push] [-RestartService]
+```
+
+```bash
+bash tools/answer42/answer42.sh update [--ref тег] [--push] [--no-restart]
+```
+
+Эквивалент вручную:
+
+```powershell
 # подтянуть релизы upstream, ребейзнуть fork-patches, пересобрать CF, переустановить пакет
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 update
 # плюс пуш ветки в origin и перезапуск сервиса
@@ -132,10 +164,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 (`fork-patches`), `ANSWER42_FORK_REMOTE` (`upstream` — источник релизов),
 `ANSWER42_FORK_PUSH_REMOTE` (`origin`).
 
-Что делает действие:
+Что делает действие (одинаково в `.ps1` и `.sh`):
 
-- без `-Ref` берёт новейший тег upstream; если ветка уже основана на нём —
+- без `-Ref`/`--ref` берёт новейший тег upstream; если ветка уже основана на нём —
   сообщает «обновлять нечего» (повторный запуск безопасен);
+- неизвестный ref — внятная ошибка (exit 2), а не сырой `git fatal`;
 - ребейзит ветку с патчами и проверяет, что патч (`_tool_error_text`) на месте;
   конфликт останавливает действие с подсказкой `git rebase --continue | --abort`;
 - пересобирает `MCPTestManager.cf` / `MCPTestClient.cf` и делает
