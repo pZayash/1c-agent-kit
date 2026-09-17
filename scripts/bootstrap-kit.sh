@@ -56,7 +56,9 @@ fi
 # from a Linux sandbox/WSL) must not be relinked here. Stop before ANY link or
 # file step; otherwise bootstrap is a silent no-op (engine) or creates
 # container-local links and fails verify with a misleading reason.
-foreign_out="$(kit_consumer_link_paths "$CONSUMER_ROOT" | kit_foreign_links "$CONSUMER_ROOT")"
+# `|| true`: belt-and-braces against a helper status leak under pipefail —
+# the guard must print its ERROR (exit 2), never abort silently (exit 1).
+foreign_out="$(kit_consumer_link_paths "$CONSUMER_ROOT" | kit_foreign_links "$CONSUMER_ROOT" || true)"
 if [[ -n "$foreign_out" ]]; then
   n="$(printf '%s\n' "$foreign_out" | grep -c .)"
   {

@@ -221,11 +221,27 @@ def rel_posix(path, root):
 def is_within(path, root):
     """True if path is inside root (lexical, case-insensitive on Windows)."""
     try:
-        os.path.normcase(str(path)).startswith(os.path.normcase(str(root)) + os.sep)
         common = os.path.commonpath([str(path), str(root)])
         return os.path.normcase(common) == os.path.normcase(str(root))
     except (ValueError, OSError):
         return False
+
+
+def is_within_resolved(path, root):
+    """True if the realpath of path lies inside the realpath of root.
+
+    A consumer root reached through a symlink (agent slot: /work ->
+    /srv/agent-worktrees/agent-N) makes a lexical comparison flag every link
+    as foreign, because the links store the symlink spelling while the engine
+    resolves the root. Compare both sides after resolving symlinks; the target
+    need not exist (Path.resolve is non-strict).
+    """
+    try:
+        path = Path(path).resolve()
+        root = Path(root).resolve()
+    except (OSError, RuntimeError):
+        pass
+    return is_within(path, root)
 
 
 def git_run(root, *args):
@@ -314,7 +330,7 @@ class Ctx:
         target = Path(raw)
         if not target.is_absolute():
             target = link.parent / target
-        return ('inside' if is_within(target, self.root) else 'foreign'), raw
+        return ('inside' if is_within_resolved(target, self.root) else 'foreign'), raw
 
     def note_ns(self, rel, link):
         """Record link namespace (deduped) for the final report."""
@@ -389,7 +405,7 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
                 # sandbox over a layout created by Windows scripts). Relinking
                 # it would rewrite all links to this namespace's paths and
                 # break the original tools - skip instead.
-                if not is_within(cur_path, ctx.root):
+                if not is_within_resolved(cur_path, ctx.root):
                     ctx.note_ns(rel, link)
                     ctx.say('WARN', f'SKIP FOREIGN-NS: {label} -> {cur} (layout from another namespace)')
                     return True

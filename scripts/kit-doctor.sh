@@ -39,7 +39,7 @@ echo "=== kit-doctor: $CONSUMER_ROOT ==="
 #    from a Linux sandbox/WSL, or a moved consumer tree) cannot be diagnosed
 #    here - verify/fallback checks would be meaningless (or falsely green).
 FOREIGN_NS=0
-foreign_out="$(kit_consumer_link_paths "$CONSUMER_ROOT" | kit_foreign_links "$CONSUMER_ROOT")"
+foreign_out="$(kit_consumer_link_paths "$CONSUMER_ROOT" | kit_foreign_links "$CONSUMER_ROOT" || true)"
 if [[ -n "$foreign_out" ]]; then
   FOREIGN_NS=1
   n="$(printf '%s\n' "$foreign_out" | grep -c .)"

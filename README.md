@@ -89,6 +89,15 @@ no-op и зелёный verify опаснее явной ошибки.
 `plan --strict` — exit 1 при pending-действиях или foreign-ns (гейт паритета
 для CI/валидации).
 
+**Symlink-корень — не FOREIGN-NS.** Agent-slot отдаёт worktree как
+`/work -> /srv/agent-worktrees/agent-N`: ссылки хранят написание `/work/...`,
+а `bootstrap`/engine резолвят корень в `/srv/...`. Guard сравнивает **realpath
+цели с realpath корня** (`_link-common.sh: kit_canonical_path`,
+`kit_layout.py: is_within_resolved`), поэтому та же раскладка под другим
+написанием корня не отвергается. Регресс-тесты: `tools/kit-layout/test_kit_layout.py`
+(engine + scan/compare), `tools/kit-agent/test_kit_agent.py` (namespace-хинт
+без git).
+
 ### kit-agent: хуки и guard-правила для агентов
 
 Ядро `tools/kit-agent/kit_agent.py` (idea: teamai hooks, harness-агностично):
@@ -218,7 +227,11 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   появления managed-блока (`# >>> kit-managed: begin`) ручные строки
   `.cursor/skills/...`, `/.pi/*` и т.п. лишние: `verify`/`kit-doctor`
   предупреждают о пересечении. Удали свои строки (блок перегенерируется
-  bootstrap), оставшийся untracked-мусор добирает managed-блок.
+  bootstrap), оставшийся untracked-мусор добирает managed-блок. На Linux
+  ссылки kit — именно symlink'и: ручные шаблоны с завершающим `/`
+  (`xlsx/`, `prompt-enhancer/`) матчат только каталоги и дают `??` в
+  `git status`; managed-блок корня пишет `/.cursor/skills/xlsx` (без слэша)
+  и покрывает их.
 - **`bootstrap-kit`/`kit_layout.py` через `tools/sandbox/run.sh` над
   Windows-деревом** — target ссылок читается как `/mnt/host/...`
   (FOREIGN-NS): engine теперь `ERROR` exit 2, а не тихий no-op/зелёный

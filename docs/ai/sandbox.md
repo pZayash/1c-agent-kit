@@ -145,6 +145,12 @@ bash tools/sandbox/run.sh bash scripts/…
 ## Ограничения контейнера
 
 - В **`agent-sandbox` нет `git`** (намеренно; `rtk git` только на хосте).
+  `kit-agent session-start` это учитывает: namespace-проверка
+  (`kit_layout.py plan --strict`) вынесена из git-ветки и печатает
+  подсказку с exit-2-причиной даже без git — «всё ок» в контейнере
+  больше не означает пропущенную проверку.
+  Symlink-корень (`/work -> /srv/...`) при этом не считается FOREIGN-NS:
+  guard сравнивает realpath цели с realpath корня.
 - Платформа 1С (`1cv8.exe`) на **хосте**, не в Linux-контейнере — навыки `db-*`,
   `epf-build` и т.п. не заменяются sandbox.
 - **MCP на `127.0.0.1`:** из контейнера хост часто = `host.docker.internal`
@@ -204,6 +210,7 @@ bash tools/sandbox/run.sh pip install -r tools/sandbox/requirements.txt
 | `run.sh: docker: command not found` | Docker выключен | Сообщить пользователю |
 | `bsl-check.py` not found | Win junction → `/mnt/host` в sandbox | `harness/tools/bsl-check/check-bsl.py` |
 | `kit_layout.py`: `ERROR ... foreign/sandbox namespace` | Windows-раскладка, запуск из контейнера | запусти на хосте (Git Bash/PowerShell), не через `run.sh` |
+| `kit-agent session-start` пуст в контейнере | git нет / namespace в порядке | норма; при foreign-ns печатается `[!] kit-layout ... namespace` |
 | `kit-doctor`: `[FAIL] foreign namespace` | ссылки созданы в другом OS/namespace | то же |
 | Нет `1cv8.exe` | Платформа на хосте | db-* / epf-build — не sandbox |
 

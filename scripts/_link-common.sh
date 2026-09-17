@@ -44,13 +44,59 @@ kit_abs_link_target() {
   esac
 }
 
+# Canonical (symlink-resolved) absolute path; a missing tail is kept as-is.
+# Prefers coreutils realpath/readlink -f, then python, then resolving the
+# deepest existing parent with `cd -P`. Needed because a consumer root may be
+# reached through a symlink (agent slot: /work -> /srv/agent-worktrees/agent-N),
+# so a lexical target/root comparison misreads the same namespace as foreign.
+kit_canonical_path() {
+  local p="$1" real py
+  [[ -n "$p" ]] || return 1
+  if command -v realpath >/dev/null 2>&1; then
+    if real="$(realpath -m -- "$p" 2>/dev/null)" && [[ -n "$real" ]]; then
+      printf '%s\n' "$real"; return 0
+    fi
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    if real="$(readlink -f -- "$p" 2>/dev/null)" && [[ -n "$real" ]]; then
+      printf '%s\n' "$real"; return 0
+    fi
+  fi
+  py="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
+  if [[ -n "$py" ]]; then
+    if real="$("$py" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null)" && [[ -n "$real" ]]; then
+      printf '%s\n' "$real"; return 0
+    fi
+  fi
+  # Last resort: resolve the deepest existing ancestor with cd -P.
+  local dir base
+  if [[ -d "$p" ]]; then
+    real="$(cd -P "$p" 2>/dev/null && pwd)"
+  else
+    dir="$(dirname "$p")"; base="$(basename "$p")"
+    if real="$(cd -P "$dir" 2>/dev/null && pwd)"; then
+      real="$real/$base"
+    else
+      real=""
+    fi
+  fi
+  [[ -n "$real" ]] || real="$p"
+  printf '%s\n' "$real"
+}
+
 # 0 = symlink target resolves outside consumer root (foreign namespace).
+# Both sides are symlink-resolved: a root reached through a symlink (e.g.
+# /work) and a link that spells the same tree either way are the same
+# namespace, not a FOREIGN-NS.
 # Quoted prefix + unquoted wildcard: metacharacters in the root stay literal.
 kit_link_is_foreign() {
-  local root="$1" path="$2" abs
-  root="${root%/}"
+  local root="$1" path="$2" abs root_abs
+  [[ -n "$root" ]] || return 1
   abs="$(kit_abs_link_target "$path")" || return 1
-  if [[ "$abs" == "$root" || "$abs" == "$root"/* ]]; then
+  root_abs="$(kit_canonical_path "${root%/}")"
+  root_abs="${root_abs%/}"
+  abs="$(kit_canonical_path "$abs")"
+  if [[ "$abs" == "$root_abs" || "$abs" == "$root_abs"/* ]]; then
     return 1
   fi
   return 0
