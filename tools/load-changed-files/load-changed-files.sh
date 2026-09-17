@@ -58,6 +58,10 @@
 #                               от диска. Без --list-file.
 #       --force-partial         Не отменять partial, даже если в списке Configuration.xml
 #                               после merge (иначе скрипт шлёт на -F).
+#       --force-sessions        При ошибке /UpdateDBCfg из-за HTTP-клиентов повторить его
+#                               с -Dynamic- -SessionTerminate force (сеансы завершаются
+#                               принудительно). Экв. UPDATE_DB_FORCE_SESSIONS=true.
+#       --no-force-sessions     Запретить принудительное завершение сеансов (экв. env=false)
 #       --verbose               Подробный вывод (по умолчанию — краткий для агентов)
 #   -h, --help                  Показать эту справку
 #
@@ -78,6 +82,10 @@
 #   PARENT_CONFIG_PY          Путь к parent_config.py для preflight поддержки
 #                             (по умолчанию: scripts/parent_config.py потребителя, иначе канон в kit)
 #   UPDATE_DB                 Обновить конфигурацию базы данных после загрузки (true/false, по умолчанию: false)
+#   UPDATE_DB_FORCE_SESSIONS  true (по умолчанию) — если /UpdateDBCfg упал из-за HTTP-клиентов
+#                             (вторую публикацию ИБ держит другая служба Apache), повторить
+#                             обновление с -Dynamic- -SessionTerminate force. Пользователи
+#                             отключаются принудительно, в лог пишется WARN. На prod — false.
 #   APACHE_SERVICE_NAME       Имя службы Apache (например, Apache2.4). Если задано и UPDATE_DB=true —
 #                             служба останавливается перед /UpdateDBCfg и запускается после.
 #                             Освобождает lock файловой ИБ и пересоздаёт worker httpd.exe с wsap24.dll
@@ -435,8 +443,52 @@ check_command() {
     fi
 }
 
+# Читает лог 1С (`/Out`) и печатает текст в UTF-8.
+# designer пишет UTF-16 LE|BE с BOM (или UTF-8); ibcmd при перенаправлении — CP866/CP1251.
+read_1c_log_text() {
+    local log_file="$1" head_hex has_nul
+    [[ -f "$log_file" && -s "$log_file" ]] || return 0
+    head_hex=$(head -c 3 "$log_file" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case "$head_hex" in
+        fffe*) iconv -f UTF-16LE -t UTF-8 "$log_file" 2>/dev/null; return 0 ;;
+        feff*) iconv -f UTF-16BE -t UTF-8 "$log_file" 2>/dev/null; return 0 ;;
+        efbbbf) tail -c +4 "$log_file"; return 0 ;;
+    esac
+    # BOM-less UTF-16 (реже): NUL-байты в начале файла
+    has_nul=$(head -c 4096 "$log_file" 2>/dev/null | tr -cd '\000' | wc -c | tr -d ' ')
+    if [[ "${has_nul:-0}" -gt 0 ]]; then
+        iconv -f UTF-16LE -t UTF-8 "$log_file" 2>/dev/null \
+            || iconv -f UTF-16BE -t UTF-8 "$log_file" 2>/dev/null
+        return 0
+    fi
+    if iconv -f UTF-8 -t UTF-8 "$log_file" >/dev/null 2>&1; then
+        cat "$log_file"
+    elif iconv -f CP1251 -t UTF-8 "$log_file" >/dev/null 2>&1; then
+        iconv -f CP1251 -t UTF-8 "$log_file"
+    elif iconv -f CP866 -t UTF-8 "$log_file" >/dev/null 2>&1; then
+        iconv -f CP866 -t UTF-8 "$log_file"
+    else
+        cat "$log_file"
+    fi
+}
+
+# true, если лог UpdateDB содержит признак активных HTTP-клиентов.
+# Пробуем все кодировки: UTF-16LE-декодирование произвольных байт «успешно»,
+# но осмысленную фразу даст только верная кодировка.
+log_has_http_clients() {
+    local log_file="$1" enc text
+    [[ -f "$log_file" && -s "$log_file" ]] || return 1
+    for enc in UTF-8 UTF-16LE UTF-16BE CP1251 CP866; do
+        text=$(iconv -f "$enc" -t UTF-8 "$log_file" 2>/dev/null | tr -d '\000') || continue
+        [[ -n "$text" ]] || continue
+        if grep -qiE 'работающие по HTTP|по HTTP|HTTP[ -]?клиент|HTTP clients' <<< "$text"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Вывод содержимого лога 1С (`/Out`) после ошибки.
-# 1С может писать лог в UTF-8, UTF-16 LE или CP1251 — пробуем по очереди.
 dump_load_log() {
     local log_file="$1"
 
@@ -450,18 +502,8 @@ dump_load_log() {
         return 0
     fi
 
-    local log_text=""
-    if iconv -f UTF-8 -t UTF-8 "$log_file" >/dev/null 2>&1; then
-        log_text=$(sed '1s/^\xEF\xBB\xBF//' "$log_file")
-    elif iconv -f UTF-16LE -t UTF-8 "$log_file" >/dev/null 2>&1; then
-        log_text=$(iconv -f UTF-16LE -t UTF-8 "$log_file" | sed '1s/^\xEF\xBB\xBF//')
-    elif iconv -f UTF-16BE -t UTF-8 "$log_file" >/dev/null 2>&1; then
-        log_text=$(iconv -f UTF-16BE -t UTF-8 "$log_file" | sed '1s/^\xEF\xBB\xBF//')
-    elif iconv -f CP1251 -t UTF-8 "$log_file" >/dev/null 2>&1; then
-        log_text=$(iconv -f CP1251 -t UTF-8 "$log_file")
-    else
-        log_text=$(cat "$log_file")
-    fi
+    local log_text
+    log_text=$(read_1c_log_text "$log_file")
 
     if [[ -z "$log_text" ]]; then
         log "WARN" "Лог 1С не удалось прочитать: $log_file"
@@ -541,6 +583,25 @@ diagnose_load_failure() {
 
 # Управление Apache и процессами 1С — tools/os/apache.sh, tools/os/process-1c.sh
 
+# Windows: помимо APACHE_SERVICE_NAME ИБ могут публиковать другие службы Apache/httpd
+# (вторая публикация держит HTTP-сеансы и мешает эксклюзивному /UpdateDBCfg).
+# apache.sh потребителя управляет только одной службой — предупреждаем заранее.
+warn_other_apache_services() {
+    [[ "${PROJECT_OS}" == "windows" ]] || return 0
+    [[ -n "${APACHE_SERVICE_NAME:-}" ]] || return 0
+    command -v powershell.exe >/dev/null 2>&1 || return 0
+    local ps names
+    ps="Get-Service -ErrorAction SilentlyContinue | Where-Object { \$_.Name -ne '$APACHE_SERVICE_NAME' -and \$_.Status -eq 'Running' -and (\$_.Name -like 'Apache24*' -or \$_.Name -like '*httpd*') } | Select-Object -ExpandProperty Name"
+    names=$(powershell.exe -NoProfile -Command "$ps" 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d')
+    [[ -n "$names" ]] || return 0
+    log "WARN" "Кроме $APACHE_SERVICE_NAME запущены другие службы Apache/httpd:"
+    while IFS= read -r n; do
+        [[ -n "$n" ]] && log "WARN" "  • $n"
+    done <<< "$names"
+    log "WARN" "Они тоже публикуют ИБ и держат HTTP-сеансы — /UpdateDBCfg может упасть"
+    log "WARN" "на «обнаружены клиенты, работающие по HTTP» (см. UPDATE_DB_FORCE_SESSIONS)."
+}
+
 # Запуск Python с fallback на py -3
 run_python() {
     if command -v python >/dev/null 2>&1; then
@@ -564,6 +625,24 @@ cleanup_changed_files_list() {
         rm -f -- "$_LIST_OUTPUT_FILE"
         _LIST_OUTPUT_FILE=""
     fi
+}
+
+# Рабочие temp-файлы движка в корне рабочего дерева (temp_changed_files.txt и др.)
+# снимаются на любом выходе, чтобы не оставлять untracked-мусор в git status
+# потребителя при ошибке/Ctrl+C (раньше чистились только на успешном пути).
+cleanup_temp_files() {
+    local d
+    for d in "$PWD" "${repo_path:-$PWD}"; do
+        [[ -n "$d" && -d "$d" ]] || continue
+        rm -f -- \
+            "$d"/temp_changed_files.txt "$d"/temp_changed_files.txt.* \
+            "$d"/temp_changed_extensions.txt "$d"/temp_changed_extensions.txt.* \
+            "$d"/temp_forced_form_metas.txt "$d"/temp_forced_form_metas.txt.* \
+            "$d"/temp_rewritten_form_modules.txt \
+            "$d"/temp_cache_update_list.txt "$d"/temp_cache_update_list.txt.* \
+            "$d"/temp_full_resync_cache_seed.txt "$d"/temp_full_resync_cache_seed.txt.* \
+            2>/dev/null || true
+    done
 }
 
 # Функция для извлечения имени конечного каталога базы из строки IB_CONNECTION.
@@ -798,7 +877,7 @@ apply_load_hide_files() {
     done
     if [[ ${#HIDDEN_LOAD_FILES[@]} -gt 0 ]]; then
         _LOAD_HIDE_PREV_TRAP=$(trap -p EXIT 2>/dev/null || true)
-        trap 'restore_load_hide_files; cleanup_changed_files_list; eval "${_LOAD_HIDE_PREV_TRAP:-true}"' EXIT
+        trap 'restore_load_hide_files; cleanup_temp_files; cleanup_changed_files_list; eval "${_LOAD_HIDE_PREV_TRAP:-true}"' EXIT
     fi
 }
 
@@ -1470,6 +1549,10 @@ DESIGNER_PATH="${DESIGNER_PATH:-$(resolve_designer_default)}"
 AUTO_CLOSE_DESIGNER="${AUTO_CLOSE_DESIGNER:-false}"  # Автоматически закрывать конфигуратор
 AUTO_UNSUPPORT_OBJECTS="${AUTO_UNSUPPORT_OBJECTS:-false}"
 UPDATE_DB="${UPDATE_DB:-false}"
+# Авто-retry UpdateDB при ошибке из-за HTTP-клиентов (вторая публикация ИБ).
+# true по умолчанию: завершает сеансы принудительно ТОЛЬКО при таком сбое и с WARN.
+# На prod-хостах выключайте (false), чтобы не рвать пользователей молча.
+UPDATE_DB_FORCE_SESSIONS="${UPDATE_DB_FORCE_SESSIONS:-true}"
 REOPEN_DESIGNER_AFTER_LOAD="${REOPEN_DESIGNER_AFTER_LOAD:-false}"
 AUTO_CLOSE_CLIENT="${AUTO_CLOSE_CLIENT:-false}"
 REOPEN_CLIENT_AFTER_LOAD="${REOPEN_CLIENT_AFTER_LOAD:-false}"
@@ -1539,6 +1622,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         -U|--update-db)
             UPDATE_DB="true"
+            shift
+            ;;
+        --force-sessions)
+            UPDATE_DB_FORCE_SESSIONS="true"
+            shift
+            ;;
+        --no-force-sessions)
+            UPDATE_DB_FORCE_SESSIONS="false"
             shift
             ;;
         --reopen-designer)
@@ -1617,6 +1708,8 @@ while [[ $# -gt 0 ]]; do
             echo "      --ibcmd                 Сокращение для --engine ibcmd"
             echo "      --ibcmd-path PATH       Путь к ibcmd.exe (по умолчанию рядом с DESIGNER_PATH)"
             echo "      --ibcmd-no-check        ibcmd: --no-check у import files (быстро, без проверки метаданных)"
+            echo "      --force-sessions        При ошибке UpdateDB из-за HTTP-клиентов повторить с -Dynamic- -SessionTerminate force"
+            echo "      --no-force-sessions     Запретить принудительное завершение сеансов (переопределяет UPDATE_DB_FORCE_SESSIONS)"
             echo "      --verbose               Подробный вывод (по умолчанию краткий; -H/-C — подробный)"
             echo "  -h, --help                  Показать эту справку"
             echo ""
@@ -1630,6 +1723,8 @@ while [[ $# -gt 0 ]]; do
             echo "  AUTO_UNSUPPORT_OBJECTS    Автоматически снимать с поддержки загружаемые объекты"
             echo "  PARENT_CONFIG_PY          Путь к parent_config.py для preflight (default: scripts/ потребителя, иначе kit)"
             echo "  UPDATE_DB                 Обновить конфигурацию базы данных после загрузки"
+            echo "  UPDATE_DB_FORCE_SESSIONS  true (default) — авто-retry UpdateDB с -Dynamic- -SessionTerminate force"
+            echo "                            при ошибке «обнаружены клиенты, работающие по HTTP»; false — не завершать сеансы"
             echo "  REOPEN_DESIGNER_AFTER_LOAD Открывать конфигуратор после загрузки"
             echo "  APACHE_SERVICE_NAME       Имя службы Apache для остановки/запуска при UPDATE_DB"
             echo "                            (пусто = не управлять; пример: Apache2.4)"
@@ -1757,6 +1852,9 @@ repo_path=$(git rev-parse --show-toplevel 2>/dev/null)
 if [[ -z "$repo_path" ]]; then
     repo_path=$(pwd)
 fi
+
+# Ранний EXIT-trap: temp-файлы не остаются даже при exit до основного trap.
+trap 'cleanup_temp_files' EXIT
 
 # Нормализация пути основной конфигурации
 if [[ "$CONFIG_PATH" = /* || "$CONFIG_PATH" =~ ^[A-Za-z]:/ ]]; then
@@ -1916,7 +2014,7 @@ if [[ "$nothing_to_load" != "true" ]]; then
     mkdir -p "$repo_path/.tmp"
     full_output_file="$repo_path/.tmp/$OUTPUT_FILE"
     _LIST_OUTPUT_FILE="$full_output_file"
-    trap 'cleanup_changed_files_list' EXIT
+    trap 'cleanup_temp_files; cleanup_changed_files_list' EXIT
     {
         printf '\xEF\xBB\xBF'
         cat temp_changed_files.txt
@@ -2019,7 +2117,7 @@ if [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]] \
         exit 30
     fi
     _slot_apache_was_running="true"
-    trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_changed_files_list' EXIT
+    trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_temp_files; cleanup_changed_files_list' EXIT
 fi
 else
 _slot_apache_was_running="false"
@@ -2214,6 +2312,7 @@ fi
 
 # Отдельный шаг обновления расширений в базе данных (после загрузки расширений)
 if [[ "$UPDATE_DB" == "true" ]]; then
+    warn_other_apache_services
     # Освобождаем lock файловой ИБ: останавливаем Apache (worker httpd.exe держит файл ИБ
     # через wsap24.dll). Без этого /UpdateDBCfg упрётся в «база занята».
     # trap гарантирует Start даже при сбое /UpdateDBCfg или Ctrl+C.
@@ -2225,7 +2324,7 @@ if [[ "$UPDATE_DB" == "true" ]]; then
             rm -f temp_changed_files.txt temp_changed_extensions.txt
             exit 30
         fi
-        trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_changed_files_list' EXIT
+        trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_temp_files; cleanup_changed_files_list' EXIT
     fi
 
     if [[ "$has_extension_changes" == "true" ]]; then
@@ -2264,6 +2363,29 @@ if [[ "$UPDATE_DB" == "true" ]]; then
             : > "$LOAD_LOG_FILE"
             run_1c_command "$COMMAND"
             update_db_exit_code=$?
+        fi
+        if [[ $update_db_exit_code -ne 0 ]] && log_has_http_clients "$LOAD_LOG_FILE"; then
+            if [[ "$UPDATE_DB_FORCE_SESSIONS" == "true" ]]; then
+                log "WARN" "UpdateDB: обнаружены HTTP-клиенты (ИБ публикует другая служба Apache)."
+                log "WARN" "Повторяю обновление с ПРИНУДИТЕЛЬНЫМ завершением сеансов: -Dynamic- -SessionTerminate force."
+                log "WARN" "ВНИМАНИЕ: активные сеансы пользователей будут прерваны."
+                if [[ "$LOAD_ENGINE" == "ibcmd" ]]; then
+                    ibcmd_run "apply основной конфигурации (force sessions)" infobase config apply $IBCMD_DB_ARGS $IBCMD_AUTH --force --dynamic=disable --session-terminate=force
+                    update_db_exit_code=$?
+                else
+                    DB_UPDATE_COMMAND="/UpdateDBCfg -Dynamic- -SessionTerminate force /Out \"$LOAD_LOG_FILE_CMD\" /DisableStartupDialogs"
+                    COMMAND="\"$DESIGNER_CMD\" CONFIG $IB_CONNECTION $IB_CONFIG_AUTH $DB_UPDATE_COMMAND"
+                    log "INFO" "Выполнение команды (обновление основной конфигурации БД, force sessions): $COMMAND"
+                    : > "$LOAD_LOG_FILE"
+                    run_1c_command "$COMMAND"
+                    update_db_exit_code=$?
+                fi
+                [[ $update_db_exit_code -eq 0 ]] && log "SUCCESS" "UpdateDB с принудительным завершением сеансов прошёл"
+            else
+                log "WARN" "UpdateDB упёрся в HTTP-клиенты, но UPDATE_DB_FORCE_SESSIONS=false."
+                log "WARN" "Принудительное завершение сеансов выключено. Запустите с --force-sessions"
+                log "WARN" "(или UPDATE_DB_FORCE_SESSIONS=true), чтобы повторить как -Dynamic- -SessionTerminate force."
+            fi
         fi
         if [[ $update_db_exit_code -ne 0 ]]; then
             log "ERROR" "Обновление основной конфигурации базы данных завершилось с ошибкой (код: $update_db_exit_code)"

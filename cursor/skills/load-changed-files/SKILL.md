@@ -4,7 +4,7 @@ description: >-
   Загрузка conf/cfe.xml в dev-ИБ: предпочтительно из git; --no-extensions если агент не
   трогал cfe.xml (иначе чужие правки расширений блокируют загрузку); --list-file — фолбэк.
   Partial load, -U после правок метаданных.
-argument-hint: "[-C] [-U] [-u] [-F] [--no-close] [--no-extensions] [--reset-marker] [--force-partial] [--verbose] [--list-file PATH]"
+argument-hint: "[-C] [-U] [-u] [-F] [--no-close] [--no-extensions] [--reset-marker] [--force-partial] [--force-sessions] [--verbose] [--list-file PATH]"
 allowed-tools:
   - Bash
   - Read
@@ -124,6 +124,32 @@ Git-режим: working-tree **плюс** committed с маркера после
 
 Env: `RESET_LOAD_MARKER=true`, `LOAD_HIDE_FILES`, `FORCE_PARTIAL=true`.
 
+## UpdateDB упёрся в HTTP-клиентов (вторая публикация ИБ)
+
+Симптом:
+
+```text
+ОШИБКА:   Динамическое обновление конфигурации БД невозможно:
+          обнаружены клиенты, работающие по HTTP
+```
+
+Причина: ИБ публикует вторая служба Apache (например MCP на другом порту),
+её скрипт не гасит (`APACHE_SERVICE_NAME` — только одна служба). Сеансы
+держит именно она.
+
+Рабочая команда (designer): `/UpdateDBCfg -Dynamic- -SessionTerminate force`.
+Важно: `-SessionTerminate force` работает **только** с `-Dynamic-` — без него
+платформа на эксклюзивное обновление не идёт.
+
+Движок делает retry сам при признаке HTTP-клиентов и `UPDATE_DB_FORCE_SESSIONS=true`
+(default) или `--force-sessions`, с `WARN`, что сеансы завершаются
+принудительно. На prod отключай: `--no-force-sessions` /
+`UPDATE_DB_FORCE_SESSIONS=false` — тогда скрипт упадёт с подсказкой, но
+никого молча не разорвёт. Без HTTP-ошибки поведение не меняется.
+
+ibcmd-аналог: `infobase config apply ... --force --dynamic=disable
+--session-terminate=force`.
+
 ## Когда НЕ использовать
 
 - Сборка EPF из conf → [`build-epf-from-conf.sh`](../../build-epf-from-conf.sh)
@@ -222,6 +248,8 @@ cfe.xml/MCP_Сервер/…/Module.bsl
 | `--reset-marker` | Сбросить файл маркера (rebase/мёртвый SHA). На merge сам по себе не заменяет `-F` |
 | `--force-partial` | Не отменять partial с `Configuration.xml` после merge (env: `FORCE_PARTIAL=true`) |
 | `-F`, `--full-resync` | Полная загрузка `conf/` без partial + UpdateDB; когда ИБ отстала от диска |
+| `--force-sessions` | Авто-retry UpdateDB при HTTP: `-Dynamic- -SessionTerminate force` (env: default true) |
+| `--no-force-sessions` | Не завершать сеансы при HTTP-ошибке (env: `false`) |
 | `--verbose` | Полный лог (список файлов, тайминги, команды 1С). По умолчанию — краткий вывод для агентов; `-H`/`-C` включают подробный |
 | `-h`, `--help` | Справка |
 
