@@ -57,7 +57,9 @@ legacy-скрипты: `LEGACY_LINKS=1` / `-LegacyLinks`.
 (hardlink/copy + sha256) и регенерирует managed-блок `.gitignore`, чтобы
 ссылки и фолбэки не попадали в `git status` потребителя. Если symlink-права
 появились позже (Developer Mode) — `apply` апгрейдит in-sync hardlink/copy
-до symlink, а `kit-doctor` подсказывает это (`can be upgraded to symlink`).
+до symlink, `apply --upgrade-fallbacks` (`KIT_UPGRADE_FALLBACKS=1`) догоняет
+и записи старого манифеста, а `kit-doctor` показывает фактический режим
+(`N link(s), M hardlink(s), K copy(ies)`) и подсказывает апгрейд.
 
 **Windows (junction).** Без symlink-привилегии каталоги линкуются через
 `mklink /J`. Git при `core.symlinks=false` идёт **внутрь** junction и трекает
@@ -67,10 +69,25 @@ legacy-скрипты: `LEGACY_LINKS=1` / `-LegacyLinks`.
 `verify` предупреждает, `tracked` — exit 1 и список. Отключить:
 `--no-untrack`.
 
-Движок безопасен при запуске из другого namespace (Linux sandbox по
-Windows-раскладке): ссылка, указывающая вне consumer root, помечается
-`SKIP FOREIGN-NS` и никогда не перелинковывается. `plan --strict` —
-exit 1 при pending-действиях (гейт паритета для CI/валидации).
+**FOREIGN-NS — ловушка, а не «безопасность».** Если ссылки созданы в другом
+OS/namespace (Windows-checkout, открытый из Linux-sandbox/WSL), их target
+читается как `/mnt/host/...` и лежит вне consumer root. Раньше `plan`/`apply`
+молча печатали `SKIP FOREIGN-NS` (0 pending), а `verify` был зелёным — агент
+получал no-op и «всё ок». Теперь:
+
+- `plan`/`apply` с foreign-ссылками завершаются **exit 2** до первой операции
+  (`ERROR: ... foreign/sandbox namespace`), `plan --strict` — ещё и exit 1;
+- `verify` печатает `WARN FOREIGN-NS` по каждой ссылке и, если **все** ссылки
+  вне root, `FAIL` + подсказку «запускайте в namespace хоста»;
+- `bootstrap-kit` ловит то же до link-шагов (exit 2); `kit-doctor` — `[FAIL]`;
+  `verify-kit-links` печатает `SKIP FOREIGN-NS` вместо ложного `FAIL missing`;
+- `kit-agent check-command` даёт WARN на `sandbox/run.sh … kit_layout.py|bootstrap-kit`.
+
+Запускать раскладку/verify только на хосте, который её создал (Git Bash /
+PowerShell), не через `tools/sandbox/run.sh`. Обхода нет намеренно: тихий
+no-op и зелёный verify опаснее явной ошибки.
+`plan --strict` — exit 1 при pending-действиях или foreign-ns (гейт паритета
+для CI/валидации).
 
 ### kit-agent: хуки и guard-правила для агентов
 
@@ -197,6 +214,15 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   `.opencode/plugin` (и ранее `.pi/*`) — junction'ы kit. Если у
   потребителя они не в `.gitignore` — добавить: `/.kilo/plugin`,
   `/.opencode/plugin` (аналогично `.pi`).
+- **Ручной список kit-путей в `.gitignore` дублирует managed-блок** — после
+  появления managed-блока (`# >>> kit-managed: begin`) ручные строки
+  `.cursor/skills/...`, `/.pi/*` и т.п. лишние: `verify`/`kit-doctor`
+  предупреждают о пересечении. Удали свои строки (блок перегенерируется
+  bootstrap), оставшийся untracked-мусор добирает managed-блок.
+- **`bootstrap-kit`/`kit_layout.py` через `tools/sandbox/run.sh` над
+  Windows-деревом** — target ссылок читается как `/mnt/host/...`
+  (FOREIGN-NS): engine теперь `ERROR` exit 2, а не тихий no-op/зелёный
+  verify. См. § kit-layout и [docs/ai/sandbox.md](docs/ai/sandbox.md).
 - **`.ps1` только ASCII** — PS 5.1 читает BOM-less файл как ANSI
   (CP1251): байты `—`/кириллицы дают `”`, парсер рвёт строку →
   `ParserError TerminatorExpectedAtEndOfString`. Guard:

@@ -20,6 +20,12 @@
       "message": "rtk init запрещён (перезапишет CLAUDE.md). rtk ставится глобально, не в репо. Дока: harness/docs/ai/kit-host-deps.md."
     },
     {
+      "id": "kit-layout-in-sandbox",
+      "match": "sandbox/run\\.sh[^\\n]*(kit_layout\\.py|kit-layout|bootstrap-kit\\.(sh|ps1))",
+      "action": "warn",
+      "message": "kit-layout/bootstrap-kit меняют раскладку ссылок и namespace-зависимы. В Linux-sandbox (Docker/WSL) над Windows-деревом это no-op или ERROR FOREIGN-NS. Запускай на хосте: python harness/tools/kit-layout/kit_layout.py … / bash harness/scripts/bootstrap-kit.sh .; через sandbox — только остальные python-скрипты. Дока: harness/docs/ai/sandbox.md."
+    },
+    {
       "id": "rm-junction-roots",
       "match": "\\brm\\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)[a-zA-Z]*\\s+[^|;&\\n]*(\\.cursor|\\.pi|\\.agents|\\.claude)(/|\\s|$)",
       "action": "warn",
