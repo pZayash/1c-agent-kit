@@ -45,6 +45,11 @@
 #   -H, --human-mode            Старый режим: закрыть и переоткрыть конфигуратор
 #   -C, --open-client           Быстрый тест: закрыть конфигуратор/клиент, загрузить,
 #                               обновить БД (-U) и открыть тонкий клиент 1С (1cv8c.exe)
+#       --client-keys KEYS      Дополнительные ключи запуска тонкого клиента (строка целиком),
+#                               напр. --client-keys '/C"ЗапуститьОбновлениеИнформационнойБазы"'
+#       --refresh-variants      После загрузки актуализировать варианты отчётов: клиент с ключом
+#                               БСП ЗапуститьОбновлениеИнформационнойБазы (нужен, если добавлен
+#                               или изменён settingsVariant — иначе варианта нет в списке на форме)
 #   -u, --auto-unsupport        Автоматически снимать с поддержки загружаемые объекты
 #   -U, --update-db             Обновить конфигурацию базы данных после загрузки
 #       --list-file PATH        Фолбэк: явный список (заменяет git); PATH=- для stdin
@@ -1556,6 +1561,7 @@ UPDATE_DB_FORCE_SESSIONS="${UPDATE_DB_FORCE_SESSIONS:-true}"
 REOPEN_DESIGNER_AFTER_LOAD="${REOPEN_DESIGNER_AFTER_LOAD:-false}"
 AUTO_CLOSE_CLIENT="${AUTO_CLOSE_CLIENT:-false}"
 REOPEN_CLIENT_AFTER_LOAD="${REOPEN_CLIENT_AFTER_LOAD:-false}"
+CLIENT_LAUNCH_KEYS="${CLIENT_LAUNCH_KEYS:-}"
 APACHE_SERVICE_NAME="${APACHE_SERVICE_NAME:-}"  # Пусто = не управлять Apache
 SKIP_CONFIGURATION_CACHE="${SKIP_CONFIGURATION_CACHE:-false}"
 FORCE_CONFIGURATION="${FORCE_CONFIGURATION:-false}"
@@ -1613,6 +1619,23 @@ while [[ $# -gt 0 ]]; do
             AUTO_CLOSE_DESIGNER="true"
             AUTO_CLOSE_CLIENT="true"
             REOPEN_CLIENT_AFTER_LOAD="true"
+            VERBOSE=true
+            shift
+            ;;
+        --client-keys)
+            CLIENT_LAUNCH_KEYS="${2:-}"
+            if [[ -z "$CLIENT_LAUNCH_KEYS" ]]; then
+                log "ERROR" "--client-keys требует строку ключей запуска клиента"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --refresh-variants)
+            UPDATE_DB="true"
+            AUTO_CLOSE_DESIGNER="true"
+            AUTO_CLOSE_CLIENT="true"
+            REOPEN_CLIENT_AFTER_LOAD="true"
+            CLIENT_LAUNCH_KEYS='/C"ЗапуститьОбновлениеИнформационнойБазы" /DisableStartupDialogs /DisableStartupMessages'
             VERBOSE=true
             shift
             ;;
@@ -1695,6 +1718,8 @@ while [[ $# -gt 0 ]]; do
             echo "      --allow-close-designer  Явно разрешить автозакрытие конфигуратора"
             echo "  -H, --human-mode            Старый режим: закрыть и переоткрыть конфигуратор"
             echo "  -C, --open-client           Загрузить, обновить БД и открыть тонкий клиент (1cv8c.exe)"
+            echo "      --client-keys KEYS      Дополнительные ключи запуска клиента (строка целиком)"
+            echo "      --refresh-variants      Актуализировать варианты отчётов (ключ БСП ЗапуститьОбновлениеИнформационнойБазы)"
             echo "  -u, --auto-unsupport        Автоматически снимать с поддержки загружаемые объекты"
             echo "  -U, --update-db             Обновить конфигурацию базы данных после загрузки"
             echo "      --reopen-designer       Открыть конфигуратор после загрузки"
@@ -2475,8 +2500,8 @@ if [[ "$REOPEN_CLIENT_AFTER_LOAD" == "true" ]]; then
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 1
     fi
-    log "INFO" "Запуск тонкого клиента 1С:Предприятие: $THIN_CLIENT_CMD"
-    run_1c_command "\"$THIN_CLIENT_CMD\" ENTERPRISE $IB_CONNECTION" &
+    log "INFO" "Запуск тонкого клиента 1С:Предприятие: $THIN_CLIENT_CMD ${CLIENT_LAUNCH_KEYS:-}"
+    run_1c_command "\"$THIN_CLIENT_CMD\" ENTERPRISE $IB_CONNECTION ${CLIENT_LAUNCH_KEYS:-}" &
 elif [[ "$REOPEN_DESIGNER_AFTER_LOAD" == "true" ]]; then
     log "INFO" "Запуск конфигуратора для проверки..."
     run_1c_command "\"$DESIGNER_CMD\" CONFIG $IB_CONNECTION" &
