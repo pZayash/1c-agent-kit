@@ -76,13 +76,23 @@ def cmd_session_start(a):
             if upstream and head != upstream:
                 behind = git(harness, 'rev-list', '--count', f'HEAD..origin/master')
                 ahead = git(harness, 'rev-list', '--count', 'origin/master..HEAD')
-                if behind and int(behind) > 0:
+                behind_n = int(behind) if behind else 0
+                ahead_n = int(ahead) if ahead else 0
+                if behind_n > 0 and ahead_n > 0:
+                    hints.append(
+                        f'harness (kit) разошёлся с локальным origin/master '
+                        f'(впереди {ahead_n}, позади {behind_n}) — расхождение, а не '
+                        f'отставание: checkout origin/master потеряет локальные '
+                        f'коммиты. Канон: cherry-pick локальных коммитов на '
+                        f'origin/master и push (skill harness-promote), затем '
+                        f'bump gitlink.')
+                elif behind_n > 0:
                     hints.append(
                         f'harness (kit) отстал от локального origin/master на {behind} '
                         f'коммит(ов). Обнови: git -C {harness_rel} fetch origin && '
                         f'git -C {harness_rel} checkout origin/master && '
                         f'bash {harness_rel}/scripts/bootstrap-kit.sh .')
-                elif ahead and int(ahead) > 0:
+                elif ahead_n > 0:
                     hints.append(
                         f'harness (kit) впереди origin/master на {ahead} коммит(ов) — '
                         f'локальная линия? Канон: promote в kit (skill harness-promote).')
