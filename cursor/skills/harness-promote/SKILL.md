@@ -23,6 +23,14 @@ description: >-
    `docs/ai/` проекта.
 5. Не bump'ать другие проекты-потребители автоматически.
 
+Перед любым выравниванием harness по `origin/master` (`checkout origin/master`,
+submodule update, bump) проверь расхождение:
+`git -C harness merge-base --is-ancestor HEAD origin/master` (и обратно).
+HEAD не предок — это **diverged**, а не behind: `checkout origin/master`
+запрещён (потеряет локальные коммиты), сначала cherry-pick локальных коммитов
+на `origin/master` + push, потом bump gitlink. Локальный коммит kit, живущий
+только в gitlink, — потеря при любом выравнивании и риск `git gc`.
+
 **После bump cc-1c-skills у потребителя:**
 
 ```bash
