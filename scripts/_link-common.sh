@@ -10,6 +10,40 @@ kit_is_windows() {
   esac
 }
 
+# Резолвер PowerShell для .sh-обёрток (вся Windows-ветка kit идёт через .ps1).
+# В урезанном PATH (агентный/GUI-терминал Zed, sandbox) `powershell.exe` не
+# находится, и голый `exec powershell.exe` падает с exit 127 — тогда мертвы и
+# bootstrap, и kit-doctor (диагностика не может запуститься вообще).
+# Порядок: PATH -> %SystemRoot%\System32\WindowsPowerShell\v1.0 -> /c/Windows -> pwsh.
+# Печатает путь; при fallback пишет WARN в stderr. Возврат 1, если не найден.
+kit_powershell() {
+  local p root drive
+  if p="$(command -v powershell.exe 2>/dev/null)" && [[ -n "$p" ]]; then
+    printf '%s\n' "$p"; return 0
+  fi
+  for root in "${SYSTEMROOT:-}" "${WINDIR:-}" "C:/Windows"; do
+    [[ -n "$root" ]] || continue
+    if command -v cygpath >/dev/null 2>&1; then
+      root="$(cygpath -u "$root" 2>/dev/null || printf '%s' "$root")"
+    elif [[ "$root" == [A-Za-z]:* ]]; then
+      drive="$(printf '%s' "${root:0:1}" | tr '[:upper:]' '[:lower:]')"
+      root="/$drive${root#??}"
+      root="${root//\\//}"
+    fi
+    p="$root/System32/WindowsPowerShell/v1.0/powershell.exe"
+    if [[ -f "$p" ]]; then
+      echo "WARN: powershell.exe не в PATH - использую $p" >&2
+      printf '%s\n' "$p"; return 0
+    fi
+  done
+  for p in pwsh.exe pwsh; do
+    if p="$(command -v "$p" 2>/dev/null)" && [[ -n "$p" ]]; then
+      printf '%s\n' "$p"; return 0
+    fi
+  done
+  return 1
+}
+
 # WSL-bash (Linux userland под Windows).
 kit_is_wsl() {
   [[ -n "${WSL_DISTRO_NAME:-}" ]] && return 0

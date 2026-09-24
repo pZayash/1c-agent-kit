@@ -25,6 +25,10 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# Trimmed PATH (agent/GUI terminals) has no bare powershell.exe - resolve from $PSHOME.
+$psExe = Join-Path $PSHOME "powershell.exe"
+if (-not (Test-Path -LiteralPath $psExe)) { $psExe = Join-Path $PSHOME "pwsh.exe" }
+
 $root = (Resolve-Path $ConsumerRoot).Path
 $scripts = $PSScriptRoot
 $harness = Join-Path $root $HarnessRel
@@ -168,7 +172,7 @@ if (-not $SkipVerify) {
 if (-not $SkipDeps) {
     Write-Host "=== init-kit-deps (check) ==="
     $dep = Join-Path $scripts "init-kit-deps.ps1"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dep -ConsumerRoot $root
+    & $psExe -NoProfile -ExecutionPolicy Bypass -File $dep -ConsumerRoot $root
     if ($LASTEXITCODE -ne 0) {
         Write-Host "WARN host deps incomplete - harness/docs/ai/kit-host-deps.md (-Install). Links still done."
     }

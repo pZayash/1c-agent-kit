@@ -19,7 +19,8 @@ OPENSPEC_PKG="@fission-ai/openspec@1.2.0"
 if kit_is_windows; then
   args=(-ConsumerRoot "$(cd "$CONSUMER_ROOT" && pwd)")
   [[ "$INSTALL" == "1" ]] && args+=(-Install)
-  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/init-kit-deps.ps1" "${args[@]}"
+  ps_exe="$(kit_powershell)" || { echo "ERROR: PowerShell не найден (Windows-ветка kit идёт через .ps1)" >&2; exit 1; }
+  exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/init-kit-deps.ps1" "${args[@]}"
 fi
 
 CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"

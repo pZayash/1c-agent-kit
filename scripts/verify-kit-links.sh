@@ -11,7 +11,8 @@ CONSUMER_ROOT="${1:-.}"
 HARNESS_REL="${HARNESS_REL:-harness}"
 
 if kit_is_windows; then
-  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/verify-kit-links.ps1" \
+  ps_exe="$(kit_powershell)" || { echo "ERROR: PowerShell не найден (Windows-ветка kit идёт через .ps1)" >&2; exit 1; }
+  exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/verify-kit-links.ps1" \
     -ConsumerRoot "$(cd "$CONSUMER_ROOT" && pwd)"
 fi
 

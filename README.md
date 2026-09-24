@@ -272,11 +272,11 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   (`git -C harness status`); `kit-doctor` предупреждает «harness working
   tree dirty». Лечение прежнее: Developer Mode / SeCreateSymbolicLinkPrivilege.
 - **Старый worktree** — merge → hydrate harness → `bootstrap-kit` → verify.
-- **Cursor UI не видит skill (slash)** — junctions в `.cursor/skills`, UI
-  читает `.agents/skills`. `bootstrap-kit` делает junction/symlink
-  `.agents/skills` → `.cursor/skills` (и `.claude/skills`). Не копировать
-  потребительский `setup-project-symlinks.sh` целиком (`src/cf` — layout
-  потребителя).
+- **Агент/UI не видит skill (Zed, Cursor slash)** — читается `.agents/skills`
+  (у Zed это корень скиллов проекта), а не `.cursor/skills`. `bootstrap-kit`
+  делает junction/symlink `.agents/skills` → `.cursor/skills`
+  (и `.claude/skills`). Не копировать потребительский
+  `setup-project-symlinks.sh` целиком (`src/cf` — layout потребителя).
 - **Нет node / openspec / rtk на голом Windows-worktree** — слот Docker
   уже содержит их в образе; 42/`features` — нет. Скрипт
   `init-kit-deps` (`-Install`). **Не** `openspec init` (свои
