@@ -18,7 +18,8 @@ DRY_RUN="${DRY_RUN:-0}"
 if kit_is_windows; then
   args=(-ConsumerRoot "$(cd "$CONSUMER_ROOT" && pwd)" -HarnessRel "$HARNESS_REL")
   [[ "$DRY_RUN" == "1" ]] && args+=(-DryRun)
-  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/link-pi-roots.ps1" "${args[@]}"
+  ps_exe="$(kit_powershell)" || { echo "ERROR: PowerShell не найден (Windows-ветка kit идёт через .ps1)" >&2; exit 1; }
+  exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/link-pi-roots.ps1" "${args[@]}"
 fi
 
 CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
