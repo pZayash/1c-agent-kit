@@ -153,6 +153,16 @@ Tool: `harness/tools/answer42/` (`answer42.ps1` / `answer42.sh`, `smoke.py`),
 skill: `harness/cursor/skills/answer42-ui/`. Потребитель: `.env` ключи
 `ANSWER42_*`, запись в `.mcp.json`, сервис на `127.0.0.1:9010`.
 
+## Срез orchestrator (2026-09-25)
+
+| Файл | Зачем |
+| --- | --- |
+| [agent-orchestration.md](agent-orchestration.md) | тред-оркестратор и дочерние треды: роли, брифы, спавн, сторож, приёмка, механика bb |
+
+Скиллы: [orchestrator](../../cursor/skills/orchestrator/SKILL.md),
+[orchestrated-child](../../cursor/skills/orchestrated-child/SKILL.md).
+Сторож залипших дочек — пока у потребителя; promote после боевого срабатывания.
+
 ## Пока в репо потребителя
 
 Печать, MCP, слоты, OpenSpec, `tools/`, skills. Индекс потребителя —
