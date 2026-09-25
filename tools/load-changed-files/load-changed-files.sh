@@ -2131,10 +2131,14 @@ if [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]]; then
     sudo -n chmod -R g+rwX /srv/ib 2>/dev/null || chmod -R g+rwX /srv/ib 2>/dev/null || true
 fi
 
-# Linux + файловая ИБ: Apache держит lock и на LoadConfigFromFiles (на Windows — нет).
-# Останавливаем до загрузки; поднимем после load + UpdateDBCfg.
+# Apache держит файловую ИБ (worker httpd.exe через wsisapi/wsap24):
+#  - Linux-слот — и на LoadConfigFromFiles, и на UpdateDBCfg;
+#  - движок ibcmd — на любом ОС: `config import` требует **монопольного**
+#    доступа (в отличие от конфигуратора), поэтому стоп нужен ДО импорта
+#    (иначе «Ошибка исключительной блокировки информационной базы»);
+#  - Windows + конфигуратор — достаточно стопа перед UpdateDBCfg (блок ниже).
 _slot_apache_was_running="false"
-if [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]] \
+if { [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]] || [[ "$LOAD_ENGINE" == "ibcmd" ]]; } \
     && apache_is_running; then
     if ! apache_stop; then
         log "ERROR" "Stop Apache не удался — загрузка отменена"
@@ -2243,9 +2247,11 @@ if [[ "$has_conf_changes" == "true" ]]; then
         # Full-resync: полная загрузка conf/ целиком, без -partial и -listFile.
         # Лечит «Неверный путь к данным»/«Неизвестный объект» после merge/rebase.
         if [[ "$LOAD_ENGINE" == "ibcmd" ]]; then
-            fr_no_check=""
-            [[ "$IBCMD_NO_CHECK" == "true" ]] && fr_no_check="--no-check"
-            fr_cmd="\"$IBCMD_CMD\" infobase config import files $IBCMD_DB_ARGS $IBCMD_AUTH $fr_no_check \"$CONFIG_PATH_CMD\" > \"$LOAD_LOG_FILE\" 2>&1"
+            # ibcmd: полный импорт конфигурации из XML — команда `import` (БЕЗ `files`),
+            # каталог передаётся позиционным аргументом. Вариант `import files`
+            # (только с `--base-dir=` и списком файлов) — это частичный импорт.
+            # `--no-check` поддерживает только `import files`, поэтому здесь не передаём.
+            fr_cmd="\"$IBCMD_CMD\" infobase config import $IBCMD_DB_ARGS $IBCMD_AUTH \"$CONFIG_PATH_CMD\" > \"$LOAD_LOG_FILE\" 2>&1"
             log "INFO" "Выполнение команды (ibcmd, полная загрузка conf): $fr_cmd"
             : > "$LOAD_LOG_FILE"
             run_1c_command "$fr_cmd"
