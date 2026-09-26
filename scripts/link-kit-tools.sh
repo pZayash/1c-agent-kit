@@ -33,7 +33,7 @@ mkdir -p "$CONSUMER_TOOLS"
 declare -A local_names=()
 kit_load_manifest "$MANIFEST" local_names
 
-for name in mailbox bsl-check sandbox load-changed-files mcp-call answer42; do
+for name in bsl-check sandbox load-changed-files mcp-call answer42; do
   if [[ -n "${local_names[$name]:-}" ]]; then
     echo "SKIP LOCAL: $name"
     continue

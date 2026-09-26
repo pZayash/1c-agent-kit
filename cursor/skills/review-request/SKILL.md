@@ -2,8 +2,8 @@
 name: review-request
 description: >-
   Роль ИСПОЛНИТЕЛЯ: оформить заявку на ревью для архитектора-ревьювера — что
-  сделано, фокус проверки, где затык, сомнения. Пишет kind=review в ящик шины
-  (артефакт rN-request.md). Триггеры: /review-request, «оформи на ревью»,
+  сделано, фокус проверки, где затык, сомнения. Пишет заявку rN-request.md в
+  тред handoffs/<slug>/. Триггеры: /review-request, «оформи на ревью»,
   «заявка на ревью», «передай ревьюверу». Вердикт — скилл review.
 argument-hint: "<slug>"
 ---
@@ -11,10 +11,9 @@ argument-hint: "<slug>"
 # review-request — заявка на ревью (исполнитель)
 
 Ты **исполнитель**. Описываешь свою работу для ревьювера: что сделал, что
-проверить, где затык, в чём сомневаешься. Пишешь **заявку** как артефакт задачи
-`kind=review` в **ящике шины** (`tasks/<id>/artifacts/rN-request.md`). Это рабочий
-канал между двумя сессиями, не спека и не долговременная память. Каталог
-`handoffs/<slug>/` — не канон.
+проверить, где затык, в чём сомневаешься. Пишешь **заявку** в тред ревью
+`handoffs/<slug>/rN-request.md`. Это рабочий канал между двумя сессиями, не спека
+и не долговременная память.
 
 **Принцип:** ссылаться на устойчивые артефакты (`openspec/`, `memory/`, коммиты,
 дифф по маркерам `№%`), не копировать их.
@@ -47,28 +46,22 @@ argument-hint: "<slug>"
 
 ## Куда писать
 
-Корень ящика: [mailbox](../mailbox/SKILL.md) / [paths.py](../../../tools/mailbox/paths.py).
-Тред ревью = `id` задачи. Поле `slug` в `task.json` = аргумент скилла.
+Канон — локальный каталог `handoffs/<slug>/` (вне git, в `.gitignore`). Тред =
+`<slug>` (аргумент скилла).
 
 Новый тред:
 
-1. UUID. `kind=review`, `to: reviewer`, `from`: `slot-N` или `host`.
-2. `status=submitted`, `statusHistory`, `slug`.
-3. Текст заявки — `tasks/<id>/artifacts/r1-request.md` (шаблон ниже).
-4. В `artifacts[]`: `{name: r1-request, uri: artifacts/r1-request.md}`.
-5. Claim-токен `inbox/reviewer/<id>` (`touch`).
-6. `handoffs/` не создавать.
+1. Создать каталог `handoffs/<slug>/`.
+2. Текст заявки — `handoffs/<slug>/r1-request.md` (шаблон ниже).
 
-Продолжение треда (тот же `slug`, уже есть задача): найти `tasks/*/task.json` с
-`kind=review` и этим `slug` в статусе `input-required` / `submitted`. Новый
-раунд — новый `rN-request.md` в **той же** `id`. Токен снова в
-`inbox/reviewer/<id>`, если его нет.
+Продолжение треда (тот же `slug`, каталог уже есть): новый раунд — новый
+`rN-request.md` в том же каталоге.
 
 **Перед записью** Read целевого md. Нет файла — норма.
 
 ### Нумерация раунда
 
-Сканировать `tasks/<id>/artifacts/r*-*.md`:
+Сканировать `handoffs/<slug>/r*-*.md`:
 
 - `N` = (макс. номер среди всех `r*`) + 1. Первый раунд — `r1`.
 - Исключение: есть `rN-request.md` без парного `rN-result.md` — тот же `N`
@@ -160,17 +153,16 @@ Prompt Task `reviewer` (минимум):
 
 ```text
 slug: <slug>
-id: <uuid>
-заявка: mailbox/tasks/<id>/artifacts/rN-request.md
+заявка: handoffs/<slug>/rN-request.md
 выполни скилл /review (см. .cursor/skills/review/SKILL.md)
 ```
 
-После завершения Task: id задачи + путь вердикта + резюме (годен / на доработку /
+После завершения Task: путь вердикта + резюме (годен / на доработку /
 блокер) + next step. Не вклеивать весь вердикт в чат.
 
 ## Границы
 
-- `/review-request` не коммитит и не пушит (ящик вне git).
+- `/review-request` не коммитит и не пушит (`handoffs/` вне git).
 - Не заменяет OpenSpec: контракт/спека меняется в `openspec/**`, заявка только
   ссылается. Дрифт требований — по
   [openspec-apply-change](../openspec-apply-change/SKILL.md).
@@ -183,6 +175,5 @@ id: <uuid>
 - [`.cursor/agents/reviewer.md`](../../agents/reviewer.md) — субагент канала B.
 - [review-protocol.md](../../../docs/ai/review-protocol.md) — каналы A/B.
 - [handoff](../handoff/SKILL.md) — generic-снимок сессии (не ревью).
-- [close-chat](../close-chat/SKILL.md) — шаг 0: открытые `kind=review`
-  (`submitted` / `input-required`) в ящике.
-- [mailbox](../mailbox/SKILL.md) — drain / корень ящика.
+- [close-chat](../close-chat/SKILL.md) — шаг 0: открытые треды ревью
+  (заявка без вердикта) в `handoffs/`.

@@ -47,11 +47,8 @@ Caveman-режим на подтверждениях ослабляется (с�
 - **`operator-checklist.md` из touched OpenSpec changes** — ручные задачи оператора (smoke, проверки в 1С). Файл НЕ парсится openspec CLI и не входит в прогресс tasks.md, но незакрытые пункты (`- [ ]`) — повод спросить оператора. Если файл есть — вывести его содержимое в чат (оператору неудобно открывать файл вручную).
 - **`implementation-notes.md` из touched OpenSpec changes** — журнал отклонений от proposal/design ([docs/ai/openspec-implementation-notes.md](../../../docs/ai/openspec-implementation-notes.md)). Прочитать, выделить только **явные** отклонения и нерешённые TODO («отложено», «спайк», «нужно подтвердить», «не решено», расхождения smoke-тестов). Если notes непусты и change близок к archive — напомнить «Разбери разлад» / [`/evolve`](../evolve/SKILL.md) до удаления.
 - История чата — только **явно подвешенные** вопросы пользователю, на которые он не ответил.
-- **Открытые заявки на ревью** — в **ящике шины** задачи `kind=review` со
-  статусом `submitted` / `input-required` (не только старые
-  `handoffs/<slug>/rN-request.md`). Слот:
-  `python3 /opt/agent-repo/tools/mailbox/paths.py open-reviews`. Хост: тот же
-  модуль при `AGENTS_MAILBOX`. Упомянуть как незакрытый тред (id + slug), не
+- **Открытые заявки на ревью** — треды `handoffs/<slug>/`: есть `rN-request.md`
+  без парного `rN-result.md`. Упомянуть как незакрытый тред (slug + раунд), не
   интерпретировать каждый пункт заявки как вопрос.
 
 Действие:

@@ -30,7 +30,7 @@ Kit `1c-agent-kit` — **публичный** репозиторий. Всё, ч
 - **Внутренние git-ремоуты и ветки**, имена worktree. Generic
   `origin/dev`, `upstream/dev`, `wt-a` — можно.
 - **Ссылки на внутренние файлы** (доки/промпты, названные по
-  организации/хосту). Generic `*-org.md`, `mailbox-host-prompt.md` —
+  организации/хосту). Generic `*-org.md`, `host-prompt.md` —
   можно.
 - **Секреты** — пароли, токены, ключи, `.env`. Секреты живут только в
   локальном `.env` потребителя (см. `.gitignore`); в kit —
@@ -49,7 +49,6 @@ Kit `1c-agent-kit` — **публичный** репозиторий. Всё, ч
 | Путь worktree | `D:\dev\proj\main\…` |
 | Bare repo на сервере | `D:\git-data\repositories\team\proj.git` |
 | Worktrees хоста | `/srv/wt/agent-N` |
-| Mailbox путь | `D:/org/agents/mailbox` |
 | Подключение к ИБ | `C:/base/proj` |
 | Кодовое имя проекта | `proj` |
 | Кодовое имя организации | `org` / `ORG` |
@@ -57,7 +56,7 @@ Kit `1c-agent-kit` — **публичный** репозиторий. Всё, ч
 | Имя базы MCP | `dev_db`, `prod_db` |
 | Git-ремоут/ветка | `origin/dev`, `upstream/dev` |
 | Имя worktree | `wt-a` |
-| Внутренняя ссылка | `*-org.md`, `mailbox-host-prompt.md` |
+| Внутренняя ссылка | `*-org.md` |
 
 Generic-примеры, которые **можно** (не идентифицируют): `srv01` как
 `-InfoBaseServer "srv01"`, `Admin`/`secret` как пароль в примере,

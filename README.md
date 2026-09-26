@@ -314,7 +314,7 @@ bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills
 
 **Срез A:** caveman, openspec-*, explore, …  
 **Срез B (workflow):** handoff, close-chat, load-changed-files, bsl-check,
-architect-apply, mailbox, review, review-request.
+architect-apply, review, review-request.
 
 **Потребитель** после cc-1c link:
 
@@ -343,7 +343,7 @@ Zed/ACP — `node harness/pi/scripts/patch-pi-acp-session-title.mjs`.
 
 ## Workflow tools (срез B)
 
-`tools/mailbox`, `tools/bsl-check`, `tools/sandbox`, `tools/load-changed-files`,
+`tools/bsl-check`, `tools/sandbox`, `tools/load-changed-files`,
 `tools/mcp-call` (JSON-RPC к MCP-серверам 1С, в т.ч. streamable HTTP),
 `tools/answer42` (UI 1С через клиент тестирования: [README](tools/answer42/README.md),
 [канон](docs/ai/answer42.md)), `tools/git-partial-stage.py` — в [tools/](tools/).

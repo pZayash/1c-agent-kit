@@ -1,7 +1,7 @@
 # docs/ai в kit
 
-Общие правила агентов. Без специфики потребителя (`яя_`, печать, MCP CFE,
-mailbox пилота). Правка — здесь, потом Promote (commit в submodule → bump SHA).
+Общие правила агентов. Без специфики потребителя (`яя_`, печать, MCP CFE).
+Правка — здесь, потом Promote (commit в submodule → bump SHA).
 
 ## Срез 1 (2026-08-17)
 
@@ -41,10 +41,9 @@ mailbox пилота). Правка — здесь, потом Promote (commit �
 
 | Файл | Зачем |
 | --- | --- |
-| [agent-task-bus.md](agent-task-bus.md) | шина задач, mailbox |
 | [load-config-to-dev.md](load-config-to-dev.md) | load conf в dev-ИБ |
 
-Скиллы: `harness/cursor/skills/` (срез B). Tools: `harness/tools/{mailbox,bsl-check,sandbox,load-changed-files}`.
+Скиллы: `harness/cursor/skills/` (срез B). Tools: `harness/tools/{bsl-check,sandbox,load-changed-files}`.
 
 `tools/sandbox/` и `.cursor/cli.json` — junction/copy у потребителя. Пилот ORG: addendum
 `docs/ai/git-workflow-org.md` (не в kit).

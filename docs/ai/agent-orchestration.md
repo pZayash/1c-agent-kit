@@ -7,8 +7,8 @@
 
 Скиллы: [orchestrator](../../cursor/skills/orchestrator/SKILL.md) (роль
 оркестратора) и [orchestrated-child](../../cursor/skills/orchestrated-child/SKILL.md)
-(роль дочки). Смежное: [agent-task-bus.md](agent-task-bus.md) (шина, ревью,
-хэндофф), [git-workflow.md](git-workflow.md).
+(роль дочки). Смежное: ревью и хэндофф — локальные треды `handoffs/`,
+[git-workflow.md](git-workflow.md).
 
 ## Границы: kit / потребитель
 

@@ -44,7 +44,7 @@ $nsCandidates = @(
     ".agents\skills", ".claude\skills", ".claude\commands",
     ".pi\skills", ".pi\prompts", ".pi\extensions",
     ".kilo\plugin", ".opencode\plugin",
-    "tools\mailbox", "tools\bsl-check", "tools\sandbox",
+    "tools\bsl-check", "tools\sandbox",
     "tools\load-changed-files", "tools\mcp-call", "tools\answer42",
     "tools\git-partial-stage.py"
 )

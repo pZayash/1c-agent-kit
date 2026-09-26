@@ -150,7 +150,7 @@ kit_consumer_link_paths() {
     "$root/.agents/skills" "$root/.claude/skills" "$root/.claude/commands" \
     "$root/.pi/skills" "$root/.pi/prompts" "$root/.pi/extensions" \
     "$root/.kilo/plugin" "$root/.opencode/plugin" \
-    "$root/tools/mailbox" "$root/tools/bsl-check" "$root/tools/sandbox" \
+    "$root/tools/bsl-check" "$root/tools/sandbox" \
     "$root/tools/load-changed-files" "$root/tools/mcp-call" "$root/tools/answer42" \
     "$root/tools/git-partial-stage.py"; do
     printf '%s\n' "$p"

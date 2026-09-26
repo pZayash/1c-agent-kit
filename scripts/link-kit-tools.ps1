@@ -106,7 +106,7 @@ if (-not (Test-Path $consumerTools)) {
 $local = Read-LocalNames $LocalManifest
 $script:FallbackMap = Read-KitFallbackManifest $root
 $script:ManagedPaths = New-Object System.Collections.Generic.List[string]
-$dirNames = @("mailbox", "bsl-check", "sandbox", "load-changed-files", "mcp-call", "answer42")
+$dirNames = @("bsl-check", "sandbox", "load-changed-files", "mcp-call", "answer42")
 
 foreach ($name in $dirNames) {
     if ($local.ContainsKey($name)) {

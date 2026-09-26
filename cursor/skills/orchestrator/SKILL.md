@@ -18,7 +18,8 @@ argument-hint: "<задача|slug> [сколько дочек]"
 **Парные скиллы:** [orchestrated-child](../orchestrated-child/SKILL.md) (что
 выдаётся дочке), [review-request](../review-request/SKILL.md) /
 [review](../review/SKILL.md) (спорное — на ревью),
-[mailbox](../mailbox/SKILL.md) (передача работы и хэндофф).
+[handoff](../handoff/SKILL.md) (снимки сессий); передача работы дочке — git-ветка
+`agents/<TO>` и бриф-файл в `handoffs/<slug>/`.
 
 ## Границы
 
