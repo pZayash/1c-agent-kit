@@ -1142,6 +1142,8 @@ filter_unchanged_conf_files() {
     local -A current_hashes=()
     local -A verify_rels=()
     local skipped=0 kept=0 total=0
+    local skipped_file="${list_file}.skipped"
+    : > "$skipped_file"
 
     manifest=$(conf_files_cache_manifest_path "$repo_root" "$config_dir_abs")
     migrate_legacy_configuration_cache "$repo_root" "$config_dir_abs" "$manifest"
@@ -1204,6 +1206,7 @@ filter_unchanged_conf_files() {
             current_hash="${current_hashes[$rel_path]:-}"
             if [[ -n "$current_hash" && "$current_hash" == "$cached_hash" ]]; then
                 skipped=$((skipped + 1))
+                printf '%s\n' "$rel_path" >> "$skipped_file"
             else
                 printf '%s\n' "$rel_path" >> "$kept_file"
                 kept=$((kept + 1))
@@ -1216,8 +1219,18 @@ filter_unchanged_conf_files() {
 
     if [[ $skipped -gt 0 ]]; then
         log "INFO" "Кэш conf: пропущено $skipped из $total файлов (останется $kept)"
+        # Имена пропущенных файлов — чтобы «тихий пропуск» был виден в отчёте.
+        # Неверная запись манифеста самоподдерживается (пропуск → перезапись того же хеша),
+        # лечение: SKIP_CONFIGURATION_CACHE=true (см. docs/ai/load-config-to-dev.md).
+        local skipped_name skipped_list=""
+        while IFS= read -r skipped_name; do
+            [[ -z "$skipped_name" ]] && continue
+            skipped_list+="${skipped_list:+, }$skipped_name"
+        done < <(head -n 10 "$skipped_file")
+        [[ -n "$skipped_list" ]] && log "INFO" "Кэш conf, пропущены: $skipped_list$( [[ $skipped -gt 10 ]] && echo ', …' )"
         log_quiet "Кэш: пропущено $skipped неизменённых файлов conf"
     fi
+    rm -f "$skipped_file"
 }
 
 # Обновить кэш хешей загруженных файлов conf
