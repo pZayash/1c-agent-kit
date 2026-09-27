@@ -19,6 +19,7 @@ import argparse
 import base64
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -85,6 +86,8 @@ class Node:
         self.regport = int(cfg(env, 'IBSRV_DIRECT_REGPORT', '1542'))
         self.debug = cfg(env, 'IBSRV_DEBUG', 'http')
         self.debug_port = int(cfg(env, 'IBSRV_DEBUG_PORT', '1551'))
+        # Доп. аргументы ibsrv (напр. --enable-extended-designer-features).
+        self.extra_args = cfg(env, 'IBSRV_EXTRA_ARGS')
         self.services = [s.strip() for s in cfg(env, 'IBSRV_SERVICES',
                                                 'mcp,mcp-dev').split(',') if s.strip()]
 
@@ -170,6 +173,8 @@ class Node:
             args += [f'--debug={self.debug}', f'--debug-port={self.debug_port}']
         if self.regport:
             args += [f'--direct-regport={self.regport}']
+        if self.extra_args:
+            args += shlex.split(self.extra_args)
         log = open(self.log_file, 'wb')
         kwargs: dict = {'stdout': log, 'stderr': subprocess.STDOUT, 'stdin': subprocess.DEVNULL}
         if os.name == 'nt':
