@@ -22,6 +22,10 @@
 Настройки: `.env` (`IB_CONNECTION`, `DESIGNER_PATH`, `CONFIG_PATH`,
 `EXTENSIONS_PATH`). Шаблон ключей: [templates/env.example](../../templates/env.example).
 
+Остановка публикации нужна только для **файловой** ИБ (`IB_CONNECTION=/F…`): её
+держит worker Apache (`wsap24.dll`). Для серверной (`/S…`) и для автономного
+сервера (`ibsrv` + `IBSRV_PID_FILE`) скрипт Apache не трогает.
+
 Зависимости потребителя (не в kit): `tools/load-project-env.sh`, `tools/os/`.
 
 ## Не использовать
@@ -42,6 +46,12 @@ Upstream cc-1c: `db-load-git`, `db-load-xml`, `db-update`, `db-load-cf` —
   merge-HEAD сам берёт `HEAD^1`.
 - **`--force-partial`** — не отменять partial с `Configuration.xml` после merge.
 - **`--ibcmd`** / `LOAD_ENGINE=ibcmd` — headless/CI (медленнее designer).
+  **Автономный сервер (`IBSRV_PID_FILE` задан):** тот же движок идёт через шлюз
+  администрирования `ibcmd --pid=<pid>`: монопольного доступа нет, Apache и сервер
+  не останавливаются; список файлов — относительные пути к `--base-dir`.
+  Конфигуратор по `/S` на `/UpdateDBCfg` на автономном сервере рвёт сеанс
+  (`recv returns zero`, ассерт `m_dbOperationsBlock`) — использовать `ibcmd`.
+  Подробности — док потребителя (`docs/ai/dev-ib-ibsrv.md`).
 - **`--force-sessions`** / **`--no-force-sessions`** — разрешить/запретить авто-retry
   `/UpdateDBCfg` при ошибке «обнаружены клиенты, работающие по HTTP». Env:
   `UPDATE_DB_FORCE_SESSIONS` (по умолчанию `true`).

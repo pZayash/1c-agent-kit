@@ -331,10 +331,42 @@ resolve_ibcmd_default() {
     fi
 }
 
+# PID процесса автономного сервера (ibsrv): из IBSRV_PID_FILE,
+# дефолт .tmp/ibsrv/ibsrv.pid (пишет скилл db-server).
+ibcmd_remote_pid() {
+    local pid_file="${IBSRV_PID_FILE:-.tmp/ibsrv/ibsrv.pid}"
+    local pid root="${repo_path:-}"
+    # Функция вызывается до вычисления repo_path — считаем корень сами.
+    if [[ -z "$root" ]]; then
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(pwd)
+    fi
+    # Относительный путь — от корня потребителя, не от CWD вызова.
+    if [[ "$pid_file" != /* && ! "$pid_file" =~ ^[A-Za-z]: ]]; then
+        pid_file="$root/$pid_file"
+    fi
+    [[ -f "$pid_file" ]] || return 1
+    pid=$(tr -d '[:space:]' < "$pid_file")
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$pid"
+}
+
 # Аргументы подключения к ИБ для ibcmd (--db-path для файловой, --dbms/... для серверной)
 build_ibcmd_db_args() {
     IBCMD_DB_ARGS=""
     local conn="$IB_CONNECTION" p
+    # Автономный сервер (ibsrv): работа через шлюз администрирования `--pid`.
+    # Файловую ИБ держит сервер — монопольный доступ не нужен, /UpdateDBCfg
+    # конфигуратором через /S на автономном сервере рвёт сеанс.
+    if [[ -n "${IBSRV_PID_FILE:-}" ]]; then
+        if ! p=$(ibcmd_remote_pid); then
+            log "ERROR" "ibcmd (автономный сервер): нет PID в IBSRV_PID_FILE=${IBSRV_PID_FILE}"
+            log "ERROR" "Поднимите узел: python .cursor/skills/db-server/scripts/db-server.py -Action start"
+            return 1
+        fi
+        IBCMD_DB_ARGS="--pid=$p"
+        log "INFO" "ibcmd: автономный сервер, шлюз администрирования --pid=$p"
+        return 0
+    fi
     if [[ "$conn" =~ ^[[:space:]]*/[Ff] ]]; then
         p=$(echo "$conn" | sed -E 's|^[[:space:]]*/[Ff][[:space:]]*||' | tr -d '"')
         if [[ "${PROJECT_OS}" == "linux" ]]; then
@@ -379,12 +411,13 @@ ibcmd_run() {
     run_1c_command "$cmd"
 }
 
-# Частичный импорт conf: список полных путей файлов подаётся ibcmd через stdin
+# Частичный импорт conf: список файлов подаётся ibcmd через stdin
 # (документированный способ: type fileList.lst | ibcmd infobase config import files --base-dir ...).
+# Пути в списке — ОТНОСИТЕЛЬНЫЕ --base-dir (полные пути платформа ищет в корне загрузки).
 # Без лимита длины командной строки.
 ibcmd_import_conf() {
     local base_dir_cmd="$1"
-    local base_dir_unix="$2"   # unix-путь base-dir для сборки полных путей в списке
+    local base_dir_unix="$2"   # unix-путь base-dir (для проверки существования файлов)
     local no_check="" listfile rel full
     [[ "$IBCMD_NO_CHECK" == "true" ]] && no_check="--no-check"
 
@@ -395,12 +428,7 @@ ibcmd_import_conf() {
     : > "$listfile_src"
     while IFS= read -r rel || [[ -n "$rel" ]]; do
         [[ -z "$rel" ]] && continue
-        full="$base_dir_unix/$rel"
-        if [[ "${PROJECT_OS}" == "linux" ]]; then
-            printf '%s\n' "$full" >> "$listfile_src"
-        else
-            printf '%s\n' "$(unix_to_win_path "$full")" >> "$listfile_src"
-        fi
+        printf '%s\n' "$rel" >> "$listfile_src"
     done < temp_changed_files.txt
     if [[ "${PROJECT_OS}" == "linux" ]]; then
         mv "$listfile_src" "$listfile"
@@ -591,6 +619,12 @@ diagnose_load_failure() {
 }
 
 # Управление Apache и процессами 1С — tools/os/apache.sh, tools/os/process-1c.sh
+
+# ИБ на сервере (`/S`): файловую базу держит Apache (wsap24), серверную — нет.
+# Для /S публикацию останавливать не нужно (ни -U, ни движку ibcmd).
+ib_connection_is_file() {
+    [[ "${IB_CONNECTION:-}" =~ ^[[:space:]]*/[Ff] ]]
+}
 
 # Windows: помимо APACHE_SERVICE_NAME ИБ могут публиковать другие службы Apache/httpd
 # (вторая публикация держит HTTP-сеансы и мешает эксклюзивному /UpdateDBCfg).
@@ -2309,7 +2343,7 @@ fi
 #  - Windows + конфигуратор — достаточно стопа перед UpdateDBCfg (блок ниже).
 _slot_apache_was_running="false"
 if { [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]] || [[ "$LOAD_ENGINE" == "ibcmd" ]]; } \
-    && apache_is_running; then
+    && ib_connection_is_file && apache_is_running; then
     if ! apache_stop; then
         log "ERROR" "Stop Apache не удался — загрузка отменена"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
@@ -2523,7 +2557,7 @@ if [[ "$UPDATE_DB" == "true" ]]; then
     # через wsap24.dll). Без этого /UpdateDBCfg упрётся в «база занята».
     # trap гарантирует Start даже при сбое /UpdateDBCfg или Ctrl+C.
     apache_was_running="false"
-    if apache_is_running; then
+    if ib_connection_is_file && apache_is_running; then
         apache_was_running="true"
         if ! apache_stop; then
             log "ERROR" "Stop Apache не удался — обновление БД отменено"
