@@ -104,6 +104,10 @@
 #                             (типовая битая форма УНФ при -F / Configuration.xml)
 #   LOAD_VERBOSE              true — то же, что --verbose
 #   LOG_FILE_LIST_THRESHOLD   Порог поименного вывода файлов в -H/-C/--verbose (по умолчанию: 100)
+#   IB_LOAD_STRICT            true — защиты «ворктри» и «чужая грязь conf/» дают жёсткий
+#                             отказ (exit) вместо WARN (по умолчанию: false)
+#   IB_LOAD_FROM_WORKTREE     true — осознанное разрешение грузить из ворктри
+#                             (гасит защиту «ворктри», по умолчанию: false)
 #
 # ПРИМЕРЫ:
 #   ./load-changed-files.sh                           # Использует настройки из .env
@@ -605,6 +609,138 @@ warn_other_apache_services() {
     done <<< "$names"
     log "WARN" "Они тоже публикуют ИБ и держат HTTP-сеансы — /UpdateDBCfg может упасть"
     log "WARN" "на «обнаружены клиенты, работающие по HTTP» (см. UPDATE_DB_FORCE_SESSIONS)."
+}
+
+# Канонизация пути ворктри для сравнения (git worktree list ↔ rev-parse --show-toplevel).
+# Windows/MSYS: cygpath -u + ASCII-lower (регистр буквы диска/пути). Linux: realpath -m.
+normalize_worktree_path() {
+    local p="$1"
+    case "${PROJECT_OS}" in
+        linux)
+            realpath -m "$p" 2>/dev/null || printf '%s\n' "$p"
+            ;;
+        windows)
+            if command -v cygpath >/dev/null 2>&1; then
+                p=$(cygpath -u "$p" 2>/dev/null || printf '%s\n' "$p")
+            fi
+            printf '%s' "$p" | tr '\\' '/' | sed 's|/*$||' | tr '[:upper:]' '[:lower:]'
+            ;;
+        *)
+            printf '%s' "$p" | tr '\\' '/' | sed 's|/*$||'
+            ;;
+    esac
+}
+
+# Значение флага — истина: true/1/yes/on (регистронезависимо). Сообщение защиты 1
+# говорит «IB_LOAD_FROM_WORKTREE=1», поэтому принимаем и 1, и true.
+flag_is_true() {
+    case "${1:-}" in
+        true|1|yes|on|TRUE|True|YES|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── Защита 1: запуск не из главного чекаута ────────────────────────────────────
+# Загрузка из ворктри делает конфигурацию ИБ равной дампу ЭТОГО ворктри: объекты
+# других ворктри исчезают из метаданных. Главный = первая запись
+# `git worktree list --porcelain`. Нет git / отвязанный HEAD — тихо пропускаем.
+guard_load_from_worktree() {
+    local wt_main wt_cur main_norm cur_norm
+    wt_main=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{ sub(/^worktree /,""); print; exit }')
+    [[ -n "$wt_main" ]] || return 0
+    wt_cur=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+    [[ -n "$wt_cur" ]] || return 0
+    main_norm=$(normalize_worktree_path "$wt_main")
+    cur_norm=$(normalize_worktree_path "$wt_cur")
+    [[ -n "$main_norm" && -n "$cur_norm" ]] || return 0
+    [[ "$main_norm" == "$cur_norm" ]] && return 0
+    flag_is_true "$IB_LOAD_FROM_WORKTREE" && return 0
+
+    local msg="загрузка из ворктри подменит конфигурацию ИБ дампом этого ворктри; закоммить и грузи из главного чекаута, либо IB_LOAD_FROM_WORKTREE=1"
+    if flag_is_true "$IB_LOAD_STRICT"; then
+        log "ERROR" "$msg"
+        log "ERROR" "Главный чекаут: $wt_main"
+        log "ERROR" "Текущий ворктри: $wt_cur"
+        exit 21
+    fi
+    log "WARN" "$msg"
+    log "WARN" "Главный чекаут: $wt_main"
+    log "WARN" "Текущий ворктри: $wt_cur"
+}
+
+# ── Защита 2: чужая незакоммиченная грязь conf/ в других ворктри ───────────────
+# Полная загрузка (-F) вытесняет чужую грязь из метаданных ИБ; частичная — только
+# перечисленное. Ошибки git при обходе — best-effort, загрузку не ломают.
+guard_foreign_dirty_conf() {
+    local wt_cur cur_norm line path norm wt_dirty rel
+    local -a paths=()
+    wt_cur=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+    cur_norm=$(normalize_worktree_path "$wt_cur")
+    [[ -n "$cur_norm" ]] || return 0
+
+    while IFS= read -r line; do
+        path="${line#worktree }"
+        [[ "$path" == "$line" || -z "$path" ]] && continue
+        norm=$(normalize_worktree_path "$path")
+        [[ -n "$norm" && "$norm" != "$cur_norm" ]] || continue
+        wt_dirty=$(git -C "$path" status --porcelain -- conf/ 2>/dev/null || true)
+        [[ -n "$wt_dirty" ]] || continue
+        while IFS= read -r rel || [[ -n "$rel" ]]; do
+            [[ -z "$rel" ]] && continue
+            [[ ${#paths[@]} -ge 10 ]] && break
+            [[ -z "${rel:3}" ]] && continue
+            paths+=("${rel:3}")
+        done <<< "$wt_dirty"
+        [[ ${#paths[@]} -ge 10 ]] && break
+    done < <(git worktree list --porcelain 2>/dev/null | grep '^worktree ' || true)
+
+    [[ ${#paths[@]} -eq 0 ]] && return 0
+
+    local p
+    if [[ "$FULL_RESYNC" == "true" ]] && flag_is_true "$IB_LOAD_STRICT"; then
+        log "ERROR" "в другом ворктри есть незакоммиченные правки conf/ — полная загрузка (-F) вытеснит их из метаданных ИБ; сначала сведи их в main"
+        for p in "${paths[@]}"; do log "ERROR" "  • $p"; done
+        exit 22
+    fi
+    if [[ "$FULL_RESYNC" == "true" ]]; then
+        log "WARN" "в другом ворктри есть незакоммиченные правки conf/ — полная загрузка (-F) вытеснит их из метаданных ИБ; сначала сведи их в main"
+    else
+        log "WARN" "в другом ворктри есть незакоммиченные правки conf/ — частичная загрузка вытесняет лишь перечисленное, но полезно их видеть"
+    fi
+    for p in "${paths[@]}"; do log "WARN" "  • $p"; done
+}
+
+# ── Защита 3: похоже, загрузка уже идёт ────────────────────────────────────────
+# Замка нет: параллельная загрузка сломает состояние. Жёсткий отказ не делаем даже
+# при IB_LOAD_STRICT — велик риск ложных срабатываний (открытый конфигуратор/клиент).
+guard_load_already_running() {
+    local pids=""
+    case "${PROJECT_OS}" in
+        linux)
+            pids=$(pgrep -f "1cv8|ibcmd" 2>/dev/null | grep -vx "$$" | tr '\n' ' ' || true)
+            ;;
+        windows)
+            command -v powershell.exe >/dev/null 2>&1 || return 0
+            local ps_cmd
+            ps_cmd="Get-CimInstance Win32_Process | Where-Object { (\$_.Name -eq '1cv8.exe' -and \$_.CommandLine -like '*CONFIG*') -or \$_.Name -eq 'ibcmd.exe' } | Select-Object -ExpandProperty ProcessId"
+            pids=$(MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" powershell.exe -NoProfile -Command "$ps_cmd" 2>/dev/null | tr -d '\r' | tr '\n' ' ' || true)
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+    pids=$(echo "$pids" | tr -s ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [[ -z "${pids// /}" ]] && return 0
+    log "WARN" "похоже, загрузка уже выполняется (PID ${pids}): замка нет, вторая загрузка сломает состояние — дождись или убедись, что процесс не загрузочный"
+}
+
+# ── Защиты движка: ворктри, чужая грязь, параллельные загрузки ─────────────────
+# Вызываются перед началом загрузки (после --help и раннего выхода
+# «нет файлов к загрузке»). Проверка 3 — всегда WARN (ложные срабатывания).
+run_load_guards() {
+    guard_load_from_worktree
+    guard_foreign_dirty_conf
+    guard_load_already_running
 }
 
 # Запуск Python с fallback на py -3
@@ -1589,6 +1725,8 @@ FORCE_PARTIAL="${FORCE_PARTIAL:-false}"
 LOAD_HIDE_FILES="${LOAD_HIDE_FILES:-}"
 RESOLVED_LOAD_MARKER=""
 COMMITTED_CHANGES_PRESENT=false
+IB_LOAD_STRICT="${IB_LOAD_STRICT:-false}"               # true — защиты 1/2 → жёсткий отказ вместо WARN
+IB_LOAD_FROM_WORKTREE="${IB_LOAD_FROM_WORKTREE:-false}" # true — осознанно грузим из ворктри (гасит защиту 1)
 
 # Парсинг аргументов командной строки
 while [[ $# -gt 0 ]]; do
@@ -1780,6 +1918,8 @@ while [[ $# -gt 0 ]]; do
             echo "                            Параметры серверной ИБ для движка ibcmd (для /S подключений)"
             echo "  LOAD_VERBOSE              true — то же, что --verbose"
             echo "  LOG_FILE_LIST_THRESHOLD   Порог поименного вывода в -H/-C/--verbose (default: 100)"
+            echo "  IB_LOAD_STRICT            true — защиты ворктри/чужой грязи conf/ → отказ (exit) вместо WARN"
+            echo "  IB_LOAD_FROM_WORKTREE     true — осознанно разрешить загрузку из ворктри"
             exit 0
             ;;
         *)
@@ -2165,6 +2305,11 @@ else
 _slot_apache_was_running="false"
 timing_mark "подготовка UpdateDB (загрузка файлов не требуется)"
 fi
+
+# ── Защиты движка (ворктри / чужая грязь / параллельная загрузка) ──────────────
+# Перед preflight и загрузкой; --help и ранний выход «нет файлов к загрузке»
+# выполняются раньше и сюда не доходят.
+run_load_guards
 
 # Preflight по поддержке объектов
 PARENT_CONFIG_BIN="$CONFIG_PATH_ABS/Ext/ParentConfigurations.bin"

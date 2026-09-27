@@ -61,6 +61,8 @@ git diff --stat HEAD~1..HEAD          # что вошло
 
 Только из **канонического чекаута** и только **по одной за раз**.
 
+Движок сам предупреждает о ворктри/чужой грязи/параллельной загрузке; жёсткий отказ — `IB_LOAD_STRICT=true` (см. [load-config-to-dev.md](../../../docs/ai/load-config-to-dev.md)).
+
 ```bash
 ./load-changed-files.sh -U --no-extensions --list-file <список>   # подмножество
 ./load-changed-files.sh -F -U --no-extensions                     # полная пересборка
