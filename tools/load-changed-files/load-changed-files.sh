@@ -710,20 +710,37 @@ guard_foreign_dirty_conf() {
     for p in "${paths[@]}"; do log "WARN" "  • $p"; done
 }
 
-# ── Защита 3: похоже, загрузка уже идёт ────────────────────────────────────────
-# Замка нет: параллельная загрузка сломает состояние. Жёсткий отказ не делаем даже
-# при IB_LOAD_STRICT — велик риск ложных срабатываний (открытый конфигуратор/клиент).
+# ── Защита 3: похоже, загрузка уже идёт по НАШЕЙ ИБ ─────────────────────────────
+# Замка нет: параллельная загрузка сломает состояние. Сужаем по базе из IB_CONNECTION
+# (basename через extract_base_dirname), чтобы не шуметь на чужих базах/агентах.
+# Читающие подкоманды ibcmd (list/export/dump/help) исключаем — они не пишут.
+# Жёсткий отказ не делаем даже при IB_LOAD_STRICT — велик риск ложных срабатываний
+# (открытый конфигуратор/клиент).
 guard_load_already_running() {
-    local pids=""
+    local base_token pids=""
+    base_token=$(extract_base_dirname "${IB_CONNECTION:-}" 2>/dev/null || true)
+    # Путь ИБ не распознали — тихо пропускаем (лучше не шуметь не по делу).
+    [[ -n "$base_token" ]] || return 0
+
     case "${PROJECT_OS}" in
         linux)
-            pids=$(pgrep -f "1cv8|ibcmd" 2>/dev/null | grep -vx "$$" | tr '\n' ' ' || true)
+            command -v pgrep >/dev/null 2>&1 || return 0
+            pids=$(pgrep -af "1cv8|ibcmd" 2>/dev/null \
+                | grep -F -- "$base_token" \
+                | grep -Ev '(^|[[:space:]])(list|export|dump|help)([[:space:]]|$)' \
+                | awk '{print $1}' \
+                | grep -vx "$$" \
+                | tr '\n' ' ' || true)
             ;;
         windows)
             command -v powershell.exe >/dev/null 2>&1 || return 0
-            local ps_cmd
-            ps_cmd="Get-CimInstance Win32_Process | Where-Object { (\$_.Name -eq '1cv8.exe' -and \$_.CommandLine -like '*CONFIG*') -or \$_.Name -eq 'ibcmd.exe' } | Select-Object -ExpandProperty ProcessId"
+            local tf tf_win ps_cmd
+            tf=$(mktemp) || return 0
+            printf '%s\n' "$base_token" > "$tf"
+            tf_win=$(_ib_win_path "$tf")
+            ps_cmd="[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \$tok = Get-Content -LiteralPath '$tf_win' -Encoding UTF8 | Select-Object -First 1; if ([string]::IsNullOrWhiteSpace(\$tok)) { return }; Get-CimInstance Win32_Process | Where-Object { (\$_.Name -eq '1cv8.exe' -and \$_.CommandLine -and \$_.CommandLine -like ('*' + \$tok + '*') -and \$_.CommandLine -like '*CONFIG*') -or (\$_.Name -eq 'ibcmd.exe' -and \$_.CommandLine -and \$_.CommandLine -like ('*' + \$tok + '*') -and \$_.CommandLine -notmatch '(^|\s)(list|export|dump|help)(\s|$)') } | Select-Object -ExpandProperty ProcessId"
             pids=$(MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" powershell.exe -NoProfile -Command "$ps_cmd" 2>/dev/null | tr -d '\r' | tr '\n' ' ' || true)
+            rm -f "$tf"
             ;;
         *)
             return 0
