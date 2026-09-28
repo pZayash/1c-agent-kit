@@ -13,7 +13,8 @@ metadata:
 
 Archive a completed change in the experimental workflow.
 
-**Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
+**Input**: Optionally specify a change name. If omitted, check if it can be inferred
+from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
 **Steps**
 
@@ -106,9 +107,12 @@ Archive a completed change in the experimental workflow.
    - Show a combined summary of planned sync
 
    **Default (project rule):** sync delta specs into `openspec/specs/<capability>/spec.md`, then archive.
-   Do **not** ask «sync or skip» unless the user explicitly said «без sync» / «archive without syncing» in the **current** dialog.
+   Do **not** ask «sync or skip» unless the user explicitly said «без sync» /
+   «archive without syncing» in the **current** dialog.
 
-   If sync is needed, use Task tool (subagent_type: "general-purpose", prompt: "Use Skill tool to invoke openspec-sync-specs for change '<name>'. Delta spec analysis: <include the analyzed delta spec summary>").
+   If sync is needed, use Task tool (subagent_type: "general-purpose", prompt:
+   "Use Skill tool to invoke openspec-sync-specs for change '<name>'. Delta spec
+   analysis: <include the analyzed delta spec summary>").
 
 5. **Implementation notes (if present — before archive)**
 

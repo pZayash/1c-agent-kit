@@ -9,11 +9,17 @@ argument-hint: "Фокус следующей сессии или путь к .m
 
 # handoff — передача сессии следующему агенту
 
-Адаптация [mattpocock/skills — handoff](https://github.com/mattpocock/skills/blob/main/skills/productivity/handoff/SKILL.md) (MIT) под стек 1С-проекта потребителя.
+Адаптация
+[mattpocock/skills — handoff](https://github.com/mattpocock/skills/blob/main/skills/productivity/handoff/SKILL.md)
+(MIT) под стек 1С-проекта потребителя.
 
-**Принцип:** ссылаться на устойчивые артефакты, не копировать их. Handoff — снимок сессии, не замена OpenSpec и не долговременная память.
+**Принцип:** ссылаться на устойчивые артефакты, не копировать их. Handoff — снимок сессии,
+не замена OpenSpec и не долговременная память.
 
-**Не для ревью.** Двусторонний протокол ревью — отдельные скиллы по ролям: заявку исполнителя пишет [review-request](../review-request/SKILL.md), вердикт ревьювера — [review](../review/SKILL.md); канал — тред `handoffs/<slug>/`. Handoff — generic-снимок для продолжения, без ролей.
+**Не для ревью.** Двусторонний протокол ревью — отдельные скиллы по ролям: заявку
+исполнителя пишет [review-request](../review-request/SKILL.md), вердикт ревьювера —
+[review](../review/SKILL.md); канал — тред `handoffs/<slug>/`. Handoff — generic-снимок
+для продолжения, без ролей.
 
 ## Когда вызывать
 
@@ -115,11 +121,15 @@ changes — указывай это явно (см. [git-workflow.md](../../../d
 ## Границы
 
 - Handoff не конфигурация и не код; **не** гонять по нему `check-bsl.py` / xml-wellformed.
-- Handoff **не заменяет** OpenSpec: если нужен change, а proposal нет — предложить [openspec-propose](../openspec-propose/SKILL.md) и сослаться на будущий `openspec/changes/<id>/`.
+- Handoff **не заменяет** OpenSpec: если нужен change, а proposal нет — предложить
+  [openspec-propose](../openspec-propose/SKILL.md) и сослаться на будущий
+  `openspec/changes/<id>/`.
 - Handoff **не дублирует** `memory/` и `memory.md` — другой канал (сессия vs долгая память).
 - **Коммит в git** — только по явному запросу пользователя (см. AGENTS.md).
 
 ## Связанные скиллы
 
-- [review-request](../review-request/SKILL.md) / [review](../review/SKILL.md) — двусторонний протокол ревью (заявка исполнителя / вердикт ревьювера), не путать со снимком сессии.
+- [review-request](../review-request/SKILL.md) / [review](../review/SKILL.md) —
+  двусторонний протокол ревью (заявка исполнителя / вердикт ревьювера), не путать со
+  снимком сессии.
 - [close-chat](../close-chat/SKILL.md) — закрытие сессии; полезное вне скоупа оформляет через handoff.

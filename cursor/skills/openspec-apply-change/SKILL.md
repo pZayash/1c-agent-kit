@@ -11,7 +11,8 @@ metadata:
 
 Implement tasks from an OpenSpec change.
 
-**Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
+**Input**: Optionally specify a change name. If omitted, check if it can be inferred
+from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
 **Steps**
 
@@ -20,9 +21,11 @@ Implement tasks from an OpenSpec change.
    If a name is provided, use it. Otherwise:
    - Infer from conversation context if the user mentioned a change
    - Auto-select if only one active change exists
-   - If ambiguous, run `openspec list --json` to get available changes and use the **AskUserQuestion tool** to let the user select
+   - If ambiguous, run `openspec list --json` to get available changes and use the
+   **AskUserQuestion tool** to let the user select
 
-   Always announce: "Using change: <name>" and how to override (e.g., another change name in the request or skill `openspec-apply-change <name>`).
+   Always announce: "Using change: <name>" and how to override (e.g., another change
+   name in the request or skill `openspec-apply-change <name>`).
 
 2. **Check status to understand the schema**
    ```bash
@@ -45,7 +48,8 @@ Implement tasks from an OpenSpec change.
    - Dynamic instruction based on current state
 
    **Handle states:**
-   - If `state: "blocked"` (missing artifacts): show message; suggest completing missing artifacts via `openspec-propose` or manual artifact edits, then retry
+   - If `state: "blocked"` (missing artifacts): show message; suggest completing
+   missing artifacts via `openspec-propose` or manual artifact edits, then retry
    - If `state: "all_done"`: congratulate, suggest skill `openspec-archive-change`
    - Otherwise: proceed to implementation
 
@@ -155,7 +159,9 @@ Implement tasks from an OpenSpec change.
    - Tasks completed this session
    - Overall progress: "N/M tasks complete"
    - If `implementation-notes.md` exists: path and one-line hint (review before archive; file is not archived)
-   - If `operator-checklist.md` exists: вывести его содержимое в чат и явно спросить оператора по незакрытым пунктам (файл не входит в прогресс tasks.md, но блокирует archive — см. `openspec-archive-change` шаг 3)
+   - If `operator-checklist.md` exists: вывести его содержимое в чат и явно спросить
+   оператора по незакрытым пунктам (файл не входит в прогресс tasks.md, но блокирует
+   archive — см. `openspec-archive-change` шаг 3)
    - If all done: suggest archive (но только если operator-checklist тоже закрыт)
    - If paused: explain why and wait for guidance
 
@@ -227,5 +233,7 @@ What would you like to do?
 
 This skill supports the "actions on a change" model:
 
-- **Can be invoked anytime**: Before all artifacts are done (if tasks exist), after partial implementation, interleaved with other actions
-- **Allows artifact updates**: If implementation reveals design issues, suggest updating artifacts - not phase-locked, work fluidly
+- **Can be invoked anytime**: Before all artifacts are done (if tasks exist), after
+  partial implementation, interleaved with other actions
+- **Allows artifact updates**: If implementation reveals design issues, suggest
+  updating artifacts - not phase-locked, work fluidly
