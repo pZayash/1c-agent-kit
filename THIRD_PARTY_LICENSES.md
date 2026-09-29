@@ -40,7 +40,16 @@ Adapted for the 1C consumer stack. See MIT license text below.
 
 Adapted for the 1C consumer stack. See MIT license text below.
 
-### 4. `cursor/skills/ponytail/`, `cursor/rules/ponytail.mdc` — ponytail
+### 4. `cursor/skills/retro/` — retro
+
+- Source: <https://github.com/mattpocock/skills/tree/main/skills/engineering/retro>
+- License: MIT
+- Copyright: (c) 2026 Matt Pocock
+
+Adapted for the kit environment (`docs/ai`, guardrails, `harness-promote`). See
+MIT license text below.
+
+### 5. `cursor/skills/ponytail/`, `cursor/rules/ponytail.mdc` — ponytail
 
 - Source: <https://github.com/DietrichGebert/ponytail>
 - License: MIT
@@ -48,7 +57,7 @@ Adapted for the 1C consumer stack. See MIT license text below.
 
 See MIT license text below.
 
-### 5. `cursor/skills/openspec-*` — OpenSpec
+### 6. `cursor/skills/openspec-*` — OpenSpec
 
 - Source: <https://github.com/fission-ai/openspec>
 - License: MIT
@@ -57,7 +66,7 @@ See MIT license text below.
 Adapted OpenSpec workflow skills (frontmatter `license: MIT`). See MIT license
 text below.
 
-### 6. `cursor/skills/caveman/`, `cursor/rules/caveman.mdc`
+### 7. `cursor/skills/caveman/`, `cursor/rules/caveman.mdc`
 
 Original content in this repository; no third-party origin recorded. Licensed
 under the repository MIT license.

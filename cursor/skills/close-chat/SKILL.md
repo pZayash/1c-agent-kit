@@ -206,3 +206,4 @@ bash tools/sandbox/run.sh python tools/git-partial-stage.py "путь/к/фай�
 - [memory/feedback_openspec_always_sync_and_archive.md](../../../memory/feedback_openspec_always_sync_and_archive.md) — правило sync+archive.
 - [git-workflow.md](../../../docs/ai/git-workflow.md) — группировка по `№%`, partial stage смешанных файлов.
 - [agent-session-lessons.md](../../../docs/ai/agent-session-lessons.md) — memory → docs, шаг 0б.
+- [retro](../retro/SKILL.md) — ретроспектива среды агента (не код, не закрытие сессии).

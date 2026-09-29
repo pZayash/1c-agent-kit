@@ -314,7 +314,7 @@ bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills
 
 **Срез A:** caveman, openspec-*, explore, …  
 **Срез B (workflow):** handoff, close-chat, load-changed-files, bsl-check,
-architect-apply, mailbox, review, review-request.
+architect-apply, mailbox, review, review-request, retro.
 
 **Потребитель** после cc-1c link:
 
