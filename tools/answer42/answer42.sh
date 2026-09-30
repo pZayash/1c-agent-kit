@@ -81,6 +81,10 @@ EXTRA_ARGS="$(env_value ANSWER42_EXTRA_ARGS "")"
 # Scope-режим Answer42 (v0.4.77+): свой STATE_FILE и лок на scope вместо общего
 # legacy-состояния — второй живой сервер не сможет занять те же session_id.
 SCOPE_ID="$(env_value ONEC_MCP_SESSION_SCOPE_ID "")"
+# Фоновый режим Windows (v0.4.x+): hidden — менеджер и клиент 1С на скрытых
+# рабочих столах: окна не видны, фокус не крадётся, параллельные сессии не
+# перекрывают друг друга. Пусто = текущий рабочий стол (дефолт Answer42).
+WINDOWS_DESKTOP="$(env_value ONEC_MCP_WINDOWS_DESKTOP "")"
 FORK_DIR="$(norm_path "$(env_value ANSWER42_FORK_DIR "")")"
 # Пусто = текущая ветка чекаута: имя ветки с патчами — локальная конвенция
 # потребителя (fork-patches, kpsr, …), жёсткий дефолт ломал update.
@@ -293,6 +297,7 @@ start_service() {
         A42_ERR="$(cygpath -w "$ERR_LOG")" \
         A42_ARGS="$(printf '%s\n' "${args[@]}")" \
         ONEC_MCP_SESSION_SCOPE_ID="$SCOPE_ID" \
+        ONEC_MCP_WINDOWS_DESKTOP="$WINDOWS_DESKTOP" \
         powershell -NoProfile -Command '
             $argv = @($env:A42_ARGS.Split("`n") | Where-Object { $_ -ne "" })
             $p = Start-Process -FilePath $env:A42_BIN -ArgumentList $argv -PassThru -WindowStyle Hidden `
@@ -301,7 +306,7 @@ start_service() {
             Set-Content -LiteralPath (Join-Path $env:A42_DIR "http.pid") -Value $p.Id -Encoding ASCII
         '
     else
-        (cd "$STATE_DIR" && ONEC_MCP_SESSION_SCOPE_ID="$SCOPE_ID" nohup "$BIN" "${args[@]}" \
+        (cd "$STATE_DIR" && ONEC_MCP_SESSION_SCOPE_ID="$SCOPE_ID" ONEC_MCP_WINDOWS_DESKTOP="$WINDOWS_DESKTOP" nohup "$BIN" "${args[@]}" \
             >"$OUT_LOG" 2>"$ERR_LOG" & echo $! >"$PID_FILE")
     fi
 

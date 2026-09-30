@@ -84,6 +84,9 @@ function Get-Config {
     $mcpUrl = & $get "ANSWER42_MCP_URL" "http://127.0.0.1:9010/mcp"
     $port = "9010"
     if ($mcpUrl -match ":(\d+)/") { $port = $Matches[1] }
+    # Фоновый режим Windows: env приоритетнее .env (как в answer42.sh) — ключ
+    # удобно задавать на один запуск, не правя файл.
+    $windowsDesktop = if ($env:ONEC_MCP_WINDOWS_DESKTOP) { $env:ONEC_MCP_WINDOWS_DESKTOP } else { & $get "ONEC_MCP_WINDOWS_DESKTOP" "" }
     return [pscustomobject]@{
         Url       = $mcpUrl
         Port      = $port
@@ -94,6 +97,10 @@ function Get-Config {
         # Scope-режим (v0.4.77+): свой STATE_FILE и лок на scope — второй живой
         # сервер не сможет занять те же session_id. Пусто = legacy-режим.
         ScopeId   = & $get "ONEC_MCP_SESSION_SCOPE_ID" ""
+        # Фоновый режим Windows (v0.4.x+): hidden — 1С на скрытых рабочих столах
+        # (окна не видны, фокус не крадётся, параллельные сессии изолированы).
+        # Пусто = текущий рабочий стол (дефолт Answer42).
+        WindowsDesktop = $windowsDesktop
         # Форк-сборка (escape hatch): чекаут, ветка с патчами и удалённые репозитории.
         # Пустая ветка = текущая ветка чекаута (имя ветки — локальная конвенция).
         ForkDir    = & $get "ANSWER42_FORK_DIR" ""
@@ -397,6 +404,8 @@ switch ($Action) {
         New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
         if ($config.ScopeId) { $env:ONEC_MCP_SESSION_SCOPE_ID = $config.ScopeId }
         else { Remove-Item Env:ONEC_MCP_SESSION_SCOPE_ID -ErrorAction SilentlyContinue }
+        if ($config.WindowsDesktop) { $env:ONEC_MCP_WINDOWS_DESKTOP = $config.WindowsDesktop }
+        else { Remove-Item Env:ONEC_MCP_WINDOWS_DESKTOP -ErrorAction SilentlyContinue }
 
         $arguments = @(
             "--http",
