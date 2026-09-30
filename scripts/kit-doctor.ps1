@@ -360,6 +360,27 @@ if (Test-Path -LiteralPath $harness) {
             $overlap | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
         }
     }
+
+    # 12. answer42 freshness (optional tool; WARN only). Freshness matters:
+    #     before 0.5.13 the HTTP service never ran the orphan reaper, so busy
+    #     session_id values were not released. PyPI request is bounded by the
+    #     timeout inside version_check.py.
+    $a42Script = Join-Path $root "tools\answer42\answer42.ps1"
+    if (Test-Path -LiteralPath $a42Script) {
+        $a42Out = & $script:PsExe -NoProfile -ExecutionPolicy Bypass -File $a42Script -Action check -Root $root 2>$null
+        $a42Code = $LASTEXITCODE
+        $a42Fields = @{}
+        foreach ($a42Line in @($a42Out)) {
+            if ("$a42Line" -match '^([a-z_]+):\s*(.*)$') { $a42Fields[$Matches[1]] = $Matches[2] }
+        }
+        if ($a42Code -eq 0) {
+            Write-Ok "answer42 $($a42Fields['installed']) (latest $($a42Fields['latest']))"
+        } elseif ($a42Code -eq 1) {
+            Write-WarnX "answer42 outdated: installed $($a42Fields['installed']) -> latest $($a42Fields['latest']) ($($a42Fields['channel'])) - answer42.ps1 install|update"
+        } else {
+            Write-Info "answer42: version unknown (not installed / offline)"
+        }
+    }
 }
 
 if ($script:Failed) {

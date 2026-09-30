@@ -142,15 +142,17 @@ Tool: `harness/tools/mcp-call/` (link-kit-tools). Потребитель: `.mcp.
 Overlay: `harness/pi/` (`extensions/auto-session-title.ts`), линк —
 `scripts/link-pi-roots.*` (в `bootstrap-kit`).
 
-## Срез answer42 (2026-09-14)
+## Срез answer42 (2026-09-30)
 
 | Файл | Зачем |
 | --- | --- |
 | [answer42.md](answer42.md) | UI 1С через клиент тестирования (Answer42): когда применять, цикл агента, безопасность |
 
-Tool: `harness/tools/answer42/` (`answer42.ps1` / `answer42.sh`, `smoke.py`),
-skill: `harness/cursor/skills/answer42-ui/`. Потребитель: `.env` ключи
-`ANSWER42_*`, запись в `.mcp.json`, сервис на `127.0.0.1:9010`.
+Tool: `harness/tools/answer42/` (`answer42.ps1` / `answer42.sh`, `smoke.py`,
+`version_check.py`), skill: `harness/cursor/skills/answer42-ui/`. Потребитель:
+`.env` ключи `ANSWER42_*`, запись в `.mcp.json`, сервис на `127.0.0.1:9010`.
+Минимум `answer42>=0.5.13`; свежесть сборки — `answer42.sh check` (и строка
+`version` в `status`), диагностика в `kit-doctor` (проверка 12).
 
 ## Срез orchestrator (2026-09-25)
 

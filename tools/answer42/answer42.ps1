@@ -7,12 +7,13 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 install
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 start
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 status
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 check
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 stop
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 smoke
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "start", "stop", "restart", "status", "smoke", "update")]
+    [ValidateSet("install", "start", "stop", "restart", "status", "smoke", "check", "update")]
     [string]$Action = "status",
 
     # update: ref upstream для ребейза (тег или ветка); пусто = новейший тег
@@ -90,9 +91,13 @@ function Get-Config {
         Token     = & $get "ANSWER42_TOKEN" ""
         ExtraArgs = & $get "ANSWER42_EXTRA_ARGS" ""
         Bin       = & $get "ANSWER42_BIN" $answer42Exe
-        # Форк-сборка: чекаут, ветка с патчами и удалённые репозитории
+        # Scope-режим (v0.4.77+): свой STATE_FILE и лок на scope — второй живой
+        # сервер не сможет занять те же session_id. Пусто = legacy-режим.
+        ScopeId   = & $get "ONEC_MCP_SESSION_SCOPE_ID" ""
+        # Форк-сборка (escape hatch): чекаут, ветка с патчами и удалённые репозитории.
+        # Пустая ветка = текущая ветка чекаута (имя ветки — локальная конвенция).
         ForkDir    = & $get "ANSWER42_FORK_DIR" ""
-        ForkBranch = & $get "ANSWER42_FORK_BRANCH" "fork-patches"
+        ForkBranch = & $get "ANSWER42_FORK_BRANCH" ""
         ForkRemote = & $get "ANSWER42_FORK_REMOTE" "upstream"
         PushRemote = & $get "ANSWER42_FORK_PUSH_REMOTE" "origin"
     }
@@ -146,7 +151,19 @@ function Update-Answer42Fork {
     if (-not $target) { throw "Не удалось определить ref upstream (нет тегов?)" }
 
     $current = (Invoke-GitStep -Dir $dir -GitArgs @("rev-parse", "--abbrev-ref", "HEAD")).Output.Trim()
-    if ($current -ne $branch) { [void](Invoke-GitStep -Dir $dir -GitArgs @("checkout", $branch)) }
+    if (-not $branch) { $branch = $current }
+    if ($branch -eq "HEAD") { throw "В $dir detached HEAD — переключитесь на ветку патчей или задайте ANSWER42_FORK_BRANCH." }
+    if (@("beta", "main", "master") -contains $branch) {
+        throw "Текущая ветка '$branch' — зеркало upstream, ребейзить её нельзя. Задайте ANSWER42_FORK_BRANCH (напр. fork-patches)."
+    }
+    if ($current -ne $branch) {
+        $hasBranch = Invoke-GitStep -Dir $dir -GitArgs @("rev-parse", "--verify", "--quiet", "refs/heads/$branch") -AllowFail
+        if (-not $hasBranch.Ok) {
+            $branchList = (Invoke-GitStep -Dir $dir -GitArgs @("for-each-ref", "--format=  %(refname:short)", "refs/heads")).Output
+            throw "Ветки '$branch' нет в ${dir}. Доступные ветки:`n$branchList`nЗадайте ANSWER42_FORK_BRANCH=<ветка> в .env."
+        }
+        [void](Invoke-GitStep -Dir $dir -GitArgs @("checkout", $branch))
+    }
 
     $dirty = (Invoke-GitStep -Dir $dir -GitArgs @("status", "--porcelain")).Output.Trim()
     if ($dirty) { throw "В чекауте форка есть незакоммиченные изменения — разберитесь вручную:`n$dirty" }
@@ -167,8 +184,20 @@ function Update-Answer42Fork {
     }
 
     $serverFile = Join-Path $dir "src\mcp_1c\server.py"
-    if (-not (Select-String -Path $serverFile -Pattern "_tool_error_text" -Quiet)) {
-        throw "Патч (_tool_error_text) не найден в $target — проверить ветку $branch (коммит с фиксом текста ошибок)."
+    $markers = @()
+    if (Test-Path -LiteralPath $serverFile) {
+        if (Select-String -Path $serverFile -Pattern "_visible_tool_error" -Quiet) {
+            $markers += "_visible_tool_error (upstream, v0.5.7+)"
+        }
+        if (Select-String -Path $serverFile -Pattern "_tool_error_text" -Quiet) {
+            $markers += "_tool_error_text (форк-патч)"
+        }
+    }
+    if ($markers.Count -gt 0) {
+        Write-Host "Текст ошибок tool-call: $($markers -join ', ')"
+    }
+    else {
+        Write-Host "Примечание: ни форк-патча, ни upstream-фикса текста ошибок в ветке нет — это зеркало upstream. Продолжаю."
     }
 
     $python = Join-Path $dir ".venv\Scripts\python.exe"
@@ -202,6 +231,84 @@ function Update-Answer42Fork {
     }
     if ($serviceWasRunning -or $RestartService) { & $PSCommandPath start -Root $Root }
     Write-Host "Готово. Проверка: answer42.ps1 smoke и битая навигационная ссылка (в ответе должен быть текст 1С)."
+}
+
+# Свежесть сборки: version_check.py гоняем интерпретатором venv рядом с BIN.
+function Get-Answer42VersionInfo {
+    param([pscustomobject]$Config)
+    $python = $null
+    $venvRoot = ""
+    try { $venvRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($Config.Bin)) } catch { }
+    if ($venvRoot) {
+        $venvPython = Join-Path $venvRoot "Scripts\python.exe"
+        if (Test-Path -LiteralPath $venvPython) { $python = $venvPython }
+    }
+    if (-not $python) {
+        $candidate = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $candidate) { $candidate = Get-Command python3 -ErrorAction SilentlyContinue }
+        if ($candidate) { $python = $candidate.Source }
+    }
+    if (-not $python) { return $null }
+    $checkScript = Join-Path $PSScriptRoot "version_check.py"
+    $out = & $python $checkScript 2>$null
+    return @{ Lines = @($out); Code = $LASTEXITCODE }
+}
+
+function Get-Answer42VersionFields {
+    param([string[]]$Lines)
+    $fields = @{}
+    foreach ($line in $Lines) {
+        if ("$line" -match '^([a-z_]+):\s*(.*)$') { $fields[$Matches[1]] = $Matches[2] }
+    }
+    return $fields
+}
+
+function Get-Answer42UpdateHint {
+    param([string]$Channel)
+    if ($Channel -eq "editable" -or $Channel -eq "local") { return "answer42.ps1 update   # форк/editable-сборка" }
+    return "answer42.ps1 install   # PyPI-сборка"
+}
+
+function Show-Answer42VersionSummary {
+    param([pscustomobject]$Config)
+    $info = Get-Answer42VersionInfo -Config $Config
+    if (-not $info) {
+        Write-Host "version     : ? (python рядом с bin не найден)"
+        Write-Host "update_hint : answer42.ps1 check"
+        return
+    }
+    $fields = Get-Answer42VersionFields -Lines $info.Lines
+    $installed = $fields["installed"]; if (-not $installed) { $installed = "?" }
+    $latest = $fields["latest"]; if (-not $latest) { $latest = "?" }
+    $channel = $fields["channel"]; if (-not $channel) { $channel = "unknown" }
+    $verdict = $fields["verdict"]; if (-not $verdict) { $verdict = "unknown" }
+    Write-Host "version     : $installed -> latest $latest ($verdict, $channel)"
+    if ($verdict -eq "outdated") {
+        Write-Host "update_hint : $(Get-Answer42UpdateHint -Channel $channel)"
+    } elseif ($verdict -eq "unknown") {
+        Write-Host "update_hint : версия не определена - answer42.ps1 check"
+    }
+}
+
+function Invoke-Answer42Check {
+    param([pscustomobject]$Config)
+    Write-Host "bin         : $($Config.Bin)"
+    if ($Config.ForkDir) { Write-Host "fork_dir    : $($Config.ForkDir)" }
+    $info = Get-Answer42VersionInfo -Config $Config
+    if (-not $info) {
+        Write-Host "installed: ?"
+        Write-Host "latest: ?"
+        Write-Host "channel: unknown"
+        Write-Host "verdict: unknown"
+        Write-Host "reason: не найден python (venv Answer42 не установлен?)"
+        exit 2
+    }
+    $info.Lines | ForEach-Object { Write-Host "$_" }
+    $fields = Get-Answer42VersionFields -Lines $info.Lines
+    if ($fields["verdict"] -eq "outdated") {
+        Write-Host "hint        : $(Get-Answer42UpdateHint -Channel $fields["channel"])"
+    }
+    exit $info.Code
 }
 
 function Get-PortState {
@@ -272,7 +379,7 @@ switch ($Action) {
         }
         $python = Join-Path $venvDir "Scripts\python.exe"
         & $python -m pip install --upgrade pip
-        & $python -m pip install "answer42[screenshot,windows-window-control]"
+        & $python -m pip install "answer42[screenshot,windows-window-control]>=0.5.13"
         Write-Host "Готово. Проверка: .venv-answer42\Scripts\answer42.exe --version"
     }
     "start" {
@@ -288,6 +395,8 @@ switch ($Action) {
             Stop-Answer42Http
         }
         New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+        if ($config.ScopeId) { $env:ONEC_MCP_SESSION_SCOPE_ID = $config.ScopeId }
+        else { Remove-Item Env:ONEC_MCP_SESSION_SCOPE_ID -ErrorAction SilentlyContinue }
 
         $arguments = @(
             "--http",
@@ -330,6 +439,7 @@ switch ($Action) {
         Write-Host "url          : $($config.Url)"
         Write-Host "account_id   : $($config.AccountId)"
         Write-Host "bin          : $($config.Bin)"
+        Show-Answer42VersionSummary -Config $config
         Write-Host "pid          : $pidValue"
         Write-Host "port_open    : $open"
         if (-not $open) {
@@ -341,6 +451,10 @@ switch ($Action) {
     "smoke" {
         # Smoke на встроенной демо-базе Answer42: dev-ИБ не затрагивается.
         Invoke-Answer42Python -Arguments @($smokeScript, "--bin", (Get-Config).Bin)
+    }
+    "check" {
+        # Свежесть сборки: установленная версия vs последняя на PyPI (exit 1 — есть новее)
+        Invoke-Answer42Check -Config (Get-Config)
     }
     "update" {
         # Обновление форк-сборки с upstream (см. .env: ANSWER42_FORK_*)

@@ -20,6 +20,9 @@ HTTP-сервер Answer42 поднят и доступен в `tools/mcp-call`:
 bash tools/mcp-call/mcp-call.sh --server answer42 session_status
 ```
 
+Перед прогоном полезно убедиться, что сборка не отстала:
+`bash tools/answer42/answer42.sh check` (exit 1 — есть новее).
+
 Нет ответа — поднять (Windows):
 
 ```powershell
@@ -32,24 +35,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 ## Минимальный прогон
 
 ```bash
-# 1. сессия на нужной ИБ (URL публикации); учётка берётся из credential-стора
+# 0. pre-flight: чем заняты id, нет ли живой/мёртвой сессии (только чтение)
+bash tools/mcp-call/mcp-call.sh --server answer42 sessions_list
+
+# 1. сессия на нужной ИБ (URL публикации); учётка берётся из credential-стора.
+# session_id — уникальный на задачу/поток, не «ui»: до 0.5.13 занятый id мёртвой
+# сессии не освобождался сам, а чужая сессия даёт ложные ошибки навигации.
 bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 300 \
-  start_session '{"session_id":"ui","base_url":"http://127.0.0.1/dev_db","idle_timeout_minutes":30}'
+  start_session '{"session_id":"ui-orders","base_url":"http://127.0.0.1/dev_db","idle_timeout_minutes":30}'
 
 # 2. что открыто
-bash tools/mcp-call/mcp-call.sh --server answer42 active_window '{"session_id":"ui"}'
+bash tools/mcp-call/mcp-call.sh --server answer42 active_window '{"session_id":"ui-orders"}'
 
 # 3. структура окна (по умолчанию компактный профиль navigation)
-bash tools/mcp-call/mcp-call.sh --server answer42 ui_tree '{"session_id":"ui"}'
+bash tools/mcp-call/mcp-call.sh --server answer42 ui_tree '{"session_id":"ui-orders"}'
 
 # 4. открыть список и прочитать строки (только чтение)
 bash tools/mcp-call/mcp-call.sh --server answer42 open_navigation_link \
-  '{"session_id":"ui","navigation_link":"e1cib/list/Документ.ЗаказПокупателя"}'
-bash tools/mcp-call/mcp-call.sh --server answer42 table_rows '{"session_id":"ui","name":"Список"}'
+  '{"session_id":"ui-orders","navigation_link":"e1cib/list/Документ.ЗаказПокупателя"}'
+bash tools/mcp-call/mcp-call.sh --server answer42 table_rows '{"session_id":"ui-orders","name":"Список"}'
 
 # 5. завершить обязательно
 bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 120 \
-  stop_session '{"session_id":"ui","clean_data":true}'
+  stop_session '{"session_id":"ui-orders","clean_data":true}'
 ```
 
 ## Работа с формой
@@ -64,9 +72,9 @@ bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 120 \
 ## Доказательства
 
 ```bash
-bash tools/mcp-call/mcp-call.sh --server answer42 screenshot '{"session_id":"ui"}'
-bash tools/mcp-call/mcp-call.sh --server answer42 recording_start '{"session_id":"ui"}'
-bash tools/mcp-call/mcp-call.sh --server answer42 recording_stop '{"session_id":"ui"}'
+bash tools/mcp-call/mcp-call.sh --server answer42 screenshot '{"session_id":"ui-orders"}'
+bash tools/mcp-call/mcp-call.sh --server answer42 recording_start '{"session_id":"ui-orders"}'
+bash tools/mcp-call/mcp-call.sh --server answer42 recording_stop '{"session_id":"ui-orders"}'
 ```
 
 Без состояния формы, скриншота или записи задачу выполненной не объявлять.
@@ -77,5 +85,9 @@ bash tools/mcp-call/mcp-call.sh --server answer42 recording_stop '{"session_id":
 - Включать `--dev-tools` (`dev_eval` = произвольный BSL).
 - Записывать и проводить в боевой ИБ без явной задачи оператора.
 - Оставлять сессию живой: `stop_session(clean_data=true)` в конце.
-- Трактовать пустой текст ошибки tool-call как «сбой платформы»: смотреть
-  `current_error_info`, `user_messages`, лог `.tmp/answer42/http.err.log`.
+- Переиспользовать `session_id` между задачами (жёстко `"ui"`): id должен быть
+  уникальным на поток, иначе получите занятый id или чужую сессию.
+- Трактовать пустой текст ошибки tool-call как «сбой платформы»: он означает
+  сборку старше 0.5.7 (проверить `bash tools/answer42/answer42.sh check` и
+  обновить); для диагностики — `current_error_info`, `user_messages`, лог
+  `.tmp/answer42/http.err.log`.

@@ -11,7 +11,12 @@
 
 ## Требования
 
-- Python 3.11–3.13 (проверено на 3.11), пакет `answer42` с PyPI.
+- Python 3.11–3.13 (проверено на 3.11), пакет `answer42` с PyPI, **>= 0.5.13**.
+  Причина: в 0.5.13 сборщик сирот работает и в HTTP-режиме, добавлена авто-очистка
+  каталогов сессий, а текст ошибок tool-call отдаёт сам upstream
+  (`_visible_tool_error`, с 0.5.7). На старых релизах занятый `session_id`
+  не освобождается сам (сессии-сироты живут вечно), а ошибки выглядят как
+  `Error executing tool <name>` без причины. Проверка: `answer42.sh check`.
 - 1С:Предприятие **8.3.27+** или **8.5+**; нужны `1cv8c` и `ibcmd`, желателен
   `ibsrv` (без него Answer42 уходит в `file-direct`).
 - Windows — **интерактивная desktop-сессия** пользователя: Answer42 запускает
@@ -30,25 +35,36 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 Linux:
 
 ```bash
-bash tools/answer42/answer42.sh install          # PyPI-сборка
-bash tools/answer42/answer42.sh install --fork   # editable-сборка из форка (ANSWER42_FORK_DIR)
+bash tools/answer42/answer42.sh install          # PyPI-сборка — канон
+bash tools/answer42/answer42.sh install --fork   # escape hatch: editable-сборка форка (ANSWER42_FORK_DIR)
 ```
 
 Windows-вариант создаёт `.venv-answer42` в корне проекта-потребителя и ставит
-`answer42[screenshot,windows-window-control]`; Linux-вариант — то же с
+`answer42[screenshot,windows-window-control]>=0.5.13`; Linux-вариант — то же с
 `[screenshot,linux-window-control]`. Каталог venv обязан быть в
 `.gitignore` потребителя.
+
+После установки проверьте свежесть сборки: `answer42.sh check` (или
+`answer42.ps1 check`) покажет установленную и последнюю версию и подскажет
+команду обновления.
 
 `answer42.sh` работает и в **Git Bash на Windows**: Windows-пути из `.env`
 нормализуются, сервис запускается через `Start-Process` (фоновый процесс MSYS
 не переживает выход шелла), а `stop` добивает владельца порта через `taskkill`.
 Канонический вариант для Windows — всё же `answer42.ps1`.
 
-### Сборка из форка
+### Локальные патчи: escape hatch
 
-Если нужны локальные патчи, ставится не PyPI-релиз, а форк
-(`<https://github.com/pZayash/answer42-mcp>`, ветка `fork-patches`; ветка `beta` —
-зеркало upstream). Мотив и состав патчей — `FORK.md` в чекауте форка.
+Канон — PyPI-релиз; форк нужен только если требуется **срочный локальный патч,
+которого нет в upstream**. Порядок действий: сначала MR в upstream, форк — как
+временная мера с планом снятия патча. Иначе сборочный форк отстаёт от релизов
+(upstream выпускает их раз в несколько дней) и требует ручного ребейза на каждом
+обновлении. Текст ошибок tool-call — пример такого патча, который уже не нужен:
+upstream закрыл его сам в 0.5.7 (`_visible_tool_error`).
+
+Форк — `<https://github.com/pZayash/answer42-mcp>`; ветка `beta` — зеркало
+upstream, ветка с патчами задаётся `ANSWER42_FORK_BRANCH` (пусто = текущая
+ветка чекаута). Мотив и состав патчей — `FORK.md` в чекауте форка.
 
 Важно: чек-аут и venv должны лежать в **латинском пути** — кириллица в пути
 ломает editable-установку (`.pth` с не-ASCII путём не подхватывается, `import
@@ -64,7 +80,7 @@ bash tools/answer42/answer42.sh install --fork
 Вручную (любая ОС):
 
 ```bash
-# чекаут: C:\GitHub\pzayash\answer42-mcp
+# чекаут, например C:\GitHub\pzayash\answer42-mcp
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -e ".[screenshot,windows-window-control]"
 
@@ -74,16 +90,13 @@ python -m venv .venv
 .venv/Scripts/python.exe scripts/build_cf.py src/client_cf src/mcp_1c/assets/MCPTestClient.cf
 ```
 
-Затем `ANSWER42_BIN` в `.env` потребителя указывает на бинарь venv форка;
-обновление с upstream — действием `update` (см. ниже), вручную — так:
+Затем `ANSWER42_BIN` в `.env` потребителя указывает на бинарь venv форка (и,
+если нужно, `ANSWER42_FORK_BRANCH` — на ветку с патчами). Обновление — действием
+`update` (см. ниже).
 
-```bash
-git fetch upstream --tags && git switch fork-patches && git rebase <новый-тег>
-git push --force-with-lease origin fork-patches
-```
-
-Проверка патча: ответ на заведомо битую ссылку
-(`open_navigation_link "e1cib/list/Catalog.Missing"`) должен содержать текст
+Проверка, что всё живо: `answer42.sh check` (у editable-сборки `channel:
+editable`) и ответ на заведомо битую ссылку
+(`open_navigation_link "e1cib/list/Catalog.Missing"`) — в нём должен быть текст
 ошибки 1С, а не голое `Error executing tool ...`.
 
 ## Ключи `.env`
@@ -94,9 +107,13 @@ git push --force-with-lease origin fork-patches
 | `ANSWER42_ACCOUNT_ID` | namespace credential-стора; **должен совпадать** с account в `~/.answer42-credentials.json` |
 | `ANSWER42_TOKEN` | Bearer для StreamableHTTP; только в `.env` |
 | `ANSWER42_EXTRA_ARGS` | доп. аргументы сервера; по умолчанию `--disable-rag` — RAG задерживает готовность |
-| `ANSWER42_BIN` | опционально: путь к `answer42(.exe)` — напр. бинарь venv форк-сборки |
+| `ONEC_MCP_SESSION_SCOPE_ID` | scope-режим: свой state-файл и lock на scope (v0.4.77+) |
+| `ANSWER42_BIN` | опционально: путь к `answer42(.exe)` — напр. бинарь venv форк-сборки (escape hatch) |
 
-Схема ключей — [`.env.example`](../../.env.example) потребителя.
+Схема ключей — [`.env.example`](../../.env.example) потребителя. Ключи
+`ANSWER42_FORK_*` нужны только для escape hatch (локальные патчи). Scope-режим
+включают, когда на машине может работать больше одного сервера Answer42: иначе
+процессы делят общий state и один может занять `session_id` другого.
 
 ## Логины баз
 
@@ -118,8 +135,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 Linux (и Git Bash на Windows) — то же через `.sh`:
 
 ```bash
-bash tools/answer42/answer42.sh start|status|stop|restart|smoke
+bash tools/answer42/answer42.sh start|status|stop|restart|smoke|check
 ```
+
+`status` показывает версию сборки и канал; `check` — отдельная проверка свежести
+(установленная версия vs последняя на PyPI):
+
+```bash
+bash tools/answer42/answer42.sh check
+# installed: 0.5.3 / latest: 0.5.13 / channel: editable / verdict: outdated
+# exit 0 — актуально, 1 — есть новее, 2 — не удалось определить (offline / нет пакета)
+```
+
+Версия берётся из метаданных того venv, где лежит `ANSWER42_BIN`; `status`
+дублирует строки `version`/`update_hint` и не падает, если PyPI недоступен.
 
 `start` проверяет только то, что процесс поднял порт, и возвращает управление;
 готовность эндпоинта (она наступает позже — инициализация Answer42) проверяется
@@ -141,7 +170,16 @@ bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 120 session_status
 `tools/mcp-call` подстановку `${VAR}` **не делает** — ему нужен literal-конфиг
 (`.cursor/mcp.json` потребителя, gitignored) с фактическими URL и токеном.
 
-## Обновление форк-сборки
+## Обновление сборки
+
+Сначала диагностика:
+
+```bash
+bash tools/answer42/answer42.sh check
+```
+
+PyPI-сборка обновляется тем же `install` (venv переиспользуется); форк —
+действием `update`:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 update [-Ref тег] [-Push] [-RestartService]
@@ -161,15 +199,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 ```
 
 Ключи `.env`: `ANSWER42_FORK_DIR` (чекаут форка), `ANSWER42_FORK_BRANCH`
-(`fork-patches`), `ANSWER42_FORK_REMOTE` (`upstream` — источник релизов),
-`ANSWER42_FORK_PUSH_REMOTE` (`origin`).
+(пусто = текущая ветка чекаута; напр. `fork-patches`), `ANSWER42_FORK_REMOTE`
+(`upstream` — источник релизов), `ANSWER42_FORK_PUSH_REMOTE` (`origin`).
 
 Что делает действие (одинаково в `.ps1` и `.sh`):
 
 - без `-Ref`/`--ref` берёт новейший тег upstream; если ветка уже основана на нём —
   сообщает «обновлять нечего» (повторный запуск безопасен);
 - неизвестный ref — внятная ошибка (exit 2), а не сырой `git fatal`;
-- ребейзит ветку с патчами и проверяет, что патч (`_tool_error_text`) на месте;
+- ребейзит ветку чекаута (имя — `ANSWER42_FORK_BRANCH`, пусто = текущая ветка;
+  зеркальные `beta`/`main`/`master` ребейзить отказывается) и печатает, какой
+  механизм текста ошибок есть в ветке: `_visible_tool_error` — upstream-фикс,
+  `_tool_error_text` — форк-патч; отсутствие обоих не ошибка (зеркало upstream);
   конфликт останавливает действие с подсказкой `git rebase --continue | --abort`;
 - пересобирает `MCPTestManager.cf` / `MCPTestClient.cf` и делает
   `pip install -e`;
@@ -229,8 +270,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
   `full`, `all`). `credentials_list` рекомендуется исключать из выдачи агенту.
 - `1С window geometry was not detected` — скриншот уходит в `fallback:
   full_display` (снимок всего экрана), это не ошибка запуска.
-- **Форк-сборка требует латинского пути** (editable `.pth` с кириллицей не
-  читается) и локальной сборки CF в `src/mcp_1c/assets/`.
+- **Форк-сборка (escape hatch) требует латинского пути** (editable `.pth`
+  с кириллицей не читается) и локальной сборки CF в `src/mcp_1c/assets/`.
+- **Занятый `session_id` до 0.5.13 не освобождался сам:** сборщик сирот
+  запускался только в stdio-режиме, поэтому у HTTP-сервиса накапливались мёртвые
+  сессии и залоченные `%TEMP%\answer42\sessions\<id>` (отсюда «чужие» окна 1С
+  на другой публикации и `Неверно задана навигационная ссылка`). С 0.5.13 репер
+  работает и в HTTP-режиме, каталоги сессий чистит sweep; профилактика —
+  уникальный `session_id` на поток + pre-flight `sessions_list`.
 - **После неудачной навигации остаётся модальное окно ошибки** — следующая
   навигация в той же сессии падает. Закрыть окно (`click_button` с `OK`) или
   перезапустить сессию.
@@ -239,18 +286,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/answer42/answer42.ps1 
 
 ## Ограничения сборок
 
-- **Пустой текст ошибки tool-call — только у PyPI-сборки** (0.5.3): при сбое
-  ответ приходит как `Error executing tool <name>` без причины
-  (`structured_content: null`) — MCP-SDK 2.x сохраняет текст лишь у `ToolError`.
-  В **ветке патчей форка** это исправлено: ответ несёт сообщение 1С и
-  `client_diagnostics`. Если текст снова пустой — работает не форк-сборка:
-  проверить `ANSWER42_BIN` и выполнить `answer42.ps1 update`.
-  Диагностика для PyPI-сборки: `current_error_info`, `user_messages`,
-  `window_command_interface`, лог сервера.
+- **Пустой текст ошибки tool-call — признак старой сборки.** MCP-SDK 2.x
+  сохраняет текст только у `ToolError`, поэтому релизы до 0.5.7 отдавали на сбой
+  `Error executing tool <name>` без причины (`structured_content: null`).
+  С 0.5.7 upstream сам разворачивает `__cause__`/`__context__`
+  (`_visible_tool_error`) и возвращает сообщение 1С + `client_diagnostics`.
+  Если текст пустой — проверить версию (`answer42.sh check`) и обновить сборку,
+  а не искать «не тот бинарь». Для диагностики: `current_error_info`,
+  `user_messages`, `window_command_interface`, лог сервера.
 - Форма пользовательской настройки «Изменить форму» автоматизируется частично
   (кнопка «Добавить поля» может не находиться).
 
 ## Лицензия
 
 Answer42 — MIT (42Clouds, S. Kosolapov). Пакет ставится из PyPI, исходники в
-репозиторий потребителя не вендорятся.
+репозиторий потребителя не вендорятся; форк — опциональный escape hatch
+(`install --fork`), тоже не вендорится.

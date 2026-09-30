@@ -306,6 +306,23 @@ if [[ -e "$HARNESS_ROOT" ]]; then
       grep . <<<"$overlap" | head -5 | sed 's/^/       /'
     fi
   fi
+
+  # 12. answer42 freshness (optional tool; WARN only). Свежесть важна: до 0.5.13
+  #     HTTP-сервис не запускал сборщик сирот, и занятые session_id не
+  #     освобождались сами. Сеть проверки — с таймаутом внутри version_check.py.
+  _a42_field() { sed -n "s/^$2: //p" "$1" | head -1; }
+  a42_script="$CONSUMER_ROOT/tools/answer42/answer42.sh"
+  if [[ -f "$a42_script" ]]; then
+    a42log="$(mktemp)"
+    ANSWER42_ROOT="$CONSUMER_ROOT" bash "$a42_script" check >"$a42log" 2>&1
+    a42code=$?
+    case "$a42code" in
+      0) ok "answer42 $(_a42_field "$a42log" installed) (latest $(_a42_field "$a42log" latest))" ;;
+      1) warn "answer42 outdated: installed $(_a42_field "$a42log" installed) -> latest $(_a42_field "$a42log" latest) ($(_a42_field "$a42log" channel)) - answer42.sh install|update" ;;
+      *) info "answer42: версия не определена (не установлен / offline)" ;;
+    esac
+    rm -f "$a42log"
+  fi
 fi
 
 echo "=== kit-doctor: $([ "$FAIL" -eq 0 ] && echo PASS || echo FAIL) ==="

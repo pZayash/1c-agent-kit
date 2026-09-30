@@ -7,9 +7,10 @@
 #
 # Примеры:
 #   bash tools/answer42/answer42.sh install              # PyPI-сборка
-#   bash tools/answer42/answer42.sh install --fork       # editable-сборка из форка
+#   bash tools/answer42/answer42.sh install --fork       # editable-сборка из форка (escape hatch)
 #   bash tools/answer42/answer42.sh start|stop|restart|status|smoke
-#   bash tools/answer42/answer42.sh update [--ref v0.5.4] [--push] [--no-restart]
+#   bash tools/answer42/answer42.sh check                # версия: установленная vs последняя на PyPI
+#   bash tools/answer42/answer42.sh update [--ref v0.5.13] [--push] [--no-restart]
 set -euo pipefail
 
 ACTION="status"
@@ -20,7 +21,7 @@ FORK_INSTALL=0
 
 while (($#)); do
     case "$1" in
-        install|start|stop|restart|status|smoke|update) ACTION="$1" ;;
+        install|start|stop|restart|status|smoke|check|update) ACTION="$1" ;;
         --fork) FORK_INSTALL=1 ;;
         --ref) REF="${2:-}"; shift ;;
         --push) PUSH=1 ;;
@@ -31,12 +32,13 @@ while (($#)); do
     shift
 done
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${ANSWER42_ROOT:-}"
 if [[ -z "$ROOT" ]]; then
     # Корень ищем вверх по .env.example: скрипт зовут и как tools/answer42/…
     # (симлинк kit), и как harness/tools/answer42/… — фиксированное "../.."
     # в одном из этих случаев даёт harness/ вместо корня потребителя.
-    ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    ROOT="$SCRIPT_DIR"
     for _ in 1 2 3 4 5 6; do
         [[ -f "$ROOT/.env.example" ]] && break
         ROOT="$(dirname "$ROOT")"
@@ -76,8 +78,13 @@ ACCOUNT_ID="$(env_value ANSWER42_ACCOUNT_ID "answer42")"
 TOKEN="$(env_value ANSWER42_TOKEN "")"
 BIN="$(norm_path "$(env_value ANSWER42_BIN "$DEFAULT_BIN")")"
 EXTRA_ARGS="$(env_value ANSWER42_EXTRA_ARGS "")"
+# Scope-режим Answer42 (v0.4.77+): свой STATE_FILE и лок на scope вместо общего
+# legacy-состояния — второй живой сервер не сможет занять те же session_id.
+SCOPE_ID="$(env_value ONEC_MCP_SESSION_SCOPE_ID "")"
 FORK_DIR="$(norm_path "$(env_value ANSWER42_FORK_DIR "")")"
-FORK_BRANCH="$(env_value ANSWER42_FORK_BRANCH "fork-patches")"
+# Пусто = текущая ветка чекаута: имя ветки с патчами — локальная конвенция
+# потребителя (fork-patches, kpsr, …), жёсткий дефолт ломал update.
+FORK_BRANCH="$(env_value ANSWER42_FORK_BRANCH "")"
 FORK_REMOTE="$(env_value ANSWER42_FORK_REMOTE "upstream")"
 FORK_PUSH_REMOTE="$(env_value ANSWER42_FORK_PUSH_REMOTE "origin")"
 
@@ -138,6 +145,69 @@ venv_python() {
         [[ -x "$c" ]] && { printf '%s' "$c"; return 0; }
     done
     return 1
+}
+
+# Интерпретатор для version_check.py: python из venv рядом с BIN, иначе системный.
+bin_python() {
+    local venv_root
+    venv_root="$(dirname "$(dirname "$(norm_path "$BIN")")")"
+    if venv_python "$venv_root" 2>/dev/null; then
+        return 0
+    fi
+    command -v python3 || command -v python
+}
+
+run_version_check() {
+    local py
+    if ! py="$(bin_python)"; then
+        echo "installed: ?"
+        echo "latest: ?"
+        echo "channel: unknown"
+        echo "verdict: unknown"
+        echo "reason: не найден python (venv Answer42 не установлен?)"
+        return 2
+    fi
+    "$py" "$SCRIPT_DIR/version_check.py" "$@"
+}
+
+parse_field() { printf '%s\n' "$1" | sed -n "s/^$2: //p"; }
+
+# Подсказка обновления зависит от канала: PyPI обновляется install, форк — update.
+update_hint() {
+    case "$1" in
+        editable|local) printf 'bash tools/answer42/answer42.sh update   # форк/editable-сборка' ;;
+        *) printf 'bash tools/answer42/answer42.sh install   # PyPI-сборка' ;;
+    esac
+}
+
+# Строка версии для status: не роняет команду при offline/отсутствии пакета.
+print_version_summary() {
+    local vout code=0 installed latest channel verdict
+    vout="$(run_version_check)" || code=$?
+    installed="$(parse_field "$vout" installed)"
+    latest="$(parse_field "$vout" latest)"
+    channel="$(parse_field "$vout" channel)"
+    verdict="$(parse_field "$vout" verdict)"
+    echo "version     : ${installed:-?} → latest ${latest:-?} (${verdict:-unknown}, ${channel:-unknown})"
+    if [[ "$verdict" == "outdated" ]]; then
+        echo "update_hint : $(update_hint "$channel")"
+    elif [[ "$verdict" == "unknown" ]]; then
+        echo "update_hint : версия не определена — bash tools/answer42/answer42.sh check"
+    fi
+}
+
+check_version_action() {
+    echo "bin         : $BIN"
+    if [[ -n "$FORK_DIR" ]]; then
+        echo "fork_dir    : $FORK_DIR"
+    fi
+    local vout code=0
+    vout="$(run_version_check)" || code=$?
+    printf '%s\n' "$vout"
+    if [[ "$(parse_field "$vout" verdict)" == "outdated" ]]; then
+        echo "hint        : $(update_hint "$(parse_field "$vout" channel)")"
+    fi
+    return "$code"
 }
 
 # Прерванная установка оставляет в site-packages каталоги ~<pkg> — pip потом
@@ -222,6 +292,7 @@ start_service() {
         A42_OUT="$(cygpath -w "$OUT_LOG")" \
         A42_ERR="$(cygpath -w "$ERR_LOG")" \
         A42_ARGS="$(printf '%s\n' "${args[@]}")" \
+        ONEC_MCP_SESSION_SCOPE_ID="$SCOPE_ID" \
         powershell -NoProfile -Command '
             $argv = @($env:A42_ARGS.Split("`n") | Where-Object { $_ -ne "" })
             $p = Start-Process -FilePath $env:A42_BIN -ArgumentList $argv -PassThru -WindowStyle Hidden `
@@ -230,7 +301,7 @@ start_service() {
             Set-Content -LiteralPath (Join-Path $env:A42_DIR "http.pid") -Value $p.Id -Encoding ASCII
         '
     else
-        (cd "$STATE_DIR" && nohup "$BIN" "${args[@]}" \
+        (cd "$STATE_DIR" && ONEC_MCP_SESSION_SCOPE_ID="$SCOPE_ID" nohup "$BIN" "${args[@]}" \
             >"$OUT_LOG" 2>"$ERR_LOG" & echo $! >"$PID_FILE")
     fi
 
@@ -290,9 +361,28 @@ update_fork() {
         exit 2
     fi
 
+    local branch="$FORK_BRANCH"
+    if [[ -z "$branch" ]]; then
+        branch="$(git -C "$FORK_DIR" rev-parse --abbrev-ref HEAD)"
+        case "$branch" in
+            HEAD)
+                echo "В $FORK_DIR detached HEAD — переключитесь на ветку патчей или задайте ANSWER42_FORK_BRANCH." >&2
+                exit 2 ;;
+            beta|main|master)
+                echo "Текущая ветка '$branch' — зеркало upstream, ребейзить её нельзя. Задайте ANSWER42_FORK_BRANCH (напр. fork-patches)." >&2
+                exit 2 ;;
+        esac
+    fi
     local current; current="$(git -C "$FORK_DIR" rev-parse --abbrev-ref HEAD)"
-    if [[ "$current" != "$FORK_BRANCH" ]]; then
-        git -C "$FORK_DIR" checkout "$FORK_BRANCH"
+    if [[ "$current" != "$branch" ]]; then
+        if git -C "$FORK_DIR" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+            git -C "$FORK_DIR" checkout "$branch"
+        else
+            echo "Ветки '$branch' нет в $FORK_DIR. Доступные ветки:" >&2
+            git -C "$FORK_DIR" for-each-ref --format='  %(refname:short)' refs/heads >&2
+            echo "Задайте ANSWER42_FORK_BRANCH=<ветка> в .env." >&2
+            exit 2
+        fi
     fi
     local dirty; dirty="$(git -C "$FORK_DIR" status --porcelain)"
     [[ -z "$dirty" ]] || { echo "В чекауте форка есть незакоммиченные изменения — разберитесь вручную:" >&2; printf '%s\n' "$dirty" >&2; exit 2; }
@@ -302,19 +392,27 @@ update_fork() {
     target_sha="$(git -C "$FORK_DIR" rev-parse "$target^{commit}")"
     base_sha="$(git -C "$FORK_DIR" merge-base HEAD "$target^{commit}")"
     if [[ "$target_sha" == "$base_sha" ]]; then
-        echo "$FORK_BRANCH уже основана на $target ($(printf '%s' "$target_sha" | cut -c1-8)) — обновлять нечего."
+        echo "$branch уже основана на $target ($(printf '%s' "$target_sha" | cut -c1-8)) — обновлять нечего."
     else
-        echo "rebase $FORK_BRANCH → $target…"
+        echo "rebase $branch → $target…"
         if ! git -C "$FORK_DIR" rebase "$target"; then
             echo "rebase не прошёл (конфликт?). Разрешить вручную в $FORK_DIR: git rebase --continue | --abort" >&2
             exit 1
         fi
     fi
 
-    grep -q "_tool_error_text" "$FORK_DIR/src/mcp_1c/server.py" || {
-        echo "Патч (_tool_error_text) не найден в $target — проверить ветку $FORK_BRANCH" >&2
-        exit 1
-    }
+    local markers=""
+    if grep -q "_visible_tool_error" "$FORK_DIR/src/mcp_1c/server.py" 2>/dev/null; then
+        markers="_visible_tool_error (upstream, v0.5.7+)"
+    fi
+    if grep -q "_tool_error_text" "$FORK_DIR/src/mcp_1c/server.py" 2>/dev/null; then
+        markers="${markers:+$markers, }_tool_error_text (форк-патч)"
+    fi
+    if [[ -n "$markers" ]]; then
+        echo "Текст ошибок tool-call: $markers"
+    else
+        echo "Примечание: ни форк-патча, ни upstream-фикса текста ошибок в ветке нет — это зеркало upstream. Продолжаю."
+    fi
 
     local py; py="$(venv_python "$FORK_DIR/.venv")" || {
         echo "Нет venv форка ($FORK_DIR/.venv). Сначала: answer42.sh install --fork" >&2
@@ -333,8 +431,8 @@ update_fork() {
     "$py" -m pip install -q -e "$FORK_DIR[screenshot,linux-window-control]"
 
     if ((PUSH)); then
-        echo "push → $FORK_PUSH_REMOTE/$FORK_BRANCH…"
-        git -C "$FORK_DIR" push --force-with-lease "$FORK_PUSH_REMOTE" "$FORK_BRANCH"
+        echo "push → $FORK_PUSH_REMOTE/$branch…"
+        git -C "$FORK_DIR" push --force-with-lease "$FORK_PUSH_REMOTE" "$branch"
     fi
     if ((was_running)) && ((RESTART)); then
         start_service
@@ -347,21 +445,26 @@ usage() {
 Использование: bash tools/answer42/answer42.sh <действие> [опции]
 
 Действия:
-  install [--fork]   установить сборку: PyPI в .venv-answer42 (по умолчанию)
-                     или editable-сборку форка (ANSWER42_FORK_DIR) + локальные CF
+  install [--fork]   установить сборку: PyPI >=0.5.13 в .venv-answer42 (по
+                     умолчанию) или editable-сборку форка (ANSWER42_FORK_DIR)
   start              запустить HTTP-сервис (ANSWER42_MCP_URL/TOKEN, фоном в .tmp/answer42)
   stop               остановить сервис
   restart            stop + start
-  status             pid, порт, ответ эндпоинта
+  status             pid, порт, ответ эндпоинта, версия сборки
+  check              версия: установленная vs последняя на PyPI (exit 0 — ок,
+                     1 — есть новее, 2 — не удалось определить)
   smoke              smoke-проверка через tools/answer42/smoke.py
-  update             форк: fetch → rebase на новейший тег (или --ref) → проверка
-                     патча → пересборка CF → pip install -e
+  update             форк (escape hatch): fetch → rebase на новейший тег
+                     (или --ref) → пересборка CF → pip install -e
 
 Опции:
   --ref TAG          update: ref upstream вместо новейшего тега
   --push             update: запушить ветку в ANSWER42_FORK_PUSH_REMOTE
   --no-restart       update: не поднимать сервис обратно
   -h, --help         эта справка
+
+Ветка форка по умолчанию — текущая ветка чекаута; имя задаётся
+ANSWER42_FORK_BRANCH (fork-patches, kpsr, …).
 EOF
 }
 
@@ -372,7 +475,7 @@ case "$ACTION" in
         else
             python3 -m venv "$VENV_DIR"
             "$PYTHON" -m pip install --upgrade pip
-            "$PYTHON" -m pip install "answer42[screenshot,linux-window-control]"
+            "$PYTHON" -m pip install "answer42[screenshot,linux-window-control]>=0.5.13"
             echo "Готово: $VENV_DIR (проверка: $DEFAULT_BIN --version)"
         fi
         ;;
@@ -387,6 +490,7 @@ case "$ACTION" in
         echo "url         : $MCP_URL"
         echo "account_id  : $ACCOUNT_ID"
         echo "bin         : $BIN"
+        print_version_summary
         echo "pid         : $(cat "$PID_FILE" 2>/dev/null || echo '-')"
         echo "port_open   : $([[ -f "$PID_FILE" ]] && port_open && echo True || echo False)"
         echo "http_status : $code"
@@ -399,6 +503,7 @@ case "$ACTION" in
     smoke)
         "$(smoke_python)" "$ROOT/tools/answer42/smoke.py" --bin "$BIN" --account-id "$ACCOUNT_ID"
         ;;
+    check) check_version_action ;;
     update) update_fork ;;
     help) usage ;;
 esac
