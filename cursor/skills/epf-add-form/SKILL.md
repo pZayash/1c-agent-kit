@@ -49,7 +49,8 @@ powershell.exe -NoProfile -File .cursor/skills/epf-add-form/scripts/add-form.ps1
 
 ## Что модифицируется
 
-- `<SrcDir>/<ProcessorName>.xml` — добавляется `<Form>` в `ChildObjects`, обновляется `DefaultForm` (автоматически если это первая форма, или явно при `--main`)
+- `<SrcDir>/<ProcessorName>.xml` — добавляется `<Form>` в `ChildObjects`, обновляется
+  `DefaultForm` (автоматически если это первая форма, или явно при `--main`)
 
 ## Детали
 
@@ -57,4 +58,5 @@ powershell.exe -NoProfile -File .cursor/skills/epf-add-form/scripts/add-form.ps1
 - UsePurposes: PlatformApplication, MobilePlatformApplication
 - AutoCommandBar с id=-1
 - Реквизит "Объект" с MainAttribute=true
-- BSL-модуль содержит 5 регионов: ОбработчикиСобытийФормы, ОбработчикиСобытийЭлементовФормы, ОбработчикиКомандФормы, ОбработчикиОповещений, СлужебныеПроцедурыИФункции
+- BSL-модуль содержит 5 регионов: ОбработчикиСобытийФормы, ОбработчикиСобытийЭлементовФормы,
+  ОбработчикиКомандФормы, ОбработчикиОповещений, СлужебныеПроцедурыИФункции

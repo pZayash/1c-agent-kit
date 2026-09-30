@@ -96,12 +96,24 @@ After completing all artifacts, summarize:
 
 - Follow the `instruction` field from `openspec instructions` for each artifact type
 - The schema defines what each artifact should contain - follow it
-- **IMPORTANT**: tasks.md — конкретные пошаговые шаги реализации (ЧТО, ГДЕ, КАК: какие методы/процедуры менять), а не только границы. Исполнитель — слабая модель, ей нужны явные шаги. Каждый шаг — проверяемый чекбокс. Подробнее: `openspec/config.yaml` → `rules.tasks`
+- **IMPORTANT**: tasks.md — конкретные пошаговые шаги реализации (ЧТО, ГДЕ, КАК: какие
+  методы/процедуры менять), а не только границы. Исполнитель — слабая модель, ей нужны
+  явные шаги. Каждый шаг — проверяемый чекбокс. Подробнее: `openspec/config.yaml` →
+  `rules.tasks`
 - Read dependency artifacts for context before creating new ones
 - Use `template` as the structure for your output file - fill in its sections
-- **proposal.md**: после того как известен полный набор артефактов изменения, включить раздел **«Артефакты»** (оглавление) со ссылками на `design.md`, `tasks.md` и каждый `specs/**/spec.md` — относительные пути для Obsidian; если `proposal` создан раньше остальных, обновить его перед шагом 5 (финальный статус). Подробнее: `openspec/config.yaml` → `rules.proposal`
-- **tasks.md**: не добавлять чекбоксы про коммит в git, сообщение коммита, staging, push, ветку или PR — см. `rules` из CLI и `openspec/config.yaml` (`rules.tasks`)
-- **tasks.md — только агентские задачи**: правки кода, метаданных, bsl-check. Ручное тестирование, проверки в 1С, задачи оператора — в отдельный файл `operator-checklist.md` в папке change (заголовок `# Оператор: ручная проверка` + чекбоксы `- [ ]`). Файл не парсится openspec CLI, не входит в прогресс. Если ручных задач нет — не создавать. Подробнее: `openspec/config.yaml` → `rules.tasks`
+- **proposal.md**: после того как известен полный набор артефактов изменения, включить
+  раздел **«Артефакты»** (оглавление) со ссылками на `design.md`, `tasks.md` и каждый
+  `specs/**/spec.md` — относительные пути для Obsidian; если `proposal` создан раньше
+  остальных, обновить его перед шагом 5 (финальный статус). Подробнее:
+  `openspec/config.yaml` → `rules.proposal`
+- **tasks.md**: не добавлять чекбоксы про коммит в git, сообщение коммита, staging, push,
+  ветку или PR — см. `rules` из CLI и `openspec/config.yaml` (`rules.tasks`)
+- **tasks.md — только агентские задачи**: правки кода, метаданных, bsl-check. Ручное
+  тестирование, проверки в 1С, задачи оператора — в отдельный файл `operator-checklist.md`
+  в папке change (заголовок `# Оператор: ручная проверка` + чекбоксы `- [ ]`). Файл не
+  парсится openspec CLI, не входит в прогресс. Если ручных задач нет — не создавать.
+  Подробнее: `openspec/config.yaml` → `rules.tasks`
 - **IMPORTANT**: `context` and `rules` are constraints for YOU, not content for the file
   - Do NOT copy `<context>`, `<rules>`, `<project_context>` blocks into the artifact
   - These guide what you write, but should never appear in the output

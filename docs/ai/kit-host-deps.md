@@ -54,6 +54,15 @@ CLI: `npm install -g @fission-ai/openspec@1.2.0` (пин как в
 
 После winget — **новое** окно терминала (PATH).
 
+## PowerShell не в PATH (Windows)
+
+`.sh`-обёртки kit на Windows не зовут `powershell.exe` вслепую, а резолвят
+интерпретатор: PATH → `%SystemRoot%\System32\WindowsPowerShell\v1.0` →
+`/c/Windows/...` → `pwsh`. В урезанном PATH (агентный/GUI-терминал Zed,
+sandbox) печатается `WARN: powershell.exe не в PATH - использую <путь>` —
+это норма, скрипт работает. Если не найден ни один вариант, обёртка делает
+`exit 1` с `ERROR: PowerShell не найден`; тогда — запуск `.ps1` из PowerShell.
+
 ## Warn (скрипт не ставит)
 
 - `.env` в корне потребителя

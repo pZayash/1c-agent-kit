@@ -272,11 +272,11 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   (`git -C harness status`); `kit-doctor` предупреждает «harness working
   tree dirty». Лечение прежнее: Developer Mode / SeCreateSymbolicLinkPrivilege.
 - **Старый worktree** — merge → hydrate harness → `bootstrap-kit` → verify.
-- **Cursor UI не видит skill (slash)** — junctions в `.cursor/skills`, UI
-  читает `.agents/skills`. `bootstrap-kit` делает junction/symlink
-  `.agents/skills` → `.cursor/skills` (и `.claude/skills`). Не копировать
-  потребительский `setup-project-symlinks.sh` целиком (`src/cf` — layout
-  потребителя).
+- **Агент/UI не видит skill (Zed, Cursor slash)** — читается `.agents/skills`
+  (у Zed это корень скиллов проекта), а не `.cursor/skills`. `bootstrap-kit`
+  делает junction/symlink `.agents/skills` → `.cursor/skills`
+  (и `.claude/skills`). Не копировать потребительский
+  `setup-project-symlinks.sh` целиком (`src/cf` — layout потребителя).
 - **Нет node / openspec / rtk на голом Windows-worktree** — слот Docker
   уже содержит их в образе; 42/`features` — нет. Скрипт
   `init-kit-deps` (`-Install`). **Не** `openspec init` (свои
@@ -314,7 +314,7 @@ bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills
 
 **Срез A:** caveman, openspec-*, explore, …  
 **Срез B (workflow):** handoff, close-chat, load-changed-files, bsl-check,
-architect-apply, mailbox, review, review-request, retro.
+architect-apply, review, review-request, retro.
 
 **Потребитель** после cc-1c link:
 
@@ -343,7 +343,7 @@ Zed/ACP — `node harness/pi/scripts/patch-pi-acp-session-title.mjs`.
 
 ## Workflow tools (срез B)
 
-`tools/mailbox`, `tools/bsl-check`, `tools/sandbox`, `tools/load-changed-files`,
+`tools/bsl-check`, `tools/sandbox`, `tools/load-changed-files`,
 `tools/mcp-call` (JSON-RPC к MCP-серверам 1С, в т.ч. streamable HTTP),
 `tools/answer42` (UI 1С через клиент тестирования: [README](tools/answer42/README.md),
 [канон](docs/ai/answer42.md)), `tools/git-partial-stage.py` — в [tools/](tools/).

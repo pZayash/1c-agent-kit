@@ -18,7 +18,8 @@ if kit_is_windows; then
   args=(-ConsumerRoot "$root" -HarnessRel "$HARNESS_REL")
   [[ -f "$root/$LOCAL_MANIFEST" ]] && args+=(-LocalManifest "$root/$LOCAL_MANIFEST")
   [[ "$DRY_RUN" == "1" ]] && args+=(-DryRun)
-  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
+  ps_exe="$(kit_powershell)" || { echo "ERROR: PowerShell не найден (Windows-ветка kit идёт через .ps1)" >&2; exit 1; }
+  exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi
 
 CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"

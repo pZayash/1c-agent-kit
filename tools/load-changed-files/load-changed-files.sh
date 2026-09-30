@@ -45,6 +45,11 @@
 #   -H, --human-mode            Старый режим: закрыть и переоткрыть конфигуратор
 #   -C, --open-client           Быстрый тест: закрыть конфигуратор/клиент, загрузить,
 #                               обновить БД (-U) и открыть тонкий клиент 1С (1cv8c.exe)
+#       --client-keys KEYS      Дополнительные ключи запуска тонкого клиента (строка целиком),
+#                               напр. --client-keys '/C"ЗапуститьОбновлениеИнформационнойБазы"'
+#       --refresh-variants      После загрузки актуализировать варианты отчётов: клиент с ключом
+#                               БСП ЗапуститьОбновлениеИнформационнойБазы (нужен, если добавлен
+#                               или изменён settingsVariant — иначе варианта нет в списке на форме)
 #   -u, --auto-unsupport        Автоматически снимать с поддержки загружаемые объекты
 #   -U, --update-db             Обновить конфигурацию базы данных после загрузки
 #       --list-file PATH        Фолбэк: явный список (заменяет git); PATH=- для stdin
@@ -99,6 +104,10 @@
 #                             (типовая битая форма УНФ при -F / Configuration.xml)
 #   LOAD_VERBOSE              true — то же, что --verbose
 #   LOG_FILE_LIST_THRESHOLD   Порог поименного вывода файлов в -H/-C/--verbose (по умолчанию: 100)
+#   IB_LOAD_STRICT            true — защиты «ворктри» и «чужая грязь conf/» дают жёсткий
+#                             отказ (exit) вместо WARN (по умолчанию: false)
+#   IB_LOAD_FROM_WORKTREE     true — осознанное разрешение грузить из ворктри
+#                             (гасит защиту «ворктри», по умолчанию: false)
 #
 # ПРИМЕРЫ:
 #   ./load-changed-files.sh                           # Использует настройки из .env
@@ -322,10 +331,42 @@ resolve_ibcmd_default() {
     fi
 }
 
+# PID процесса автономного сервера (ibsrv): из IBSRV_PID_FILE,
+# дефолт .tmp/ibsrv/ibsrv.pid (пишет скилл db-server).
+ibcmd_remote_pid() {
+    local pid_file="${IBSRV_PID_FILE:-.tmp/ibsrv/ibsrv.pid}"
+    local pid root="${repo_path:-}"
+    # Функция вызывается до вычисления repo_path — считаем корень сами.
+    if [[ -z "$root" ]]; then
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(pwd)
+    fi
+    # Относительный путь — от корня потребителя, не от CWD вызова.
+    if [[ "$pid_file" != /* && ! "$pid_file" =~ ^[A-Za-z]: ]]; then
+        pid_file="$root/$pid_file"
+    fi
+    [[ -f "$pid_file" ]] || return 1
+    pid=$(tr -d '[:space:]' < "$pid_file")
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$pid"
+}
+
 # Аргументы подключения к ИБ для ibcmd (--db-path для файловой, --dbms/... для серверной)
 build_ibcmd_db_args() {
     IBCMD_DB_ARGS=""
     local conn="$IB_CONNECTION" p
+    # Автономный сервер (ibsrv): работа через шлюз администрирования `--pid`.
+    # Файловую ИБ держит сервер — монопольный доступ не нужен, /UpdateDBCfg
+    # конфигуратором через /S на автономном сервере рвёт сеанс.
+    if [[ -n "${IBSRV_PID_FILE:-}" ]]; then
+        if ! p=$(ibcmd_remote_pid); then
+            log "ERROR" "ibcmd (автономный сервер): нет PID в IBSRV_PID_FILE=${IBSRV_PID_FILE}"
+            log "ERROR" "Поднимите узел: python .cursor/skills/db-server/scripts/db-server.py -Action start"
+            return 1
+        fi
+        IBCMD_DB_ARGS="--pid=$p"
+        log "INFO" "ibcmd: автономный сервер, шлюз администрирования --pid=$p"
+        return 0
+    fi
     if [[ "$conn" =~ ^[[:space:]]*/[Ff] ]]; then
         p=$(echo "$conn" | sed -E 's|^[[:space:]]*/[Ff][[:space:]]*||' | tr -d '"')
         if [[ "${PROJECT_OS}" == "linux" ]]; then
@@ -370,12 +411,13 @@ ibcmd_run() {
     run_1c_command "$cmd"
 }
 
-# Частичный импорт conf: список полных путей файлов подаётся ibcmd через stdin
+# Частичный импорт conf: список файлов подаётся ibcmd через stdin
 # (документированный способ: type fileList.lst | ibcmd infobase config import files --base-dir ...).
+# Пути в списке — ОТНОСИТЕЛЬНЫЕ --base-dir (полные пути платформа ищет в корне загрузки).
 # Без лимита длины командной строки.
 ibcmd_import_conf() {
     local base_dir_cmd="$1"
-    local base_dir_unix="$2"   # unix-путь base-dir для сборки полных путей в списке
+    local base_dir_unix="$2"   # unix-путь base-dir (для проверки существования файлов)
     local no_check="" listfile rel full
     [[ "$IBCMD_NO_CHECK" == "true" ]] && no_check="--no-check"
 
@@ -386,12 +428,7 @@ ibcmd_import_conf() {
     : > "$listfile_src"
     while IFS= read -r rel || [[ -n "$rel" ]]; do
         [[ -z "$rel" ]] && continue
-        full="$base_dir_unix/$rel"
-        if [[ "${PROJECT_OS}" == "linux" ]]; then
-            printf '%s\n' "$full" >> "$listfile_src"
-        else
-            printf '%s\n' "$(unix_to_win_path "$full")" >> "$listfile_src"
-        fi
+        printf '%s\n' "$rel" >> "$listfile_src"
     done < temp_changed_files.txt
     if [[ "${PROJECT_OS}" == "linux" ]]; then
         mv "$listfile_src" "$listfile"
@@ -583,6 +620,12 @@ diagnose_load_failure() {
 
 # Управление Apache и процессами 1С — tools/os/apache.sh, tools/os/process-1c.sh
 
+# ИБ на сервере (`/S`): файловую базу держит Apache (wsap24), серверную — нет.
+# Для /S публикацию останавливать не нужно (ни -U, ни движку ibcmd).
+ib_connection_is_file() {
+    [[ "${IB_CONNECTION:-}" =~ ^[[:space:]]*/[Ff] ]]
+}
+
 # Windows: помимо APACHE_SERVICE_NAME ИБ могут публиковать другие службы Apache/httpd
 # (вторая публикация держит HTTP-сеансы и мешает эксклюзивному /UpdateDBCfg).
 # apache.sh потребителя управляет только одной службой — предупреждаем заранее.
@@ -600,6 +643,155 @@ warn_other_apache_services() {
     done <<< "$names"
     log "WARN" "Они тоже публикуют ИБ и держат HTTP-сеансы — /UpdateDBCfg может упасть"
     log "WARN" "на «обнаружены клиенты, работающие по HTTP» (см. UPDATE_DB_FORCE_SESSIONS)."
+}
+
+# Канонизация пути ворктри для сравнения (git worktree list ↔ rev-parse --show-toplevel).
+# Windows/MSYS: cygpath -u + ASCII-lower (регистр буквы диска/пути). Linux: realpath -m.
+normalize_worktree_path() {
+    local p="$1"
+    case "${PROJECT_OS}" in
+        linux)
+            realpath -m "$p" 2>/dev/null || printf '%s\n' "$p"
+            ;;
+        windows)
+            if command -v cygpath >/dev/null 2>&1; then
+                p=$(cygpath -u "$p" 2>/dev/null || printf '%s\n' "$p")
+            fi
+            printf '%s' "$p" | tr '\\' '/' | sed 's|/*$||' | tr '[:upper:]' '[:lower:]'
+            ;;
+        *)
+            printf '%s' "$p" | tr '\\' '/' | sed 's|/*$||'
+            ;;
+    esac
+}
+
+# Значение флага — истина: true/1/yes/on (регистронезависимо). Сообщение защиты 1
+# говорит «IB_LOAD_FROM_WORKTREE=1», поэтому принимаем и 1, и true.
+flag_is_true() {
+    case "${1:-}" in
+        true|1|yes|on|TRUE|True|YES|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ── Защита 1: запуск не из главного чекаута ────────────────────────────────────
+# Загрузка из ворктри делает конфигурацию ИБ равной дампу ЭТОГО ворктри: объекты
+# других ворктри исчезают из метаданных. Главный = первая запись
+# `git worktree list --porcelain`. Нет git / отвязанный HEAD — тихо пропускаем.
+guard_load_from_worktree() {
+    local wt_main wt_cur main_norm cur_norm
+    wt_main=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{ sub(/^worktree /,""); print; exit }')
+    [[ -n "$wt_main" ]] || return 0
+    wt_cur=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+    [[ -n "$wt_cur" ]] || return 0
+    main_norm=$(normalize_worktree_path "$wt_main")
+    cur_norm=$(normalize_worktree_path "$wt_cur")
+    [[ -n "$main_norm" && -n "$cur_norm" ]] || return 0
+    [[ "$main_norm" == "$cur_norm" ]] && return 0
+    flag_is_true "$IB_LOAD_FROM_WORKTREE" && return 0
+
+    local msg="загрузка из ворктри подменит конфигурацию ИБ дампом этого ворктри; закоммить и грузи из главного чекаута, либо IB_LOAD_FROM_WORKTREE=1"
+    if flag_is_true "$IB_LOAD_STRICT"; then
+        log "ERROR" "$msg"
+        log "ERROR" "Главный чекаут: $wt_main"
+        log "ERROR" "Текущий ворктри: $wt_cur"
+        exit 21
+    fi
+    log "WARN" "$msg"
+    log "WARN" "Главный чекаут: $wt_main"
+    log "WARN" "Текущий ворктри: $wt_cur"
+}
+
+# ── Защита 2: чужая незакоммиченная грязь conf/ в других ворктри ───────────────
+# Полная загрузка (-F) вытесняет чужую грязь из метаданных ИБ; частичная — только
+# перечисленное. Ошибки git при обходе — best-effort, загрузку не ломают.
+guard_foreign_dirty_conf() {
+    local wt_cur cur_norm line path norm wt_dirty rel
+    local -a paths=()
+    wt_cur=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+    cur_norm=$(normalize_worktree_path "$wt_cur")
+    [[ -n "$cur_norm" ]] || return 0
+
+    while IFS= read -r line; do
+        path="${line#worktree }"
+        [[ "$path" == "$line" || -z "$path" ]] && continue
+        norm=$(normalize_worktree_path "$path")
+        [[ -n "$norm" && "$norm" != "$cur_norm" ]] || continue
+        wt_dirty=$(git -C "$path" status --porcelain -- conf/ 2>/dev/null || true)
+        [[ -n "$wt_dirty" ]] || continue
+        while IFS= read -r rel || [[ -n "$rel" ]]; do
+            [[ -z "$rel" ]] && continue
+            [[ ${#paths[@]} -ge 10 ]] && break
+            [[ -z "${rel:3}" ]] && continue
+            paths+=("${rel:3}")
+        done <<< "$wt_dirty"
+        [[ ${#paths[@]} -ge 10 ]] && break
+    done < <(git worktree list --porcelain 2>/dev/null | grep '^worktree ' || true)
+
+    [[ ${#paths[@]} -eq 0 ]] && return 0
+
+    local p
+    if [[ "$FULL_RESYNC" == "true" ]] && flag_is_true "$IB_LOAD_STRICT"; then
+        log "ERROR" "в другом ворктри есть незакоммиченные правки conf/ — полная загрузка (-F) вытеснит их из метаданных ИБ; сначала сведи их в main"
+        for p in "${paths[@]}"; do log "ERROR" "  • $p"; done
+        exit 22
+    fi
+    if [[ "$FULL_RESYNC" == "true" ]]; then
+        log "WARN" "в другом ворктри есть незакоммиченные правки conf/ — полная загрузка (-F) вытеснит их из метаданных ИБ; сначала сведи их в main"
+    else
+        log "WARN" "в другом ворктри есть незакоммиченные правки conf/ — частичная загрузка вытесняет лишь перечисленное, но полезно их видеть"
+    fi
+    for p in "${paths[@]}"; do log "WARN" "  • $p"; done
+}
+
+# ── Защита 3: похоже, загрузка уже идёт по НАШЕЙ ИБ ─────────────────────────────
+# Замка нет: параллельная загрузка сломает состояние. Сужаем по базе из IB_CONNECTION
+# (basename через extract_base_dirname), чтобы не шуметь на чужих базах/агентах.
+# Читающие подкоманды ibcmd (list/export/dump/help) исключаем — они не пишут.
+# Жёсткий отказ не делаем даже при IB_LOAD_STRICT — велик риск ложных срабатываний
+# (открытый конфигуратор/клиент).
+guard_load_already_running() {
+    local base_token pids=""
+    base_token=$(extract_base_dirname "${IB_CONNECTION:-}" 2>/dev/null || true)
+    # Путь ИБ не распознали — тихо пропускаем (лучше не шуметь не по делу).
+    [[ -n "$base_token" ]] || return 0
+
+    case "${PROJECT_OS}" in
+        linux)
+            command -v pgrep >/dev/null 2>&1 || return 0
+            pids=$(pgrep -af "1cv8|ibcmd" 2>/dev/null \
+                | grep -F -- "$base_token" \
+                | grep -Ev '(^|[[:space:]])(list|export|dump|help)([[:space:]]|$)' \
+                | awk '{print $1}' \
+                | grep -vx "$$" \
+                | tr '\n' ' ' || true)
+            ;;
+        windows)
+            command -v powershell.exe >/dev/null 2>&1 || return 0
+            local tf tf_win ps_cmd
+            tf=$(mktemp) || return 0
+            printf '%s\n' "$base_token" > "$tf"
+            tf_win=$(_ib_win_path "$tf")
+            ps_cmd="[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \$tok = Get-Content -LiteralPath '$tf_win' -Encoding UTF8 | Select-Object -First 1; if ([string]::IsNullOrWhiteSpace(\$tok)) { return }; Get-CimInstance Win32_Process | Where-Object { (\$_.Name -eq '1cv8.exe' -and \$_.CommandLine -and \$_.CommandLine -like ('*' + \$tok + '*') -and \$_.CommandLine -like '*CONFIG*') -or (\$_.Name -eq 'ibcmd.exe' -and \$_.CommandLine -and \$_.CommandLine -like ('*' + \$tok + '*') -and \$_.CommandLine -notmatch '(^|\s)(list|export|dump|help)(\s|$)') } | Select-Object -ExpandProperty ProcessId"
+            pids=$(MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" powershell.exe -NoProfile -Command "$ps_cmd" 2>/dev/null | tr -d '\r' | tr '\n' ' ' || true)
+            rm -f "$tf"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+    pids=$(echo "$pids" | tr -s ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [[ -z "${pids// /}" ]] && return 0
+    log "WARN" "похоже, загрузка уже выполняется (PID ${pids}): замка нет, вторая загрузка сломает состояние — дождись или убедись, что процесс не загрузочный"
+}
+
+# ── Защиты движка: ворктри, чужая грязь, параллельные загрузки ─────────────────
+# Вызываются перед началом загрузки (после --help и раннего выхода
+# «нет файлов к загрузке»). Проверка 3 — всегда WARN (ложные срабатывания).
+run_load_guards() {
+    guard_load_from_worktree
+    guard_foreign_dirty_conf
+    guard_load_already_running
 }
 
 # Запуск Python с fallback на py -3
@@ -1137,6 +1329,8 @@ filter_unchanged_conf_files() {
     local -A current_hashes=()
     local -A verify_rels=()
     local skipped=0 kept=0 total=0
+    local skipped_file="${list_file}.skipped"
+    : > "$skipped_file"
 
     manifest=$(conf_files_cache_manifest_path "$repo_root" "$config_dir_abs")
     migrate_legacy_configuration_cache "$repo_root" "$config_dir_abs" "$manifest"
@@ -1199,6 +1393,7 @@ filter_unchanged_conf_files() {
             current_hash="${current_hashes[$rel_path]:-}"
             if [[ -n "$current_hash" && "$current_hash" == "$cached_hash" ]]; then
                 skipped=$((skipped + 1))
+                printf '%s\n' "$rel_path" >> "$skipped_file"
             else
                 printf '%s\n' "$rel_path" >> "$kept_file"
                 kept=$((kept + 1))
@@ -1211,8 +1406,18 @@ filter_unchanged_conf_files() {
 
     if [[ $skipped -gt 0 ]]; then
         log "INFO" "Кэш conf: пропущено $skipped из $total файлов (останется $kept)"
+        # Имена пропущенных файлов — чтобы «тихий пропуск» был виден в отчёте.
+        # Неверная запись манифеста самоподдерживается (пропуск → перезапись того же хеша),
+        # лечение: SKIP_CONFIGURATION_CACHE=true (см. docs/ai/load-config-to-dev.md).
+        local skipped_name skipped_list=""
+        while IFS= read -r skipped_name; do
+            [[ -z "$skipped_name" ]] && continue
+            skipped_list+="${skipped_list:+, }$skipped_name"
+        done < <(head -n 10 "$skipped_file")
+        [[ -n "$skipped_list" ]] && log "INFO" "Кэш conf, пропущены: $skipped_list$( [[ $skipped -gt 10 ]] && echo ', …' )"
         log_quiet "Кэш: пропущено $skipped неизменённых файлов conf"
     fi
+    rm -f "$skipped_file"
 }
 
 # Обновить кэш хешей загруженных файлов conf
@@ -1556,6 +1761,7 @@ UPDATE_DB_FORCE_SESSIONS="${UPDATE_DB_FORCE_SESSIONS:-true}"
 REOPEN_DESIGNER_AFTER_LOAD="${REOPEN_DESIGNER_AFTER_LOAD:-false}"
 AUTO_CLOSE_CLIENT="${AUTO_CLOSE_CLIENT:-false}"
 REOPEN_CLIENT_AFTER_LOAD="${REOPEN_CLIENT_AFTER_LOAD:-false}"
+CLIENT_LAUNCH_KEYS="${CLIENT_LAUNCH_KEYS:-}"
 APACHE_SERVICE_NAME="${APACHE_SERVICE_NAME:-}"  # Пусто = не управлять Apache
 SKIP_CONFIGURATION_CACHE="${SKIP_CONFIGURATION_CACHE:-false}"
 FORCE_CONFIGURATION="${FORCE_CONFIGURATION:-false}"
@@ -1570,6 +1776,8 @@ FORCE_PARTIAL="${FORCE_PARTIAL:-false}"
 LOAD_HIDE_FILES="${LOAD_HIDE_FILES:-}"
 RESOLVED_LOAD_MARKER=""
 COMMITTED_CHANGES_PRESENT=false
+IB_LOAD_STRICT="${IB_LOAD_STRICT:-false}"               # true — защиты 1/2 → жёсткий отказ вместо WARN
+IB_LOAD_FROM_WORKTREE="${IB_LOAD_FROM_WORKTREE:-false}" # true — осознанно грузим из ворктри (гасит защиту 1)
 
 # Парсинг аргументов командной строки
 while [[ $# -gt 0 ]]; do
@@ -1613,6 +1821,23 @@ while [[ $# -gt 0 ]]; do
             AUTO_CLOSE_DESIGNER="true"
             AUTO_CLOSE_CLIENT="true"
             REOPEN_CLIENT_AFTER_LOAD="true"
+            VERBOSE=true
+            shift
+            ;;
+        --client-keys)
+            CLIENT_LAUNCH_KEYS="${2:-}"
+            if [[ -z "$CLIENT_LAUNCH_KEYS" ]]; then
+                log "ERROR" "--client-keys требует строку ключей запуска клиента"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --refresh-variants)
+            UPDATE_DB="true"
+            AUTO_CLOSE_DESIGNER="true"
+            AUTO_CLOSE_CLIENT="true"
+            REOPEN_CLIENT_AFTER_LOAD="true"
+            CLIENT_LAUNCH_KEYS='/C"ЗапуститьОбновлениеИнформационнойБазы" /DisableStartupDialogs /DisableStartupMessages'
             VERBOSE=true
             shift
             ;;
@@ -1695,6 +1920,8 @@ while [[ $# -gt 0 ]]; do
             echo "      --allow-close-designer  Явно разрешить автозакрытие конфигуратора"
             echo "  -H, --human-mode            Старый режим: закрыть и переоткрыть конфигуратор"
             echo "  -C, --open-client           Загрузить, обновить БД и открыть тонкий клиент (1cv8c.exe)"
+            echo "      --client-keys KEYS      Дополнительные ключи запуска клиента (строка целиком)"
+            echo "      --refresh-variants      Актуализировать варианты отчётов (ключ БСП ЗапуститьОбновлениеИнформационнойБазы)"
             echo "  -u, --auto-unsupport        Автоматически снимать с поддержки загружаемые объекты"
             echo "  -U, --update-db             Обновить конфигурацию базы данных после загрузки"
             echo "      --reopen-designer       Открыть конфигуратор после загрузки"
@@ -1742,6 +1969,8 @@ while [[ $# -gt 0 ]]; do
             echo "                            Параметры серверной ИБ для движка ibcmd (для /S подключений)"
             echo "  LOAD_VERBOSE              true — то же, что --verbose"
             echo "  LOG_FILE_LIST_THRESHOLD   Порог поименного вывода в -H/-C/--verbose (default: 100)"
+            echo "  IB_LOAD_STRICT            true — защиты ворктри/чужой грязи conf/ → отказ (exit) вместо WARN"
+            echo "  IB_LOAD_FROM_WORKTREE     true — осознанно разрешить загрузку из ворктри"
             exit 0
             ;;
         *)
@@ -2106,11 +2335,15 @@ if [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]]; then
     sudo -n chmod -R g+rwX /srv/ib 2>/dev/null || chmod -R g+rwX /srv/ib 2>/dev/null || true
 fi
 
-# Linux + файловая ИБ: Apache держит lock и на LoadConfigFromFiles (на Windows — нет).
-# Останавливаем до загрузки; поднимем после load + UpdateDBCfg.
+# Apache держит файловую ИБ (worker httpd.exe через wsisapi/wsap24):
+#  - Linux-слот — и на LoadConfigFromFiles, и на UpdateDBCfg;
+#  - движок ibcmd — на любом ОС: `config import` требует **монопольного**
+#    доступа (в отличие от конфигуратора), поэтому стоп нужен ДО импорта
+#    (иначе «Ошибка исключительной блокировки информационной базы»);
+#  - Windows + конфигуратор — достаточно стопа перед UpdateDBCfg (блок ниже).
 _slot_apache_was_running="false"
-if [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]] \
-    && apache_is_running; then
+if { [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]] || [[ "$LOAD_ENGINE" == "ibcmd" ]]; } \
+    && ib_connection_is_file && apache_is_running; then
     if ! apache_stop; then
         log "ERROR" "Stop Apache не удался — загрузка отменена"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
@@ -2123,6 +2356,11 @@ else
 _slot_apache_was_running="false"
 timing_mark "подготовка UpdateDB (загрузка файлов не требуется)"
 fi
+
+# ── Защиты движка (ворктри / чужая грязь / параллельная загрузка) ──────────────
+# Перед preflight и загрузкой; --help и ранний выход «нет файлов к загрузке»
+# выполняются раньше и сюда не доходят.
+run_load_guards
 
 # Preflight по поддержке объектов
 PARENT_CONFIG_BIN="$CONFIG_PATH_ABS/Ext/ParentConfigurations.bin"
@@ -2218,9 +2456,11 @@ if [[ "$has_conf_changes" == "true" ]]; then
         # Full-resync: полная загрузка conf/ целиком, без -partial и -listFile.
         # Лечит «Неверный путь к данным»/«Неизвестный объект» после merge/rebase.
         if [[ "$LOAD_ENGINE" == "ibcmd" ]]; then
-            fr_no_check=""
-            [[ "$IBCMD_NO_CHECK" == "true" ]] && fr_no_check="--no-check"
-            fr_cmd="\"$IBCMD_CMD\" infobase config import files $IBCMD_DB_ARGS $IBCMD_AUTH $fr_no_check \"$CONFIG_PATH_CMD\" > \"$LOAD_LOG_FILE\" 2>&1"
+            # ibcmd: полный импорт конфигурации из XML — команда `import` (БЕЗ `files`),
+            # каталог передаётся позиционным аргументом. Вариант `import files`
+            # (только с `--base-dir=` и списком файлов) — это частичный импорт.
+            # `--no-check` поддерживает только `import files`, поэтому здесь не передаём.
+            fr_cmd="\"$IBCMD_CMD\" infobase config import $IBCMD_DB_ARGS $IBCMD_AUTH \"$CONFIG_PATH_CMD\" > \"$LOAD_LOG_FILE\" 2>&1"
             log "INFO" "Выполнение команды (ibcmd, полная загрузка conf): $fr_cmd"
             : > "$LOAD_LOG_FILE"
             run_1c_command "$fr_cmd"
@@ -2317,7 +2557,7 @@ if [[ "$UPDATE_DB" == "true" ]]; then
     # через wsap24.dll). Без этого /UpdateDBCfg упрётся в «база занята».
     # trap гарантирует Start даже при сбое /UpdateDBCfg или Ctrl+C.
     apache_was_running="false"
-    if apache_is_running; then
+    if ib_connection_is_file && apache_is_running; then
         apache_was_running="true"
         if ! apache_stop; then
             log "ERROR" "Stop Apache не удался — обновление БД отменено"
@@ -2475,8 +2715,8 @@ if [[ "$REOPEN_CLIENT_AFTER_LOAD" == "true" ]]; then
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 1
     fi
-    log "INFO" "Запуск тонкого клиента 1С:Предприятие: $THIN_CLIENT_CMD"
-    run_1c_command "\"$THIN_CLIENT_CMD\" ENTERPRISE $IB_CONNECTION" &
+    log "INFO" "Запуск тонкого клиента 1С:Предприятие: $THIN_CLIENT_CMD ${CLIENT_LAUNCH_KEYS:-}"
+    run_1c_command "\"$THIN_CLIENT_CMD\" ENTERPRISE $IB_CONNECTION ${CLIENT_LAUNCH_KEYS:-}" &
 elif [[ "$REOPEN_DESIGNER_AFTER_LOAD" == "true" ]]; then
     log "INFO" "Запуск конфигуратора для проверки..."
     run_1c_command "\"$DESIGNER_CMD\" CONFIG $IB_CONNECTION" &

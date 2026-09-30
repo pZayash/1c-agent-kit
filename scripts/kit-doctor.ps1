@@ -41,8 +41,13 @@ function Get-Manifest([string]$name) {
 }
 
 # Run a kit ps1 as a child process; returns output lines.
+# Bare `powershell.exe` is absent from the PATH in trimmed environments
+# (agent/GUI terminals), so resolve the interpreter from $PSHOME.
+$script:PsExe = Join-Path $PSHOME "powershell.exe"
+if (-not (Test-Path -LiteralPath $script:PsExe)) { $script:PsExe = Join-Path $PSHOME "pwsh.exe" }
+
 function Invoke-KitScript([string]$file, [string[]]$scriptArgs) {
-    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+    $out = & $script:PsExe -NoProfile -ExecutionPolicy Bypass -File `
         (Join-Path $scriptsDir $file) @scriptArgs 2>$null
     return @($out), $LASTEXITCODE
 }
@@ -59,7 +64,7 @@ if (Test-Path -LiteralPath $reparseLib) {
         ".agents\skills", ".claude\skills", ".claude\commands",
         ".pi\skills", ".pi\prompts", ".pi\extensions",
         ".kilo\plugin", ".opencode\plugin",
-        "tools\mailbox", "tools\bsl-check", "tools\sandbox",
+        "tools\bsl-check", "tools\sandbox",
         "tools\load-changed-files", "tools\mcp-call", "tools\answer42",
         "tools\git-partial-stage.py"
     )

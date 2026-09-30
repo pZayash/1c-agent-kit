@@ -75,5 +75,60 @@ class SessionStartNoGitTest(unittest.TestCase):
         self.assertIn('namespace', out)
 
 
+class SessionStartDivergedTest(unittest.TestCase):
+    HEAD = 'a' * 40
+    UPSTREAM = 'b' * 40
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-agent-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / 'harness').mkdir(parents=True)
+
+    def run_with_counts(self, behind, ahead):
+        responses = {
+            ('rev-parse', 'HEAD'): self.HEAD,
+            ('ls-files', '-s', '--', 'harness'): f'160000 {self.HEAD} 0\tharness',
+            ('rev-parse', '--verify', '-q', 'origin/master'): self.UPSTREAM,
+            ('rev-list', '--count', 'HEAD..origin/master'): behind,
+            ('rev-list', '--count', 'origin/master..HEAD'): ahead,
+        }
+
+        def fake_git(_root, *args):
+            return responses.get(args)
+
+        old_git = ka.git
+        old_git_flag = ka.GIT
+        ka.git = fake_git
+        ka.GIT = ka.GIT or '/usr/bin/git'
+        try:
+            args = argparse.Namespace(root=str(self.tmp), harness_rel='harness')
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = ka.cmd_session_start(args)
+            return rc, buf.getvalue()
+        finally:
+            ka.git = old_git
+            ka.GIT = old_git_flag
+
+    def test_diverged_warns_instead_of_checkout(self):
+        rc, out = self.run_with_counts(behind='2', ahead='1')
+        self.assertEqual(rc, 0)
+        self.assertIn('разошёлся', out)
+        self.assertIn('cherry-pick', out)
+        self.assertNotIn('Обнови', out)
+
+    def test_behind_only_still_suggests_checkout(self):
+        rc, out = self.run_with_counts(behind='2', ahead='0')
+        self.assertEqual(rc, 0)
+        self.assertIn('отстал', out)
+        self.assertIn('checkout origin/master', out)
+
+    def test_ahead_only_suggests_promote(self):
+        rc, out = self.run_with_counts(behind='0', ahead='1')
+        self.assertEqual(rc, 0)
+        self.assertIn('впереди', out)
+        self.assertIn('promote', out)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

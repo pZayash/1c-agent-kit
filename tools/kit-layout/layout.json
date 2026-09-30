@@ -37,7 +37,7 @@
       "kind": "child-dirs",
       "source": "harness/tools",
       "target": "tools",
-      "include": ["mailbox", "bsl-check", "sandbox", "load-changed-files", "mcp-call", "answer42"],
+      "include": ["bsl-check", "sandbox", "load-changed-files", "mcp-call", "answer42"],
       "local_manifest": "tools/cc-1c-skills-sync/local-tools.txt"
     },
     {

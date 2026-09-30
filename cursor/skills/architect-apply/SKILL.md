@@ -125,8 +125,9 @@ XML** — экономишь контекст и токены. Результа�
    - **готовый промпт** для исполнителя (copy-paste), указывающий читать
      `executor-task.md` и вернуть результат скиллом `review-request <slug>`.
 
-9. **Ждать возврат.** Исполнитель пишет заявку `/review-request` (`kind=review`
-   в ящике). Ты разбираешь скиллом [review](../review/SKILL.md) → `rN-result.md`.
+9. **Ждать возврат.** Исполнитель пишет заявку `/review-request`
+   (`handoffs/<slug>/rN-request.md`). Ты разбираешь скиллом
+   [review](../review/SKILL.md) → `rN-result.md`.
 
 ## Шаблон executor-task.md
 
@@ -152,11 +153,10 @@ XML** — экономишь контекст и токены. Результа�
 ## Протокол возврата
 
 - Исполнитель завершает: [review-request](../review-request/SKILL.md) `<slug>` →
-  задача `kind=review`, `artifacts/rN-request.md`.
+  заявка `handoffs/<slug>/rN-request.md`.
 - Архитектор разбирает → [review](../review/SKILL.md) `<slug>` →
-  `artifacts/rN-result.md` (находки, ответы, чеклист «что чинить»).
-- `slug` = имя change. Канал — ящик шины, не `handoffs/`.
-  См. [agent-task-bus.md](../../../docs/ai/agent-task-bus.md).
+  `handoffs/<slug>/rN-result.md` (находки, ответы, чеклист «что чинить»).
+- `slug` = имя change. Канал — тред `handoffs/<slug>/`.
 
 ## Guardrails
 

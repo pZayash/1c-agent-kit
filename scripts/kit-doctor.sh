@@ -20,7 +20,8 @@ HARNESS_REL="${HARNESS_REL:-harness}"
 if kit_is_windows; then
   args=(-ConsumerRoot "$(cd "$CONSUMER_ROOT" && pwd)" -HarnessRel "$HARNESS_REL")
   [[ "${SKIP_DEPS:-0}" == "1" ]] && args+=(-SkipDeps)
-  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/kit-doctor.ps1" "${args[@]}"
+  ps_exe="$(kit_powershell)" || { echo "ERROR: PowerShell не найден (Windows-ветка kit идёт через .ps1)" >&2; exit 1; }
+  exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/kit-doctor.ps1" "${args[@]}"
 fi
 
 CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
