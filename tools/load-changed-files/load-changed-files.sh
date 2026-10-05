@@ -40,16 +40,22 @@
 #   -i, --ib-connection CONN    Строка подключения к ИБ (по умолчанию: /F"C:/base/proj")
 #   -d, --designer-path PATH    Путь к 1cv8.exe
 #   -n, --no-close              Запретить автозакрытие конфигуратора
-#       --allow-close-designer  Явно разрешить автозакрытие конфигуратора
+#       --allow-close-designer  Явно разрешить автозакрытие конфигуратора.
+#                               Автозакрытие — ТОЛЬКО явное: -H/-C/--refresh-variants
+#                               его больше не включают (убитый процесс оставляет
+#                               в ИБ висячий сеанс «Конфигуратор» на ibsrv).
 #       --reopen-designer       Открыть конфигуратор после загрузки
-#   -H, --human-mode            Старый режим: закрыть и переоткрыть конфигуратор
-#   -C, --open-client           Быстрый тест: закрыть конфигуратор/клиент, загрузить,
-#                               обновить БД (-U) и открыть тонкий клиент 1С (1cv8c.exe)
+#   -H, --human-mode            Старый режим: подробный лог + переоткрыть конфигуратор
+#   -C, --open-client           Быстрый тест: загрузить, обновить БД (-U) и открыть
+#                               тонкий клиент 1С (1cv8c.exe). Закрытие конфигуратора/
+#                               клиента — только явное (--allow-close-designer /
+#                               AUTO_CLOSE_CLIENT=true).
 #       --client-keys KEYS      Дополнительные ключи запуска тонкого клиента (строка целиком),
 #                               напр. --client-keys '/C"ЗапуститьОбновлениеИнформационнойБазы"'
 #       --refresh-variants      После загрузки актуализировать варианты отчётов: клиент с ключом
 #                               БСП ЗапуститьОбновлениеИнформационнойБазы (нужен, если добавлен
-#                               или изменён settingsVariant — иначе варианта нет в списке на форме)
+#                               или изменён settingsVariant — иначе варианта нет в списке на форме).
+#                               Закрытие чужих процессов не включает.
 #   -u, --auto-unsupport        Автоматически снимать с поддержки загружаемые объекты
 #   -U, --update-db             Обновить конфигурацию базы данных после загрузки
 #       --list-file PATH        Фолбэк: явный список (заменяет git); PATH=- для stdin
@@ -67,6 +73,9 @@
 #                               с -Dynamic- -SessionTerminate force (сеансы завершаются
 #                               принудительно). Экв. UPDATE_DB_FORCE_SESSIONS=true.
 #       --no-force-sessions     Запретить принудительное завершение сеансов (экв. env=false)
+#       --drop-designer-sessions  Явно разрешить снятие висячих сеансов «Конфигуратор»
+#                               в ИБ через ibcmd session terminate (узел не перезапускается).
+#                               Экв. IB_LOAD_DROP_DESIGNER_SESSIONS=true.
 #       --verbose               Подробный вывод (по умолчанию — краткий для агентов)
 #   -h, --help                  Показать эту справку
 #
@@ -108,6 +117,14 @@
 #                             отказ (exit) вместо WARN (по умолчанию: false)
 #   IB_LOAD_FROM_WORKTREE     true — осознанное разрешение грузить из ворктри
 #                             (гасит защиту «ворктри», по умолчанию: false)
+#   IB_LOAD_DROP_DESIGNER_SESSIONS  true — то же, что --drop-designer-sessions
+#   AUTO_CLOSE_CLIENT         Автоматически закрывать тонкий клиент перед загрузкой
+#                             (true/false, по умолчанию: false)
+#
+# ЖУРНАЛ ЗАГРУЗОК:
+#   .tmp/load-history.jsonl — append-only JSONL, одна строка = одна попытка:
+#   движок/флаги/argv, время, exit-код, поколение конфигурации до/после,
+#   висячие сеансы, причина остановки. Не в git.
 #
 # ПРИМЕРЫ:
 #   ./load-changed-files.sh                           # Использует настройки из .env
@@ -142,6 +159,11 @@ NC='\033[0m' # No Color
 
 # Краткий вывод по умолчанию (агенты); --verbose или -H/-C — полный лог
 VERBOSE="${LOAD_VERBOSE:-false}"
+# Журнал загрузок (.tmp/load-history.jsonl): сырой argv и время старта —
+# до парсинга аргументов (парсер сдвигает $@).
+LOAD_ARGV="$0${*:+ $*}"
+LOAD_TS_START=$(date +%s)
+LOAD_TS_START_ISO=$(date '+%Y-%m-%dT%H:%M:%S%z')
 for _preload_arg in "$@"; do
     case "$_preload_arg" in
         --verbose) VERBOSE=true ;;
@@ -785,6 +807,60 @@ guard_load_already_running() {
     log "WARN" "похоже, загрузка уже выполняется (PID ${pids}): замка нет, вторая загрузка сломает состояние — дождись или убедись, что процесс не загрузочный"
 }
 
+# ── Защита 4: висячий сеанс «Конфигуратор» в ИБ (автономный сервер ibsrv) ────
+# Прерванный прогон (убитый ibcmd/конфигуратор через шлюз --pid) оставляет в ИБ
+# сеанс «Конфигуратор»: процесса давно нет, а конфигурирование заблокировано —
+# следующий импорт/apply отвечает «уже работает конфигуратор: компьютер …,
+# начат …» или висит на блокировке. Проба — `ibcmd session list --pid=<узел>`
+# (функции в tools/os/process-1c.sh потребителя); нет пробы — тихо пропускаем.
+# Отказ жёсткий (exit 23): дешевле стоп, чем ведж загрузки. Автоочистка —
+# только явным --drop-designer-sessions (точечный session terminate; рестарт
+# узла молча никогда не делаем).
+guard_ib_designer_session() {
+    # Проверяем при -F и при движке ibcmd — оба обязательно пишут в ИБ через
+    # конфигураторную блокировку. На ibsrv (IBSRV_PID_FILE) проверяем всегда:
+    # висячий сеанс ломает и обычную partial-загрузку.
+    if [[ "$FULL_RESYNC" != "true" && "$LOAD_ENGINE" != "ibcmd" && -z "${IBSRV_PID_FILE:-}" ]]; then
+        return 0
+    fi
+    declare -F list_ib_designer_sessions >/dev/null 2>&1 || return 0
+    local lines rc
+    lines=$(list_ib_designer_sessions); rc=$?
+    if [[ $rc -ne 0 ]]; then
+        LOAD_HISTORY_SESSIONS="${LOAD_HISTORY_SESSIONS:-probe-unavailable}"
+        log "INFO" "Защита «висячий сеанс конфигуратора»: проба недоступна — пропускаю"
+        return 0
+    fi
+    if [[ -z "$lines" ]]; then
+        LOAD_HISTORY_SESSIONS="none"
+        return 0
+    fi
+    if flag_is_true "$IB_LOAD_DROP_DESIGNER_SESSIONS" \
+        && declare -F drop_ib_designer_sessions >/dev/null 2>&1; then
+        log "WARN" "В ИБ висят сеансы «Конфигуратор» — снимаю точечно (--drop-designer-sessions):"
+        while IFS= read -r l; do [[ -n "$l" ]] && log "WARN" "  $l"; done <<< "$lines"
+        drop_ib_designer_sessions || true
+        lines=$(list_ib_designer_sessions 2>/dev/null || true)
+        if [[ -z "$lines" ]]; then
+            LOAD_HISTORY_SESSIONS="dropped"
+            log "INFO" "Висячие сеансы конфигуратора сняты"
+            return 0
+        fi
+        LOAD_HISTORY_SESSIONS="drop-failed"
+        log "ERROR" "session terminate не снял все сеансы — осталось:"
+    else
+        LOAD_HISTORY_SESSIONS="hang-refused"
+        log "ERROR" "В ИБ найден сеанс «Конфигуратор» (ibcmd session list --pid=<узел>):"
+        log "ERROR" "конфигурирование заблокировано («уже работает конфигуратор…»),"
+        log "ERROR" "загрузка встанет или упадёт на блокировке. Это след прерванного прогона."
+    fi
+    while IFS= read -r l; do [[ -n "$l" ]] && log "ERROR" "  $l"; done <<< "$lines"
+    declare -F ib_designer_session_hint >/dev/null 2>&1 && ib_designer_session_hint
+    log "ERROR" "Автоснятие: повторите с --drop-designer-sessions (ibcmd session terminate)."
+    LOAD_HISTORY_REASON="висячий сеанс «Конфигуратор» в ИБ"
+    exit 23
+}
+
 # ── Защиты движка: ворктри, чужая грязь, параллельные загрузки ─────────────────
 # Вызываются перед началом загрузки (после --help и раннего выхода
 # «нет файлов к загрузке»). Проверка 3 — всегда WARN (ложные срабатывания).
@@ -792,6 +868,7 @@ run_load_guards() {
     guard_load_from_worktree
     guard_foreign_dirty_conf
     guard_load_already_running
+    guard_ib_designer_session
 }
 
 # Запуск Python с fallback на py -3
@@ -806,6 +883,130 @@ run_python() {
         log "ERROR" "Не найден Python (python, python3 или py -3). Установите Python и повторите попытку"
         exit 1
     fi
+}
+
+# ── Журнал загрузок: .tmp/load-history.jsonl (append-only, JSONL) ───────────
+# Одна строка = одна попытка: движок/флаги/argv, время старта/конца и
+# длительность, exit-код, поколение конфигурации до/после, что грузилось,
+# висячие сеансы и что с ними сделали, причина остановки. Пишется из
+# EXIT-трапа (через cleanup_temp_files) и явно в конце — не ломает обычный
+# вывод загрузчика (всё в subshell, stderr съеден, ошибки молча гасятся).
+LOAD_HISTORY_REASON="${LOAD_HISTORY_REASON:-}"
+LOAD_HISTORY_SESSIONS="${LOAD_HISTORY_SESSIONS:-}"
+_LOAD_HISTORY_WRITTEN="false"
+_LOAD_EXIT_CODE=""
+
+_lh_json_str() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    # сырые control-символы (<0x20) JSON запрещает — вырезаем
+    s=$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037')
+    printf '"%s"' "$s"
+}
+_lh_json_num() { [[ "${1:-}" =~ ^-?[0-9]+$ ]] && printf '%s' "$1" || printf 'null'; }
+_lh_json_bool() { [[ "${1:-}" == "true" ]] && printf 'true' || printf 'false'; }
+
+load_history_write() {
+    [[ "$_LOAD_HISTORY_WRITTEN" == "true" ]] && return 0
+    _LOAD_HISTORY_WRITTEN="true"
+    (
+        local root="${repo_path:-}"
+        [[ -n "$root" ]] || root=$(git -C "${GIT_PATH:-.}" rev-parse --show-toplevel 2>/dev/null)
+        [[ -n "$root" && -d "$root" ]] || exit 0
+        mkdir -p "$root/.tmp" || exit 0
+        local f="$root/.tmp/load-history.jsonl"
+
+        local ts_end now dur="null" ec="${_LOAD_EXIT_CODE:-0}"
+        ts_end=$(date '+%Y-%m-%dT%H:%M:%S%z')
+        now=$(date +%s)
+        [[ "${LOAD_TS_START:-}" =~ ^[0-9]+$ ]] && dur=$((now - LOAD_TS_START))
+
+        local result="ok"
+        if [[ "$ec" != "0" ]]; then
+            case "$ec" in
+                20|21|22|23) result="refused" ;;
+                2) result="aborted" ;;
+                *) result="error" ;;
+            esac
+        elif [[ "${nothing_to_load:-false}" == "true" && "${UPDATE_DB:-false}" != "true" ]]; then
+            result="skipped"
+        fi
+        local reason="${LOAD_HISTORY_REASON:-}"
+        [[ -z "$reason" && "$ec" != "0" ]] && reason="exit $ec"
+
+        # Поколение «после» — строка «Создано поколение конфигурации: <hash>»
+        # в логе 1С; «до» — config_gen_after последней записи этого журнала.
+        local gen_after="" gen_before=""
+        if [[ -n "${LOAD_LOG_FILE:-}" && -f "$LOAD_LOG_FILE" ]]; then
+            gen_after=$(read_1c_log_text "$LOAD_LOG_FILE" 2>/dev/null \
+                | grep -oE 'Создано поколение конфигурации.{0,80}' | tail -1 \
+                | grep -oE '[0-9a-fA-F]{16,}' | head -1)
+        fi
+        gen_before=$(grep -oE '"config_gen_after": ?"[0-9a-fA-F]{16,}"' "$f" 2>/dev/null \
+            | tail -1 | grep -oE '[0-9a-fA-F]{16,}' | head -1)
+
+        local branch head cwd
+        cwd=$(pwd)
+        branch=$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        head=$(git -C "$root" rev-parse --short HEAD 2>/dev/null)
+
+        # Списки — из рабочих temp-файлов, пока они ещё живы (writer вызывается
+        # до их снятия в cleanup_temp_files и до финального rm). Cap 50 строк.
+        local conf_list="" ext_list="" tail_line=""
+        [[ -f "$cwd/temp_changed_files.txt" ]] \
+            && conf_list=$(head -50 "$cwd/temp_changed_files.txt" | paste -sd';' - 2>/dev/null)
+        [[ -f "$cwd/temp_changed_extensions.txt" ]] \
+            && ext_list=$(head -50 "$cwd/temp_changed_extensions.txt" | paste -sd';' - 2>/dev/null)
+        if [[ -n "${LOAD_LOG_FILE:-}" && -f "$LOAD_LOG_FILE" ]]; then
+            tail_line=$(read_1c_log_text "$LOAD_LOG_FILE" 2>/dev/null \
+                | grep -v '^[[:space:]]*$' | tail -1 | head -c 300)
+        fi
+
+        local sess="${LOAD_HISTORY_SESSIONS:-${DESIGNER_SESSION_STATUS:-unchecked}}"
+        local ib_name
+        ib_name=$(extract_base_dirname "${IB_CONNECTION:-}" 2>/dev/null)
+
+        {
+            printf '{'
+            printf '"ts_start":%s' "$(_lh_json_str "${LOAD_TS_START_ISO:-}")"
+            printf ',"ts_end":%s' "$(_lh_json_str "$ts_end")"
+            printf ',"duration_sec":%s' "$(_lh_json_num "$dur")"
+            printf ',"argv":%s' "$(_lh_json_str "${LOAD_ARGV:-}")"
+            printf ',"engine":%s' "$(_lh_json_str "${LOAD_ENGINE:-}")"
+            printf ',"flags":{"full_resync":%s,"update_db":%s,"list_file":%s,"no_extensions":%s,"reset_marker":%s,"force_partial":%s,"auto_close_designer":%s,"auto_close_client":%s,"reopen_client":%s,"reopen_designer":%s,"drop_designer_sessions":%s}' \
+                "$(_lh_json_bool "${FULL_RESYNC:-}")" "$(_lh_json_bool "${UPDATE_DB:-}")" \
+                "$(_lh_json_bool "$([[ -n "${LIST_FILE:-}" ]] && echo true || echo false)")" \
+                "$(_lh_json_bool "${SKIP_EXTENSIONS:-}")" "$(_lh_json_bool "${RESET_LOAD_MARKER:-}")" \
+                "$(_lh_json_bool "${FORCE_PARTIAL:-}")" "$(_lh_json_bool "${AUTO_CLOSE_DESIGNER:-}")" \
+                "$(_lh_json_bool "${AUTO_CLOSE_CLIENT:-}")" "$(_lh_json_bool "${REOPEN_CLIENT_AFTER_LOAD:-}")" \
+                "$(_lh_json_bool "${REOPEN_DESIGNER_AFTER_LOAD:-}")" \
+                "$(_lh_json_bool "${IB_LOAD_DROP_DESIGNER_SESSIONS:-}")"
+            printf ',"result":%s' "$(_lh_json_str "$result")"
+            printf ',"exit_code":%s' "$(_lh_json_num "$ec")"
+            printf ',"reason":%s' "$(_lh_json_str "$reason")"
+            printf ',"ib":%s' "$(_lh_json_str "$ib_name")"
+            printf ',"git":{"branch":%s,"head":%s,"worktree":%s}' \
+                "$(_lh_json_str "$branch")" "$(_lh_json_str "$head")" "$(_lh_json_str "$root")"
+            if [[ "${file_count:-0}" == "all" ]]; then
+                printf ',"files_conf":"all"'
+            else
+                printf ',"files_conf":%s' "$(_lh_json_num "${file_count:-0}")"
+            fi
+            printf ',"files_ext":%s' "$(_lh_json_num "${ext_count:-0}")"
+            printf ',"conf_files":%s' "$(_lh_json_str "$conf_list")"
+            printf ',"extensions":%s' "$(_lh_json_str "$ext_list")"
+            printf ',"designer_sessions":%s' "$(_lh_json_str "$sess")"
+            printf ',"config_gen_before":%s' "$(_lh_json_str "$gen_before")"
+            printf ',"config_gen_after":%s' "$(_lh_json_str "$gen_after")"
+            printf ',"log_tail":%s' "$(_lh_json_str "$tail_line")"
+            printf '}\n'
+        } >> "$f"
+    ) >/dev/null 2>&1 || true
+    return 0
 }
 
 # Список изменённых файлов для -listFile: пишется в .tmp/ потребителя и снимается
@@ -823,6 +1024,8 @@ cleanup_changed_files_list() {
 # снимаются на любом выходе, чтобы не оставлять untracked-мусор в git status
 # потребителя при ошибке/Ctrl+C (раньше чистились только на успешном пути).
 cleanup_temp_files() {
+    # Журнал загрузок пишем ДО снятия temp-файлов (списки читаются из них).
+    load_history_write
     local d
     for d in "$PWD" "${repo_path:-$PWD}"; do
         [[ -n "$d" && -d "$d" ]] || continue
@@ -1069,7 +1272,7 @@ apply_load_hide_files() {
     done
     if [[ ${#HIDDEN_LOAD_FILES[@]} -gt 0 ]]; then
         _LOAD_HIDE_PREV_TRAP=$(trap -p EXIT 2>/dev/null || true)
-        trap 'restore_load_hide_files; cleanup_temp_files; cleanup_changed_files_list; eval "${_LOAD_HIDE_PREV_TRAP:-true}"' EXIT
+        trap '_LOAD_EXIT_CODE=$?; restore_load_hide_files; cleanup_temp_files; cleanup_changed_files_list; eval "${_LOAD_HIDE_PREV_TRAP:-true}"' EXIT
     fi
 }
 
@@ -1778,6 +1981,7 @@ RESOLVED_LOAD_MARKER=""
 COMMITTED_CHANGES_PRESENT=false
 IB_LOAD_STRICT="${IB_LOAD_STRICT:-false}"               # true — защиты 1/2 → жёсткий отказ вместо WARN
 IB_LOAD_FROM_WORKTREE="${IB_LOAD_FROM_WORKTREE:-false}" # true — осознанно грузим из ворктри (гасит защиту 1)
+IB_LOAD_DROP_DESIGNER_SESSIONS="${IB_LOAD_DROP_DESIGNER_SESSIONS:-false}" # true — снимать висячие сеансы «Конфигуратор» сами
 
 # Парсинг аргументов командной строки
 while [[ $# -gt 0 ]]; do
@@ -1811,15 +2015,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -H|--human-mode)
-            AUTO_CLOSE_DESIGNER="true"
             REOPEN_DESIGNER_AFTER_LOAD="true"
             VERBOSE=true
             shift
             ;;
         -C|--open-client)
             UPDATE_DB="true"
-            AUTO_CLOSE_DESIGNER="true"
-            AUTO_CLOSE_CLIENT="true"
             REOPEN_CLIENT_AFTER_LOAD="true"
             VERBOSE=true
             shift
@@ -1834,8 +2035,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --refresh-variants)
             UPDATE_DB="true"
-            AUTO_CLOSE_DESIGNER="true"
-            AUTO_CLOSE_CLIENT="true"
             REOPEN_CLIENT_AFTER_LOAD="true"
             CLIENT_LAUNCH_KEYS='/C"ЗапуститьОбновлениеИнформационнойБазы" /DisableStartupDialogs /DisableStartupMessages'
             VERBOSE=true
@@ -1855,6 +2054,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-force-sessions)
             UPDATE_DB_FORCE_SESSIONS="false"
+            shift
+            ;;
+        --drop-designer-sessions)
+            IB_LOAD_DROP_DESIGNER_SESSIONS="true"
             shift
             ;;
         --reopen-designer)
@@ -1917,11 +2120,13 @@ while [[ $# -gt 0 ]]; do
             echo "  -i, --ib-connection CONN    Строка подключения к ИБ (по умолчанию: /F\"C:/base/proj\")"
             echo "  -d, --designer-path PATH    Путь к 1cv8.exe (по умолчанию: DESIGNER_PATH из .env / .env.example)"
             echo "  -n, --no-close              Запретить автозакрытие конфигуратора"
-            echo "      --allow-close-designer  Явно разрешить автозакрытие конфигуратора"
-            echo "  -H, --human-mode            Старый режим: закрыть и переоткрыть конфигуратор"
+            echo "      --allow-close-designer  Явно разрешить автозакрытие конфигуратора (единственный способ)"
+            echo "  -H, --human-mode            Подробный лог + переоткрыть конфигуратор после загрузки"
             echo "  -C, --open-client           Загрузить, обновить БД и открыть тонкий клиент (1cv8c.exe)"
+            echo "                              (закрытие процессов не включает — только --allow-close-designer/AUTO_CLOSE_CLIENT)"
             echo "      --client-keys KEYS      Дополнительные ключи запуска клиента (строка целиком)"
-            echo "      --refresh-variants      Актуализировать варианты отчётов (ключ БСП ЗапуститьОбновлениеИнформационнойБазы)"
+            echo "      --refresh-variants      Актуализировать варианты отчётов (ключ БСП ЗапуститьОбновлениеИнформационнойБазы);"
+            echo "                              автозакрытие процессов не включает"
             echo "  -u, --auto-unsupport        Автоматически снимать с поддержки загружаемые объекты"
             echo "  -U, --update-db             Обновить конфигурацию базы данных после загрузки"
             echo "      --reopen-designer       Открыть конфигуратор после загрузки"
@@ -1937,6 +2142,8 @@ while [[ $# -gt 0 ]]; do
             echo "      --ibcmd-no-check        ibcmd: --no-check у import files (быстро, без проверки метаданных)"
             echo "      --force-sessions        При ошибке UpdateDB из-за HTTP-клиентов повторить с -Dynamic- -SessionTerminate force"
             echo "      --no-force-sessions     Запретить принудительное завершение сеансов (переопределяет UPDATE_DB_FORCE_SESSIONS)"
+            echo "      --drop-designer-sessions  Снять висячие сеансы «Конфигуратор» в ИБ (ibcmd session terminate;"
+            echo "                              узел не перезапускается). Иначе при таком сеансе — отказ с подсказкой"
             echo "      --verbose               Подробный вывод (по умолчанию краткий; -H/-C — подробный)"
             echo "  -h, --help                  Показать эту справку"
             echo ""
@@ -1971,6 +2178,11 @@ while [[ $# -gt 0 ]]; do
             echo "  LOG_FILE_LIST_THRESHOLD   Порог поименного вывода в -H/-C/--verbose (default: 100)"
             echo "  IB_LOAD_STRICT            true — защиты ворктри/чужой грязи conf/ → отказ (exit) вместо WARN"
             echo "  IB_LOAD_FROM_WORKTREE     true — осознанно разрешить загрузку из ворктри"
+            echo "  IB_LOAD_DROP_DESIGNER_SESSIONS  true — то же, что --drop-designer-sessions"
+            echo "  AUTO_CLOSE_CLIENT         true — автозакрытие тонкого клиента (только явно)"
+            echo ""
+            echo "Журнал загрузок: .tmp/load-history.jsonl (append-only JSONL — движок/флаги,"
+            echo "время, exit-код, поколение конфигурации, сеансы, причина остановки)"
             exit 0
             ;;
         *)
@@ -1985,6 +2197,10 @@ if [[ "$REOPEN_DESIGNER_AFTER_LOAD" == "true" && "$REOPEN_CLIENT_AFTER_LOAD" == 
     log "ERROR" "Нельзя одновременно использовать -H (--human-mode) и -C (--open-client)"
     exit 1
 fi
+
+# Журнал загрузок пишется на любом выходе после парсинга аргументов
+# (запись — в load_history_write из cleanup_temp_files / финального вызова).
+trap '_LOAD_EXIT_CODE=$?; cleanup_temp_files' EXIT
 
 # Linux-слот: путь 1cv8 из платформы, если в .env остался Windows-путь
 if [[ "${PROJECT_OS}" == "linux" ]]; then
@@ -2083,7 +2299,7 @@ if [[ -z "$repo_path" ]]; then
 fi
 
 # Ранний EXIT-trap: temp-файлы не остаются даже при exit до основного trap.
-trap 'cleanup_temp_files' EXIT
+trap '_LOAD_EXIT_CODE=$?; cleanup_temp_files' EXIT
 
 # Нормализация пути основной конфигурации
 if [[ "$CONFIG_PATH" = /* || "$CONFIG_PATH" =~ ^[A-Za-z]:/ ]]; then
@@ -2213,12 +2429,14 @@ if [[ "$has_conf_changes" == "false" && "$has_extension_changes" == "false" ]]; 
     timing_mark "изменений нет"
     if [[ "${conf_list_before_cache:-0}" -eq 0 ]]; then
         abort_empty_load_after_merge "${RESOLVED_LOAD_MARKER:-}" || {
+            LOAD_HISTORY_REASON="пустая загрузка после merge (exit 21)"
             rm -f temp_changed_files.txt temp_changed_extensions.txt
             exit 21
         }
     fi
     if [[ "$REOPEN_CLIENT_AFTER_LOAD" != "true" && "$REOPEN_DESIGNER_AFTER_LOAD" != "true" && "$UPDATE_DB" != "true" ]]; then
         timing_summary "conf: 0 файлов | расширения: 0"
+        LOAD_HISTORY_REASON="нечего грузить"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 0
     fi
@@ -2243,7 +2461,7 @@ if [[ "$nothing_to_load" != "true" ]]; then
     mkdir -p "$repo_path/.tmp"
     full_output_file="$repo_path/.tmp/$OUTPUT_FILE"
     _LIST_OUTPUT_FILE="$full_output_file"
-    trap 'cleanup_temp_files; cleanup_changed_files_list' EXIT
+    trap '_LOAD_EXIT_CODE=$?; cleanup_temp_files; cleanup_changed_files_list' EXIT
     {
         printf '\xEF\xBB\xBF'
         cat temp_changed_files.txt
@@ -2285,6 +2503,7 @@ if [[ "$AUTO_CLOSE_CLIENT" == "true" ]]; then
     close_1c_enterprise
     if [[ $? -ne 0 ]]; then
         log "ERROR" "Не удалось закрыть клиент. Выполнение прервано."
+        LOAD_HISTORY_REASON="не удалось закрыть клиент"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 1
     fi
@@ -2295,6 +2514,7 @@ if [[ "$AUTO_CLOSE_DESIGNER" == "true" ]]; then
     close_1c_designer
     if [[ $? -ne 0 ]]; then
         log "ERROR" "Не удалось закрыть конфигуратор. Выполнение прервано."
+        LOAD_HISTORY_REASON="конфигуратор не закрыт или его сеанс в ИБ не освободился"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 1
     fi
@@ -2309,17 +2529,20 @@ else
                 close_1c_designer
                 if [[ $? -ne 0 ]]; then
                     log "ERROR" "Не удалось закрыть конфигуратор. Выполнение прервано."
+                    LOAD_HISTORY_REASON="конфигуратор не закрыт или его сеанс в ИБ не освободился"
                     rm -f temp_changed_files.txt temp_changed_extensions.txt
                     exit 1
                 fi
             else
                 log "ERROR" "Загрузка прервана пользователем: активный конфигуратор не закрыт"
+                LOAD_HISTORY_REASON="активный конфигуратор не закрыт (отказ пользователя)"
                 rm -f temp_changed_files.txt temp_changed_extensions.txt
                 exit 2
             fi
         else
             log "ERROR" "Загрузка прервана: активный конфигуратор не закрыт, а stdin неинтерактивный"
             log "ERROR" "Закройте конфигуратор вручную или запустите скрипт с --allow-close-designer"
+            LOAD_HISTORY_REASON="активный конфигуратор не закрыт (stdin неинтерактивный)"
             rm -f temp_changed_files.txt temp_changed_extensions.txt
             exit 2
         fi
@@ -2346,11 +2569,12 @@ if { [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]] || 
     && ib_connection_is_file && apache_is_running; then
     if ! apache_stop; then
         log "ERROR" "Stop Apache не удался — загрузка отменена"
+        LOAD_HISTORY_REASON="не удалось остановить Apache перед импортом"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 30
     fi
     _slot_apache_was_running="true"
-    trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_temp_files; cleanup_changed_files_list' EXIT
+    trap '_LOAD_EXIT_CODE=$?; log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_temp_files; cleanup_changed_files_list' EXIT
 fi
 else
 _slot_apache_was_running="false"
@@ -2403,10 +2627,12 @@ if [[ "$has_conf_changes" == "true" && -f "$PARENT_CONFIG_BIN" && "$FULL_RESYNC"
         preflight_exit_code=$?
         if [[ $preflight_exit_code -eq 20 ]]; then
             log "ERROR" "Загрузка остановлена: нужно снять объекты с поддержки или запустить скрипт с --auto-unsupport"
+            LOAD_HISTORY_REASON="preflight поддержки: объекты на поддержке (exit 20)"
             rm -f temp_changed_files.txt
             exit 20
         elif [[ $preflight_exit_code -ne 0 ]]; then
             log "ERROR" "Preflight по поддержке завершился с ошибкой (код: $preflight_exit_code)"
+            LOAD_HISTORY_REASON="preflight поддержки: exit $preflight_exit_code"
             rm -f temp_changed_files.txt
             exit $preflight_exit_code
         fi
@@ -2483,6 +2709,7 @@ if [[ "$has_conf_changes" == "true" ]]; then
         log "ERROR" "Загрузка $CONFIG_PATH/ завершилась с ошибкой (код: $load_exit_code)"
         dump_load_log "$LOAD_LOG_FILE"
         diagnose_load_failure "$LOAD_LOG_FILE"
+        LOAD_HISTORY_REASON="загрузка conf: exit $load_exit_code"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit $load_exit_code
     fi
@@ -2542,6 +2769,7 @@ if [[ "$has_extension_changes" == "true" ]]; then
             log "ERROR" "Загрузка расширения $extension_name завершилась с ошибкой (код: $load_exit_code)"
             dump_load_log "$LOAD_LOG_FILE"
             diagnose_load_failure "$LOAD_LOG_FILE"
+            LOAD_HISTORY_REASON="загрузка расширения $extension_name: exit $load_exit_code"
             rm -f temp_changed_files.txt temp_changed_extensions.txt
             exit $load_exit_code
         fi
@@ -2561,10 +2789,11 @@ if [[ "$UPDATE_DB" == "true" ]]; then
         apache_was_running="true"
         if ! apache_stop; then
             log "ERROR" "Stop Apache не удался — обновление БД отменено"
+            LOAD_HISTORY_REASON="не удалось остановить Apache перед UpdateDB"
             rm -f temp_changed_files.txt temp_changed_extensions.txt
             exit 30
         fi
-        trap 'log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_temp_files; cleanup_changed_files_list' EXIT
+        trap '_LOAD_EXIT_CODE=$?; log "WARN" "Аварийный выход — пробую поднять Apache"; apache_start || true; cleanup_temp_files; cleanup_changed_files_list' EXIT
     fi
 
     if [[ "$has_extension_changes" == "true" ]]; then
@@ -2584,6 +2813,7 @@ if [[ "$UPDATE_DB" == "true" ]]; then
             if [[ $update_db_exit_code -ne 0 ]]; then
                 log "ERROR" "Обновление расширения $extension_name в БД завершилось с ошибкой (код: $update_db_exit_code)"
                 dump_load_log "$LOAD_LOG_FILE"
+                LOAD_HISTORY_REASON="UpdateDB расширения $extension_name: exit $update_db_exit_code"
                 rm -f temp_changed_files.txt temp_changed_extensions.txt
                 exit $update_db_exit_code
             fi
@@ -2630,6 +2860,7 @@ if [[ "$UPDATE_DB" == "true" ]]; then
         if [[ $update_db_exit_code -ne 0 ]]; then
             log "ERROR" "Обновление основной конфигурации базы данных завершилось с ошибкой (код: $update_db_exit_code)"
             dump_load_log "$LOAD_LOG_FILE"
+            LOAD_HISTORY_REASON="UpdateDB основной конфигурации: exit $update_db_exit_code"
             rm -f temp_changed_files.txt temp_changed_extensions.txt
             exit $update_db_exit_code
         fi
@@ -2712,6 +2943,7 @@ if [[ "$REOPEN_CLIENT_AFTER_LOAD" == "true" ]]; then
     if [[ ! -f "$THIN_CLIENT_CMD_UNIX" && ! -f "$THIN_CLIENT_CMD" ]]; then
         log "ERROR" "Тонкий клиент 1С не найден: $THIN_CLIENT_CMD"
         log "ERROR" "Для режима -C нужен 1cv8c.exe рядом с DESIGNER_PATH. Толстый клиент 1cv8.exe не запускаю."
+        LOAD_HISTORY_REASON="тонкий клиент не найден рядом с DESIGNER_PATH"
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 1
     fi
@@ -2739,5 +2971,11 @@ if [[ "${PROJECT_OS}" == "linux" && "${IB_CONNECTION:-}" == *"/srv/ib"* ]]; then
             || log "WARN" "не удалось выставить права для user agent"
     fi
 fi
+
+# Журнал загрузок: явная запись на успешном пути (ветки с apache_start снимают
+# EXIT-trap через `trap - EXIT` — там cleanup не вызывается). Пишем до rm
+# temp-файлов — списки файлов читаются из них.
+_LOAD_EXIT_CODE=0
+load_history_write
 
 rm -f temp_changed_files.txt temp_changed_extensions.txt
