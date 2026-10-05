@@ -415,8 +415,8 @@ build_ibcmd_db_args() {
 # Аутентификация пользователя ИБ для ibcmd (-u/-P), источники как у ib_config_auth_suffix
 build_ibcmd_auth() {
     local u p
-    u="${AGENT_IB_USER:-${IB_USER:-${WEB_TEST_USER:-}}}"
-    p="${AGENT_IB_PASSWORD:-${IB_PASSWORD:-${WEB_TEST_PASSWORD:-}}}"
+    u="${AGENT_IB_USER:-${IB_USER:-${IBSRV_USER:-${WEB_TEST_USER:-}}}}"
+    p="${AGENT_IB_PASSWORD:-${IB_PASSWORD:-${IBSRV_PASSWORD:-${WEB_TEST_PASSWORD:-}}}}"
     IBCMD_AUTH=""
     if [[ -n "$u" ]]; then
         IBCMD_AUTH="-u \"$u\""
@@ -475,8 +475,8 @@ ibcmd_import_conf() {
 # /N и опционально /P для пакетного CONFIG в слоте (см. lib.sh agent-container).
 ib_config_auth_suffix() {
     local u p
-    u="${AGENT_IB_USER:-${IB_USER:-${WEB_TEST_USER:-}}}"
-    p="${AGENT_IB_PASSWORD:-${IB_PASSWORD:-${WEB_TEST_PASSWORD:-}}}"
+    u="${AGENT_IB_USER:-${IB_USER:-${IBSRV_USER:-${WEB_TEST_USER:-}}}}"
+    p="${AGENT_IB_PASSWORD:-${IB_PASSWORD:-${IBSRV_PASSWORD:-${WEB_TEST_PASSWORD:-}}}}"
     IB_CONFIG_AUTH=""
     if [[ -n "$u" ]]; then
         IB_CONFIG_AUTH="/N${u}"
@@ -828,7 +828,7 @@ guard_ib_designer_session() {
     lines=$(list_ib_designer_sessions); rc=$?
     if [[ $rc -ne 0 ]]; then
         LOAD_HISTORY_SESSIONS="${LOAD_HISTORY_SESSIONS:-probe-unavailable}"
-        log "INFO" "Защита «висячий сеанс конфигуратора»: проба недоступна — пропускаю"
+        log "WARN" "Защита «висячий сеанс конфигуратора»: пробу снять не удалось (узел/ibcmd/креды) — загрузка идёт БЕЗ проверки висячего сеанса"
         return 0
     fi
     if [[ -z "$lines" ]]; then
