@@ -53,6 +53,13 @@ OUT_LOG="$STATE_DIR/http.out.log"
 VENV_DIR="$ROOT/.venv-answer42"
 PYTHON="$VENV_DIR/bin/python"
 DEFAULT_BIN="$VENV_DIR/bin/answer42"
+# Windows/Git Bash: venv раскладывается в Scripts/, а не bin/. venv_python() объявлен ниже,
+# поэтому пробуем раскладки прямо здесь — иначе install/start ищут несуществующий bin/python.
+if [[ ! -x "$PYTHON" && -x "$VENV_DIR/Scripts/python.exe" ]]; then
+    PYTHON="$VENV_DIR/Scripts/python.exe"
+    DEFAULT_BIN="$VENV_DIR/Scripts/answer42.exe"
+    [[ -x "$DEFAULT_BIN" ]] || DEFAULT_BIN="$VENV_DIR/Scripts/answer42"
+fi
 
 # Git Bash: в .env пути пишут как C:\a\b — bash такие не понимает.
 norm_path() { local p="${1//\\//}"; printf '%s' "$p"; }
@@ -479,6 +486,11 @@ case "$ACTION" in
             install_fork
         else
             python3 -m venv "$VENV_DIR"
+            # Только что созданный venv: подхватываем фактическую раскладку (bin/ или Scripts/).
+            [[ ! -x "$PYTHON" && -x "$VENV_DIR/Scripts/python.exe" ]] && PYTHON="$VENV_DIR/Scripts/python.exe"
+            [[ -x "$PYTHON" ]] || { echo "Не найден python в $VENV_DIR" >&2; exit 1; }
+            DEFAULT_BIN="$(dirname "$PYTHON")/answer42"
+            [[ -x "$DEFAULT_BIN" ]] || DEFAULT_BIN="$(dirname "$PYTHON")/answer42.exe"
             "$PYTHON" -m pip install --upgrade pip
             "$PYTHON" -m pip install "answer42[screenshot,linux-window-control]>=0.5.13"
             echo "Готово: $VENV_DIR (проверка: $DEFAULT_BIN --version)"
