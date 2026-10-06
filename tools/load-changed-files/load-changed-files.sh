@@ -45,7 +45,10 @@
 #                               его больше не включают (убитый процесс оставляет
 #                               в ИБ висячий сеанс «Конфигуратор» на ibsrv).
 #       --reopen-designer       Открыть конфигуратор после загрузки
-#   -H, --human-mode            Старый режим: подробный лог + переоткрыть конфигуратор
+#   -H, --human-mode            Старый режим: подробный лог + переоткрыть конфигуратор.
+#                               Файловая ИБ эксклюзивна: перед запуском узел ibsrv
+#                               и зависший ibcmd на этой базе останавливаются,
+#                               /S на локальный узел конвертируется в /F"<IBSRV_DB_PATH>"
 #   -C, --open-client           Быстрый тест: загрузить, обновить БД (-U) и открыть
 #                               тонкий клиент 1С (1cv8c.exe). Закрытие конфигуратора/
 #                               клиента — только явное (--allow-close-designer /
@@ -410,6 +413,133 @@ build_ibcmd_db_args() {
         return 1
     fi
     return 0
+}
+
+# ── Файловая ИБ vs автономный сервер (ibsrv) ──────────────────────────────────
+# Файловая база эксклюзивна: пока её держит ibsrv (или зависший ibcmd --db-path),
+# вход по /F падает с «Ошибка разделения доступа к базе данных …1Cv8.1CD».
+# Поэтому перед запуском конфигуратора/клиента на файловой ИБ (-H, -C,
+# --reopen-designer) и перед движком designer на /F держателей глушим.
+
+_ibsrv_pid_file_abs() {
+    local f="${IBSRV_PID_FILE:-.tmp/ibsrv/ibsrv.pid}" root="${repo_path:-}"
+    [[ -z "$root" ]] && { root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(pwd); }
+    [[ "$f" != /* && ! "$f" =~ ^[A-Za-z]: ]] && f="$root/$f"
+    printf '%s\n' "$f"
+}
+
+# pid живого узла ibsrv: pid-файл + проверка имени процесса (защита от reuse PID).
+ibsrv_running_pid() {
+    local pid
+    pid=$(ibcmd_remote_pid) || return 1
+    if [[ "${PROJECT_OS}" == "linux" ]]; then
+        kill -0 "$pid" 2>/dev/null || return 1
+        ps -p "$pid" -o comm= 2>/dev/null | grep -qi ibsrv || return 1
+    else
+        MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" tasklist /FI "PID eq $pid" /NH /FO CSV 2>/dev/null \
+            | grep -qi '"ibsrv' || return 1
+    fi
+    printf '%s\n' "$pid"
+}
+
+# ASCII-lower + слэши: та же нормализация, что _ib_norm_path в tools/os/process-1c.sh
+_load_norm_db_path() {
+    printf '%s' "$1" | tr '\\' '/' | sed 's|/*$||' | LC_ALL=C tr '[:upper:]' '[:lower:]'
+}
+
+# Остановка узла ibsrv: канон — db-server.py -Action stop (taskkill + снятие
+# pid-файла); фолбэк — kill по pid. Протухший pid-файл снимаем всегда —
+# иначе следующий прогон считает узел живым (ibcmd --pid → код 127).
+stop_ibsrv_node() {
+    local pid="$1" sk="" c
+    for c in .cursor/skills/db-server/scripts/db-server.py \
+             .agents/skills/db-server/scripts/db-server.py; do
+        [[ -f "$c" ]] && { sk="$c"; break; }
+    done
+    if [[ -n "$sk" ]]; then
+        MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" run_python "$sk" -Action stop \
+            || log "WARN" "db-server stop вернул ошибку — проверь узел вручную (-Action status)"
+    elif declare -F _kill_pids >/dev/null 2>&1; then
+        _kill_pids "Узел ibsrv" "$pid"
+    else
+        log "WARN" "Не смог остановить узел ibsrv (нет db-server.py и _kill_pids) — остановите вручную"
+    fi
+    rm -f "$(_ibsrv_pid_file_abs)" 2>/dev/null || true
+}
+
+# Зависшие ibcmd с этой базой в командной строке (--db-path держит файловую ИБ
+# монопольно). Читающие подкоманды не исключаем — они тоже держат базу,
+# а их прогон короткий; зависший ibcmd без признаков базы не трогаем.
+kill_ibcmd_on_db_path() {
+    local db_path="$1" tok pids=""
+    tok=$(basename "$db_path")
+    [[ -n "$tok" ]] || return 0
+    case "${PROJECT_OS}" in
+        linux)
+            command -v pgrep >/dev/null 2>&1 || return 0
+            pids=$(pgrep -af "ibcmd" 2>/dev/null | grep -F -- "$tok" | awk '{print $1}' || true)
+            ;;
+        windows)
+            command -v powershell.exe >/dev/null 2>&1 || return 0
+            declare -F _ib_win_path >/dev/null 2>&1 || return 0
+            local tf tf_win ps_cmd
+            tf=$(mktemp) || return 0
+            printf '%s\n' "$tok" > "$tf"
+            tf_win=$(_ib_win_path "$tf")
+            ps_cmd="[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \$tok = Get-Content -LiteralPath '$tf_win' -Encoding UTF8 | Select-Object -First 1; if ([string]::IsNullOrWhiteSpace(\$tok)) { return }; Get-CimInstance Win32_Process | Where-Object { \$_.Name -eq 'ibcmd.exe' -and \$_.CommandLine -and \$_.CommandLine -like ('*' + \$tok + '*') } | Select-Object -ExpandProperty ProcessId"
+            pids=$(MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" powershell.exe -NoProfile -Command "$ps_cmd" 2>/dev/null | tr -d '\r' | tr '\n' ' ' || true)
+            rm -f "$tf"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+    pids=$(echo "$pids" | tr -s ' \n' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [[ -z "${pids// /}" ]] && return 0
+    log "WARN" "Завершаю зависший ibcmd на этой ИБ (PID ${pids}): --db-path держит файловую базу монопольно"
+    declare -F _kill_pids >/dev/null 2>&1 && _kill_pids "ibcmd" $pids
+}
+
+# Освобождение файловой ИБ перед запуском 1cv8 по /F: узел ibsrv + зависшие ibcmd.
+# Узел, обслуживающий ДРУГУЮ базу (IBSRV_DB_PATH задан и не совпадает), не трогаем.
+free_file_base() {
+    local db_path="$1" pid
+    if pid=$(ibsrv_running_pid); then
+        if [[ -n "${IBSRV_DB_PATH:-}" ]] \
+            && [[ "$(_load_norm_db_path "$(win_to_unix_path "$IBSRV_DB_PATH")")" \
+                  != "$(_load_norm_db_path "$(win_to_unix_path "$db_path")")" ]]; then
+            log "WARN" "Узел ibsrv (pid $pid) обслуживает другую базу ($IBSRV_DB_PATH) — не останавливаю"
+        else
+            log "WARN" "Останавливаю узел ibsrv (pid $pid): файловая ИБ эксклюзивна, иначе запуск по /F упадёт с «Ошибка разделения доступа»"
+            stop_ibsrv_node "$pid"
+            log "WARN" "MCP/веб на узле недоступны, пока он остановлен. Вернуть после работы:"
+            log "WARN" "  MSYS_NO_PATHCONV=1 python .cursor/skills/db-server/scripts/db-server.py -Action start"
+        fi
+    else
+        rm -f "$(_ibsrv_pid_file_abs)" 2>/dev/null || true
+    fi
+    kill_ibcmd_on_db_path "$db_path"
+}
+
+# Строка подключения для запуска конфигуратора/клиента после загрузки (-H/-C).
+# /F — как есть. /S на локальный узел ibsrv + designer → /F"<IBSRV_DB_PATH>":
+# конфигуратору нужен файловый вход, живой узел держит его монопольно.
+# Клиент (-C) по /S не конвертируем — тонкий клиент через узел работает.
+# Результат — LAUNCH_CONNECTION; файловая база при необходимости освобождается.
+prepare_launch_connection() {
+    local kind="$1" conn="$IB_CONNECTION" db_path=""
+    LAUNCH_CONNECTION="$conn"
+    if [[ "$conn" =~ ^[[:space:]]*/[Ff] ]]; then
+        db_path=$(printf '%s' "$conn" | sed -E 's|^[[:space:]]*/[Ff][[:space:]]*||' | tr -d '"')
+    elif [[ "$kind" == "designer" && "$conn" =~ ^[[:space:]]*/[Ss] \
+            && -n "${IBSRV_DB_PATH:-}" && -n "${IBSRV_NAME:-}" \
+            && "$conn" == *"$IBSRV_NAME"* ]]; then
+        db_path="$IBSRV_DB_PATH"
+        LAUNCH_CONNECTION="/F\"$(unix_to_win_path "$(win_to_unix_path "$db_path")")\""
+        log "INFO" "Конфигуратор — на файловой ИБ: $LAUNCH_CONNECTION"
+    fi
+    [[ -n "$db_path" ]] || return 0
+    free_file_base "$db_path"
 }
 
 # Аутентификация пользователя ИБ для ibcmd (-u/-P), источники как у ib_config_auth_suffix
@@ -2130,6 +2260,8 @@ while [[ $# -gt 0 ]]; do
             echo "  -u, --auto-unsupport        Автоматически снимать с поддержки загружаемые объекты"
             echo "  -U, --update-db             Обновить конфигурацию базы данных после загрузки"
             echo "      --reopen-designer       Открыть конфигуратор после загрузки"
+            echo "                              (на файловой ИБ узел ibsrv/зависший ibcmd глушатся,"
+            echo "                              /S на локальный узел → /F\"<IBSRV_DB_PATH>\")"
             echo "      --force-configuration   Всегда загружать Configuration.xml (игнорировать кэш для этого файла)"
             echo "      --list-file PATH        Фолбэк: явный список (заменяет git); PATH=- для stdin"
             echo "      --no-extensions         Загружать только conf, без расширений (cfe.xml)"
@@ -2550,6 +2682,17 @@ else
 fi
 
 if [[ "$nothing_to_load" != "true" || "$UPDATE_DB" == "true" ]]; then
+
+# Движок designer на файловой ИБ: живой узел ibsrv / зависший ibcmd держат базу
+# монопольно — любой запуск 1cv8 CONFIG по /F упадёт на «разделении доступа».
+# Освобождаем до импорта/UpdateDBCfg (движку ibcmd через --pid узел нужен живой —
+# там сюда не заходим).
+if [[ "$LOAD_ENGINE" == "designer" ]] && ib_connection_is_file; then
+    _file_base_path=$(printf '%s' "$IB_CONNECTION" | sed -E 's|^[[:space:]]*/[Ff][[:space:]]*||' | tr -d '"')
+    free_file_base "$_file_base_path"
+    unset _file_base_path
+fi
+
 if [[ "$nothing_to_load" != "true" ]]; then
 timing_mark "подготовка конфигуратора"
 
@@ -2947,11 +3090,13 @@ if [[ "$REOPEN_CLIENT_AFTER_LOAD" == "true" ]]; then
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 1
     fi
+    prepare_launch_connection client
     log "INFO" "Запуск тонкого клиента 1С:Предприятие: $THIN_CLIENT_CMD ${CLIENT_LAUNCH_KEYS:-}"
-    run_1c_command "\"$THIN_CLIENT_CMD\" ENTERPRISE $IB_CONNECTION ${CLIENT_LAUNCH_KEYS:-}" &
+    run_1c_command "\"$THIN_CLIENT_CMD\" ENTERPRISE $LAUNCH_CONNECTION ${CLIENT_LAUNCH_KEYS:-}" &
 elif [[ "$REOPEN_DESIGNER_AFTER_LOAD" == "true" ]]; then
+    prepare_launch_connection designer
     log "INFO" "Запуск конфигуратора для проверки..."
-    run_1c_command "\"$DESIGNER_CMD\" CONFIG $IB_CONNECTION" &
+    run_1c_command "\"$DESIGNER_CMD\" CONFIG $LAUNCH_CONNECTION" &
 else
     log "INFO" "Перезапуск конфигуратора/клиента отключен"
 fi
