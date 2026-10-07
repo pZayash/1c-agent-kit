@@ -48,7 +48,10 @@
 #   -H, --human-mode            Старый режим: подробный лог + переоткрыть конфигуратор.
 #                               Файловая ИБ эксклюзивна: перед запуском узел ibsrv
 #                               и зависший ibcmd на этой базе останавливаются,
-#                               /S на локальный узел конвертируется в /F"<IBSRV_DB_PATH>"
+#                               /S на локальный узел конвертируется в /F"<IBSRV_DB_PATH>".
+#                               Узел не нужен вовсе: при LOAD_ENGINE=ibcmd + /S на
+#                               локальный узел движок сам заменяется на designer по /F
+#                               (мёртвый ibsrv — не отказ).
 #   -C, --open-client           Быстрый тест: загрузить, обновить БД (-U) и открыть
 #                               тонкий клиент 1С (1cv8c.exe). Закрытие конфигуратора/
 #                               клиента — только явное (--allow-close-designer /
@@ -2263,6 +2266,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -n, --no-close              Запретить автозакрытие конфигуратора"
             echo "      --allow-close-designer  Явно разрешить автозакрытие конфигуратора (единственный способ)"
             echo "  -H, --human-mode            Подробный лог + переоткрыть конфигуратор после загрузки"
+            echo "                              (файловая ИБ за локальным узлом → designer по /F, узел не нужен)"
             echo "  -C, --open-client           Загрузить, обновить БД и открыть тонкий клиент (1cv8c.exe)"
             echo "                              (закрытие процессов не включает — только --allow-close-designer/AUTO_CLOSE_CLIENT)"
             echo "      --client-keys KEYS      Дополнительные ключи запуска клиента (строка целиком)"
@@ -2359,6 +2363,17 @@ fi
 
 ib_config_auth_suffix
 normalize_ib_connection_linux
+
+# -H на файловой ИБ за локальным узлом ibsrv: движок ibcmd требует живой узел,
+# а финал -H всё равно гасит узел и открывает конфигуратор на /F — сразу идём
+# конфигуратором по /F, поднимать узел не нужно (мёртвый PID ≠ отказ).
+if [[ "$REOPEN_DESIGNER_AFTER_LOAD" == "true" && "$LOAD_ENGINE" == "ibcmd" \
+      && -n "${IBSRV_PID_FILE:-}" && -n "${IBSRV_DB_PATH:-}" && -n "${IBSRV_NAME:-}" \
+      && "$IB_CONNECTION" == *"$IBSRV_NAME"* ]]; then
+    LOAD_ENGINE="designer"
+    IB_CONNECTION="/F\"$(unix_to_win_path "$(win_to_unix_path "$IBSRV_DB_PATH")")\""
+    log "INFO" "-H: файловая ИБ за узлом ibsrv — движок designer по $IB_CONNECTION (узел не нужен)"
+fi
 
 # Полный путь к 1cv8 (до LoadConfigFromFiles / UpdateDBCfg / -H/-C)
 if [[ "${PROJECT_OS}" == "linux" ]]; then
