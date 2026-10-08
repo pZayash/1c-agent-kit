@@ -35,6 +35,8 @@
    `b2c3d4e5-…` и copy-paste. Перед коммитом — `rg` по uuid в `conf/` **и**
    `cfe.xml/`. Новые объекты — обновить `Configuration.xml` (порядок `ChildObjects`).
 9. **`load-changed-files.sh -U --no-extensions`** — если не трогали `cfe.xml/`.
+10. **`Rights.xml`** — только правоносные виды (`Enum`, `XDTOPackage` и др.
+    «не-данные» виды весят/роняют загрузку без ошибки). Чек `rights-xml-lint`.
 
 ## Антипаттерны (симптом → исправление)
 
@@ -48,6 +50,30 @@
 | Группа страниц формы не грузится | `PageGroupExtInfo` (опечатка) | `PagesGroupExtInfo` (с «s») |
 | Страница формы отключена/валидация падает | `<Page>` без `<enabled>` | `<enabled>true</enabled>` |
 | Конфликт UUID (часто MCP) | Дубль conf ↔ cfe | GUID в **conf**, не MCP |
+| Load виснет без ошибки | `<name>Enum.X</name>` в Rights.xml | Убрать — у Enum прав нет |
+
+### Права на неправоносные объекты (Enum и др.)
+
+Платформа **не имеет прав** на `Enum`, `XDTOPackage`, `WSReference`, `Language`,
+`FunctionalOption(s)(Parameter)`, `DefinedType`, `CommonModule`, `CommonTemplate`,
+`CommonPicture`, `EventSubscription`, `ScheduledJob`, `CommandGroup`, `Interface`,
+`Role`, `Style(Item)`. Если агент добавит `<object><name>Enum.X</name>` в
+`Rights.xml` (типично при «верни права на набор объектов яя_»), файл валиден
+синтаксически, но **LoadConfigFromFiles виснет/падает** — симптом «загрузка
+не идёт, ошибок нет».
+
+Правоносные виды (полный список — в `tools/rights-xml-lint/check.py`):
+`Configuration`, `Constant`, `Sequence`, `DocumentJournal`, `Catalog`,
+`Document`, `ChartOfAccounts`, `ChartOfCharacteristicTypes`,
+`ChartOfCalculationTypes`, `InformationRegister`, `AccumulationRegister`,
+`AccountingRegister`, `CalculationRegister`, `BusinessProcess`, `Task`,
+`ExchangePlan`, `ExternalDataSource`, `Report`, `DataProcessor`,
+`SettingsStorage`, `CommonAttribute`, `CommonCommand`, `CommonForm`,
+`SessionParameter`, `FilterCriterion`, `Subsystem`, `WebService`,
+`HTTPService`, `IntegrationService`.
+
+Проверка: `python tools/rights-xml-lint/check.py conf/Roles` — входит в
+`check-all`/`check-changed.sh`, подхватывается pre-commit хуком.
 
 ### Число `Число(3)` в DSL
 

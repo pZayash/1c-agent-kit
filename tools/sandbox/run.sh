@@ -72,7 +72,11 @@ _remove_legacy_global_container() {
 _recreate_container() {
     docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
     echo "Сборка и запуск контейнера ${CONTAINER_NAME} → ${WORKSPACE_DIR} (host.docker.internal → хост)..."
-    docker build -t "${IMAGE_NAME}" "${SANDBOX_DIR}"
+    # Образ уже собран — не дергаем docker build: офлайн/прокси-среды ломаются
+    # на apt-get внутри build, хотя рабочий image локально есть.
+    if ! docker image inspect "${IMAGE_NAME}" >/dev/null 2>&1; then
+        docker build -t "${IMAGE_NAME}" "${SANDBOX_DIR}"
+    fi
     docker run -d --name "${CONTAINER_NAME}" \
         "${SANDBOX_EXTRA_HOSTS[@]}" \
         -v "/${WORKSPACE_DIR}:/workspace" \
