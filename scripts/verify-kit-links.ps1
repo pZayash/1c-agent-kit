@@ -52,6 +52,7 @@ function Assert-KitLink([string]$rel, [string]$label) {
 
 Assert-KitLink ".cursor\skills\handoff" "skills/handoff"
 Assert-KitLink "tools\answer42" "tools/answer42"
+Assert-KitLink "tools\rights-xml-lint" "tools/rights-xml-lint"
 
 $local = Read-LocalNames (Join-Path $root "tools\cc-1c-skills-sync\local-tools.txt")
 if (-not $local.ContainsKey("load-changed-files")) {

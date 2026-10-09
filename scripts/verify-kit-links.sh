@@ -51,6 +51,7 @@ check_link() {
 
 check_link "$CONSUMER_ROOT/.cursor/skills/handoff" "skills/handoff"
 check_link "$CONSUMER_ROOT/tools/answer42" "tools/answer42"
+check_link "$CONSUMER_ROOT/tools/rights-xml-lint" "tools/rights-xml-lint"
 
 if [[ -z "${local_tools[load-changed-files]:-}" ]]; then
   check_link "$CONSUMER_ROOT/tools/load-changed-files" "tools/load-changed-files"
