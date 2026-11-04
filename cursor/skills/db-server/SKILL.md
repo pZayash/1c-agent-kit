@@ -4,7 +4,7 @@ description: >-
   Отладочный узел 1С на автономном сервере (ibsrv): start/stop/status процесса,
   публикация HTTP-сервисов (MCP) через конфигурационный yaml, отладка по
   --debug. Нужен, когда требуется серверный режим и отладчик на копии базы.
-argument-hint: "[-Action start|stop|status|yaml|basic] [--show]"
+argument-hint: "[-Action start|stop|status|yaml|basic] [--show] [--no-hold]"
 allowed-tools:
   - Bash
   - Read
@@ -43,6 +43,7 @@ allowed-tools:
 | `IBSRV_SERVICES` | сервисы расширений через запятую, дефолт `mcp,mcp-dev` |
 | `IBSRV_USER`, `IBSRV_PASSWORD` | учётка ИБ для Basic (фолбэк — `WEB_TEST_*`) |
 | `IBSRV_PID_FILE` | PID-файл узла; задан → `load-changed-files.sh` работает через `ibcmd --pid` |
+| `IBCMD_DATA` | каталог данных `ibcmd` (дефолт `<воркспейс>/.tmp/ibcmd-data`); общий каталог учётки — межпроектный мьютекс `«Ошибка блокировки каталога данных сервера»` |
 | `IBSRV_EXTRA_ARGS` | доп. флаги ibsrv (напр. `--enable-extended-designer-features`) |
 
 Порты выбирай так, чтобы не пересекаться с Apache-публикацией и другими узлами.
@@ -55,11 +56,39 @@ allowed-tools:
 ```bash
 SK=".cursor/skills/db-server/scripts/db-server.py"
 python "$SK" -Action yaml     # перегенерировать конфигурационный yaml
-python "$SK" -Action start    # запустить узел (detached, лог в .tmp/ibsrv)
-python "$SK" -Action status   # pid + состояние портов
-python "$SK" -Action stop     # остановить узел
+python "$SK" -Action start    # запустить узел (detached, лог в .tmp/ibsrv); снимает .hold
+python "$SK" -Action status   # pid + состояние портов + hold-файл watchdog'а
+python "$SK" -Action stop     # остановить узел и поставить .hold (пауза watchdog'а)
+python "$SK" -Action stop --no-hold   # остановить без .hold (только для скриптов)
 python "$SK" -Action basic --show   # Basic-заголовок для MCP-клиента
 ```
+
+**`-Action stop` может не суметь погасить узел** (rc=2): процесс запущен более
+привилегированной сессией (bb-агент elevated / задача `\ibsrv\ibsrv-nodes-start`
+с RunLevel Highest), а `taskkill` из обычного Git Bash получает «Отказано в доступе».
+Скрипт в этом случае честно говорит «НЕ УДАЛОСЬ остановить», **оставляет pid-файл** и
+создаёт запрос `<.tmp/ibsrv/.stop>`. Погасить без прав администратора:
+
+```bash
+MSYS_NO_PATHCONV=1 schtasks /Run /TN '\ibsrv\ibsrv-nodes-start'   # задача сделает stop по .stop
+```
+
+Не «лечить» это удалением pid-файла: узел продолжит держать файловую ИБ, а следующая
+загрузка упадёт «Ошибка блокировки информационной базы для конфигурирования».
+
+### Пауза watchdog'а (`.hold`)
+
+Если узел держит хост-vigil (задача `\ibsrv\ibsrv-nodes-start`, поднимает узел
+каждые 10 мин), то на время оффлайн-цикла `ibcmd` (импорт + `apply`, 20–25 мин
+на метаданных) её надо притормозить: `-Action stop` ставит пустой файл
+`.tmp/ibsrv/.hold`, watchdog его видит и базу не трогает. `-Action start` файл
+удаляет — база снова под контролем watchdog'а. Права администратора для этого
+не нужны.
+
+Обратное важно тоже: **забытый `.hold`** = база больше никогда не поднимется
+автоматически (`-Action status` показывает его возраст и предупреждает после
+суток). Скрипты (сам watchdog) останавливают узел с `--no-hold`, чтобы не
+оставить hold после неудачного старта.
 
 Проверка MCP после старта:
 
@@ -131,3 +160,8 @@ Administrator Guide (kb.1ci.com, Appendix 3) — см. память проект
   (нужен `MSYS_NO_PATHCONV=1`).
 - Сервер отдаёт `401` без кредов и `503` для непубликованного сервиса —
   это разные диагнозы: 503 = нужен `http-services` в yaml.
+- **`-Action stop` без `--no-hold` ставит `.hold`.** Это намеренно (агент гасит узел
+  под оффлайн-цикл), но если узел гасит автоматика — только `--no-hold`, иначе
+  неудачный старт оставит hold и watchdog перестанет поднимать базу.
+- **`-Action status` не доказывает живость.** Строка `запущен pid=<pid>` печатается,
+  даже когда порты закрыть; смотреть строки `слушает/закрыт` и `curl` → `200`.

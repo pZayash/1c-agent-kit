@@ -76,6 +76,9 @@ class Node:
         self.work = work
         self.pid_file = work / 'ibsrv.pid'
         self.log_file = work / 'ibsrv.log'
+        # Пауза watchdog'а (\ibsrv\ibsrv-nodes-start): пустой файл .hold — узел не поднимается.
+        # Ставится на время оффлайн-цикла ibcmd (apply метаданных 20-25 мин).
+        self.hold_file = work / '.hold'
         self.db_path = cfg(env, 'IBSRV_DB_PATH')
         self.name = cfg(env, 'IBSRV_NAME') or (Path(self.db_path).name if self.db_path else 'ib')
         self.config = cfg(env, 'IBSRV_CONFIG') or str(work / 'server.yaml')
@@ -165,7 +168,14 @@ class Node:
     def action_start(self) -> int:
         if self.pid():
             print(f'узел уже запущен, pid={self.pid()}')
+            self.hold_file.unlink(missing_ok=True)
+            self.stop_file.unlink(missing_ok=True)
             return 0
+        # Явный старт = узел снова под контролем watchdog'а.
+        if self.hold_file.exists():
+            self.hold_file.unlink()
+            print(f'снят hold-файл watchdog\'а: {self.hold_file}')
+        self.stop_file.unlink(missing_ok=True)
         self.action_yaml()
         Path(self.data).mkdir(parents=True, exist_ok=True)
         args = [self.exe, f'--config={self.config}', f'--data={self.data}']
@@ -198,31 +208,87 @@ class Node:
         print(f'  лог: {self.log_file}')
         return 0
 
-    def action_stop(self) -> int:
-        pid = self.pid()
-        if not pid:
-            print('узел не запущен')
-            return 0
+    @property
+    def stop_file(self) -> Path:
+        # Запрос на остановку для elevated-задачи (watchdog): обычный шелл не может убить
+        # процесс, запущенный более привилегированной сессией (bb-агент / задача Highest).
+        return self.work / '.stop'
+
+    def _kill(self, pid: int) -> tuple:
+        """Убить процесс и проверить результат. (успех, текст taskkill)"""
+        out = ''
         if os.name == 'nt':
-            subprocess.run(['taskkill', '/PID', str(pid), '/F'],
-                           capture_output=True, text=True)
+            res = subprocess.run(['taskkill', '/PID', str(pid), '/F'],
+                                 capture_output=True, text=True)
+            out = ((res.stdout or '') + (res.stderr or '')).strip()
         else:
             import signal
-            os.kill(pid, signal.SIGTERM)
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError as exc:
+                out = str(exc)
         for _ in range(10):
             time.sleep(1)
             if not self._alive(pid):
-                break
-        self.pid_file.unlink(missing_ok=True)
-        print(f'узел остановлен (pid={pid})')
-        return 0
+                return True, out
+        return False, out
+
+    def action_stop(self, hold: bool = True) -> int:
+        pid = self.pid()
+        if not pid:
+            print('узел не запущен (hold-файл не ставится: базу держать нечего)')
+            return 0
+        # hold — до остановки узла, иначе watchdog успеет поднять базу посреди цикла.
+        if hold:
+            self.hold_file.parent.mkdir(parents=True, exist_ok=True)
+            self.hold_file.write_text('', encoding='utf-8')
+            print(f'hold-файл watchdog\'а поставлен: {self.hold_file}')
+            print('  снять: -Action start (или удалить файл, если узел должен подниматься сам)')
+        else:
+            self.hold_file.unlink(missing_ok=True)
+        ok, out = self._kill(pid)
+        if ok:
+            self.pid_file.unlink(missing_ok=True)
+            self.stop_file.unlink(missing_ok=True)
+            print(f'узел остановлен (pid={pid})')
+            return 0
+        # НЕ рапортуем успех: база осталась занятой, любая загрузка потом упадёт
+        # «Ошибка блокировки информационной базы для конфигурирования».
+        print(f'НЕ УДАЛОСЬ остановить узел (pid={pid}) — процесс жив, база заблокирована.')
+        first = (out.splitlines() or [''])[0]
+        if first:
+            print(f'  taskkill: {first}')
+        print('  причина: процесс запущен более привилегированной сессией (bb-агент или')
+        print('  задача \\ibsrv\\ibsrv-nodes-start с RunLevel Highest) — из обычного шелла не убивается.')
+        self.stop_file.write_text('', encoding='utf-8')
+        print(f'  запрос на остановку поставлен: {self.stop_file}')
+        print('  выполнить (без прав администратора — задачу запустит elevated-сессия):')
+        print('    MSYS_NO_PATHCONV=1 schtasks /Run /TN "\\ibsrv\\ibsrv-nodes-start"')
+        print('  либо из шелла «от имени администратора»:')
+        print(f'    taskkill /PID {pid} /F')
+        print('  hold-файл оставлен: база не поднимется сама, пока не сделаете -Action start')
+        return 2
 
     def action_status(self) -> int:
         pid = self.pid()
-        print(f'узел: {"запущен pid=" + str(pid) if pid else "остановлен"}')
+        print(f'узел: {"запущен pid=" + str(pid) if pid else "нет pid-файла"}')
+        listening = 0
         for label, port in (('http', self.http_port), ('отладка', self.debug_port),
                             ('прямое соединение', self.regport)):
-            print(f'  {label}: {port} — {"слушает" if self.port_open(port) else "закрыт"}')
+            open_ = self.port_open(port)
+            listening += 1 if open_ else 0
+            print(f'  {label}: {port} — {"слушает" if open_ else "закрыт"}')
+        if not pid and listening:
+            print('  ВНИМАНИЕ: порты слушают, а pid-файла нет — узел запущен другой сессией')
+            print('  (pid-файл потерян старым stop/taskkill). Гасить: -Action stop (создаст .stop)')
+            print('  или tasklist /FI "IMAGENAME eq ibsrv.exe" + taskkill из elevated-шелла.')
+        if self.hold_file.exists():
+            age = int(time.time() - self.hold_file.stat().st_mtime) // 3600
+            print(f'  hold-файл: есть ({self.hold_file}, {age} ч) — watchdog базу не поднимает')
+            if age >= 24:
+                print('  ВНИМАНИЕ: hold старше суток — если оффлайн-цикл закончен, удалите файл')
+        else:
+            print('  hold-файл: нет — база под контролем watchdog\'а')
         return 0
 
     def action_basic(self, show: bool) -> int:
@@ -241,6 +307,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description='Отладочный узел 1С на автономном сервере')
     parser.add_argument('-Action', default='status', choices=DEFAULT_ACTIONS)
     parser.add_argument('--show', action='store_true', help='показать Basic-заголовок целиком')
+    parser.add_argument('--no-hold', action='store_true',
+                        help='stop: не ставить hold-файл watchdog-а (для скриптов, напр. start-ibsrv-nodes.ps1)')
     parser.add_argument('--root', default='.', help='корень потребителя (где .env)')
     args = parser.parse_args()
 
@@ -253,7 +321,7 @@ def main() -> int:
     if args.Action == 'start':
         return node.action_start()
     if args.Action == 'stop':
-        return node.action_stop()
+        return node.action_stop(hold=not args.no_hold)
     if args.Action == 'basic':
         return node.action_basic(args.show)
     return node.action_status()

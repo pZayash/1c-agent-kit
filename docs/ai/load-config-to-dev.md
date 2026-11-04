@@ -54,6 +54,12 @@ Upstream cc-1c: `db-load-git`, `db-load-xml`, `db-update`, `db-load-cf` —
   не останавливаются; список файлов — относительные пути к `--base-dir`.
   Конфигуратор по `/S` на `/UpdateDBCfg` на автономном сервере рвёт сеанс
   (`recv returns zero`, ассерт `m_dbOperationsBlock`) — использовать `ibcmd`.
+  **Каталог данных `ibcmd` (`IBCMD_DATA`)** — свой на воркспейс, дефолт
+  `<воркспейс>/.tmp/ibcmd-data`. Платформенный дефолт (`%LOCALAPPDATA%\1C\1cv8\
+  standalone-server`) один на учётку Windows и защищён `lock.pid`: два параллельных
+  `ibcmd` из разных проектов не работают одновременно — второй падает
+  «Ошибка блокировки каталога данных сервера» (код 127). `IBCMD_DATA=shared` —
+  осознанно вернуть общий каталог (сериализация всего хоста).
   Подробности — док потребителя (`docs/ai/dev-ib-ibsrv.md`).
 - **`--drop-designer-sessions`** / `IB_LOAD_DROP_DESIGNER_SESSIONS` — явно разрешить
   снятие висячих сеансов «Конфигуратор» в ИБ через `ibcmd session terminate`

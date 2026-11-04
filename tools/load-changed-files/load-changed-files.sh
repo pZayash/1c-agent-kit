@@ -418,6 +418,48 @@ build_ibcmd_db_args() {
     return 0
 }
 
+# ── Каталог данных сервера ibcmd (--data) ──────────────────────────────────────
+# У ibcmd каталог данных сервера один на учётку Windows (`%LOCALAPPDATA%\1C\1cv8\
+# standalone-server`) и защищён файлом `lock.pid`: два параллельных ibcmd — даже на
+# РАЗНЫХ базах и из разных воркспейсов — не работают одновременно. Второй падает
+# «Ошибка блокировки каталога данных сервера. Рабочий каталог заблокирован
+# процессом: <pid>» (код 127) и НЕ ждёт. Поэтому по умолчанию у каждого воркспейса
+# свой каталог: `<корень>/.tmp/ibcmd-data` (IBCMD_DATA переопределяет путь).
+# `IBCMD_DATA=shared` — вернуть общий каталог платформы (осознанное «сериализуем
+# загрузки всего хоста»). Каталог обязан быть один и тот же у import и apply,
+# иначе импорт не переносится в базу; и не должен лежать внутри каталога базы.
+ibcmd_data_args() {
+    local data="${IBCMD_DATA:-}" root="${repo_path:-}" abs
+    [[ -z "$root" ]] && { root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(pwd); }
+    case "$data" in
+        shared|off|default|platform)
+            log "WARN" "ibcmd: IBCMD_DATA=$data — общий каталог данных учётки (межпроектный мьютекс)."
+            log "WARN" "Параллельный ibcmd из другого воркспейса упадёт: «Ошибка блокировки каталога данных сервера»."
+            return 0
+            ;;
+        "") data="$root/.tmp/ibcmd-data" ;;
+    esac
+    # Относительный путь — от корня воркспейса, не от CWD вызова.
+    if [[ "$data" != /* && ! "$data" =~ ^[A-Za-z]:[\\/] ]]; then
+        data="$root/$data"
+    fi
+    if ! mkdir -p "$data" 2>/dev/null; then
+        log "ERROR" "ibcmd: не удалось создать каталог данных сервера: $data"
+        log "ERROR" "Задайте IBCMD_DATA в .env (абсолютный путь вне каталога базы)."
+        return 1
+    fi
+    if [[ "${PROJECT_OS}" == "linux" ]]; then
+        abs="$data"
+    else
+        abs=$(unix_to_win_path "$data")
+    fi
+    # --data принимается и в режиме --pid (проверено на 8.5.1.1302): изоляция нужна всем режимам.
+    IBCMD_DATA_ARGS="--data=\"$abs\""
+    IBCMD_DB_ARGS+=" $IBCMD_DATA_ARGS"
+    log "INFO" "ibcmd: каталог данных сервера --data=\"$abs\""
+    return 0
+}
+
 # ── Файловая ИБ vs автономный сервер (ibsrv) ──────────────────────────────────
 # Файловая база эксклюзивна: пока её держит ibsrv (или зависший ibcmd --db-path),
 # вход по /F падает с «Ошибка разделения доступа к базе данных …1Cv8.1CD».
@@ -453,21 +495,80 @@ _load_norm_db_path() {
 # Остановка узла ibsrv: канон — db-server.py -Action stop (taskkill + снятие
 # pid-файла); фолбэк — kill по pid. Протухший pid-файл снимаем всегда —
 # иначе следующий прогон считает узел живым (ibcmd --pid → код 127).
+# Жив ли процесс ibsrv с этим pid (по процессу, а не по pid-файлу).
+_pid_is_ibsrv() {
+    local pid="$1"
+    [[ -n "$pid" ]] || return 1
+    if [[ "${PROJECT_OS}" == "linux" ]]; then
+        kill -0 "$pid" 2>/dev/null || return 1
+        ps -p "$pid" -o comm= 2>/dev/null | grep -qi ibsrv || return 1
+    else
+        MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" tasklist /FI "PID eq $pid" /NH /FO CSV 2>/dev/null \
+            | grep -qi '"ibsrv' || return 1
+    fi
+    return 0
+}
+
+# Диагностика «узел не погасился». Молчаливое продолжение здесь дороже: дальше
+# конфигуратор по /F падает с «Ошибка блокировки информационной базы для
+# конфигурирования», и человек ищет причину в базе вместо прав/сессии.
+_ibsrv_stop_failed_block() {
+    local pid="$1" rc="$2" pid_file stop_file
+    pid_file=$(_ibsrv_pid_file_abs)
+    stop_file=".tmp/ibsrv/.stop"
+    log "ERROR" "──────────────────────────────────────────────────────────────"
+    log "ERROR" "НЕ УДАЛОСЬ остановить узел ibsrv (pid $pid) — база осталась занятой."
+    log "ERROR" "Следующий шаг (конфигуратор по /F) не выполняется: он упал бы с «Ошибка"
+    log "ERROR" "блокировки информационной базы для конфигурирования» и это выглядело бы"
+    log "ERROR" "как проблема базы. Скрипт завершается с кодом 32."
+    log "ERROR" "Код db-server.py -Action stop: ${rc:-неизвестен}."
+    log "ERROR" ""
+    log "ERROR" "Причина: узел запущен из более привилегированной сессии (bb-агент или"
+    log "ERROR" "задача \\ibsrv\\ibsrv-nodes-start с RunLevel Highest). Из обычного шелла taskkill"
+    log "ERROR" "получает «Отказано в доступе»: процесс жив, файловая ИБ заблокирована."
+    log "ERROR" ""
+    log "ERROR" "Как освободить базу (любой вариант):"
+    log "ERROR" "  1) без прав администратора — попросить задачу погасить узел:"
+    log "ERROR" "       test -f $stop_file || : > $stop_file"
+    log "ERROR" "       MSYS_NO_PATHCONV=1 schtasks /Run /TN '\\ibsrv\\ibsrv-nodes-start'"
+    log "ERROR" "     задача остановит узел по .stop и поставит .hold; затем повторите загрузку;"
+    log "ERROR" "  2) из шелла «от имени администратора»:  taskkill /PID $pid /F"
+    log "ERROR" "  3) штатно: python .cursor/skills/db-server/scripts/db-server.py -Action status|stop|start"
+    log "ERROR" ""
+    log "ERROR" "Метаданные базы в порядке — это не «битая база», а права на завершение процесса."
+    log "ERROR" "pid-файл оставлен намеренно ($pid_file): по нему видно живой узел."
+    log "ERROR" "──────────────────────────────────────────────────────────────"
+}
+
 stop_ibsrv_node() {
-    local pid="$1" sk="" c
+    local pid="$1" sk="" c rc=0 i
     for c in .cursor/skills/db-server/scripts/db-server.py \
              .agents/skills/db-server/scripts/db-server.py; do
         [[ -f "$c" ]] && { sk="$c"; break; }
     done
     if [[ -n "$sk" ]]; then
-        MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" run_python "$sk" -Action stop \
-            || log "WARN" "db-server stop вернул ошибку — проверь узел вручную (-Action status)"
+        MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" run_python "$sk" -Action stop
+        rc=$?
     elif declare -F _kill_pids >/dev/null 2>&1; then
         _kill_pids "Узел ibsrv" "$pid"
+        rc=$?
     else
-        log "WARN" "Не смог остановить узел ibsrv (нет db-server.py и _kill_pids) — остановите вручную"
+        log "WARN" "Не смог остановить узел ibsrv (нет db-server.py и _kill_pids)"
+        rc=1
     fi
-    rm -f "$(_ibsrv_pid_file_abs)" 2>/dev/null || true
+    # Проверяем по факту: db-server.py мог отчитаться успехом, а процесс жив
+    # (taskkill из непривилегированного шелла — «Отказано в доступе»).
+    # pid-файл снимаем только тогда, когда процесса действительно нет.
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if ! _pid_is_ibsrv "$pid"; then
+            rm -f "$(_ibsrv_pid_file_abs)" 2>/dev/null || true
+            log "INFO" "Узел ibsrv (pid $pid) остановлен (проверено: процесса нет)"
+            return 0
+        fi
+        sleep 1
+    done
+    _ibsrv_stop_failed_block "$pid" "$rc"
+    return 1
 }
 
 # Зависшие ibcmd с этой базой в командной строке (--db-path держит файловую ИБ
@@ -514,7 +615,9 @@ free_file_base() {
             log "WARN" "Узел ibsrv (pid $pid) обслуживает другую базу ($IBSRV_DB_PATH) — не останавливаю"
         else
             log "WARN" "Останавливаю узел ibsrv (pid $pid): файловая ИБ эксклюзивна, иначе запуск по /F упадёт с «Ошибка разделения доступа»"
-            stop_ibsrv_node "$pid"
+            if ! stop_ibsrv_node "$pid"; then
+                return 1
+            fi
             log "WARN" "MCP/веб на узле недоступны, пока он остановлен. Вернуть после работы:"
             log "WARN" "  MSYS_NO_PATHCONV=1 python .cursor/skills/db-server/scripts/db-server.py -Action start"
         fi
@@ -522,6 +625,7 @@ free_file_base() {
         rm -f "$(_ibsrv_pid_file_abs)" 2>/dev/null || true
     fi
     kill_ibcmd_on_db_path "$db_path"
+    return 0
 }
 
 # Строка подключения для запуска конфигуратора/клиента после загрузки (-H/-C).
@@ -2116,6 +2220,10 @@ SKIP_EXTENSIONS="${SKIP_EXTENSIONS:-false}"
 LOAD_ENGINE="${LOAD_ENGINE:-designer}"   # designer (1cv8.exe CONFIG) | ibcmd
 IBCMD_PATH="${IBCMD_PATH:-}"             # пусто = рядом с DESIGNER_PATH
 IBCMD_NO_CHECK="${IBCMD_NO_CHECK:-false}"  # true — --no-check у import files (быстро, без проверки метаданных)
+# Каталог данных сервера ibcmd (--data): пусто = <корень>/.tmp/ibcmd-data (свой на воркспейс),
+# shared = общий каталог учётки. См. ibcmd_data_args: общий каталог = межпроектный мьютекс.
+IBCMD_DATA="${IBCMD_DATA:-}"
+IBCMD_DATA_ARGS=""
 LIST_FILE=""
 RESET_LOAD_MARKER="${RESET_LOAD_MARKER:-false}"
 FULL_RESYNC="${FULL_RESYNC:-false}"   # полная загрузка conf/ целиком (без partial) + reset-marker
@@ -2246,6 +2354,10 @@ while [[ $# -gt 0 ]]; do
             IBCMD_PATH="$2"
             shift 2
             ;;
+        --ibcmd-data)
+            IBCMD_DATA="$2"
+            shift 2
+            ;;
         --ibcmd-no-check)
             IBCMD_NO_CHECK="true"
             shift
@@ -2319,6 +2431,10 @@ while [[ $# -gt 0 ]]; do
             echo "  LOAD_ENGINE               designer | ibcmd (по умолчанию designer)"
             echo "  IBCMD_PATH                Путь к ibcmd.exe (по умолчанию рядом с DESIGNER_PATH)"
             echo "  IBCMD_NO_CHECK            true — то же, что --ibcmd-no-check"
+            echo "  IBCMD_DATA                Каталог данных сервера ibcmd (--data). Пусто = <воркспейс>/.tmp/ibcmd-data;"
+            echo "                            shared = общий каталог учётки (загрузки всех проектов сериализуются," 
+            echo "                            второй ibcmd падает с «Ошибка блокировки каталога данных сервера»)"
+            echo "  --ibcmd-data PATH|shared  то же, что IBCMD_DATA (сильнее .env)"
             echo "  IBCMD_DBMS/IBCMD_DB_SERVER/IBCMD_DB_NAME/IBCMD_DB_USER/IBCMD_DB_PWD"
             echo "                            Параметры серверной ИБ для движка ibcmd (для /S подключений)"
             echo "  LOAD_VERBOSE              true — то же, что --verbose"
@@ -2408,6 +2524,9 @@ if [[ "$LOAD_ENGINE" == "ibcmd" ]]; then
         exit 1
     fi
     if ! build_ibcmd_db_args; then
+        exit 1
+    fi
+    if ! ibcmd_data_args; then
         exit 1
     fi
     build_ibcmd_auth
@@ -2715,7 +2834,13 @@ if [[ "$nothing_to_load" != "true" || "$UPDATE_DB" == "true" ]]; then
 # там сюда не заходим).
 if [[ "$LOAD_ENGINE" == "designer" ]] && ib_connection_is_file; then
     _file_base_path=$(printf '%s' "$IB_CONNECTION" | sed -E 's|^[[:space:]]*/[Ff][[:space:]]*||' | tr -d '"')
-    free_file_base "$_file_base_path"
+    if ! free_file_base "$_file_base_path"; then
+        log "ERROR" "Загрузка отменена: файловая ИБ занята, конфигуратор по /F с ней не запустится."
+        log "ERROR" "Освободите узел (см. рецепт выше) и запустите скрипт снова."
+        LOAD_HISTORY_REASON="узел ibsrv не остановлен: нет прав на завершение процесса"
+        rm -f temp_changed_files.txt temp_changed_extensions.txt
+        exit 32
+    fi
     unset _file_base_path
 fi
 
@@ -2904,7 +3029,16 @@ if [[ "$has_conf_changes" == "true" ]]; then
         if [[ -s temp_cache_update_list.txt ]]; then
             awk '!seen[$0]++' temp_cache_update_list.txt > temp_cache_update_list.uniq \
                 && mv temp_cache_update_list.uniq temp_cache_update_list.txt
-            update_conf_files_cache temp_cache_update_list.txt "$repo_path" "$CONFIG_PATH_ABS"
+            # Загрузка без -U (только импорт) не доказывает, что файлы доехали до базы:
+            # у ibcmd на автономном сервере импорт без apply НЕ персистится (узел вернёт старое).
+            # Записанный в кэш хеш потом навсегда скрывает эти файлы из загрузки
+            # («Кэш conf: пропущено N из M») — так метаданные так и не появляются в базе.
+            if [[ "$LOAD_ENGINE" == "ibcmd" && "$UPDATE_DB" != "true" ]]; then
+                log "WARN" "Кэш хешей conf не обновляется: загрузка без -U (ibcmd не применял конфигурацию)."
+                log "WARN" "Иначе файлы, чей импорт не доехал до базы, будут пропускаться следующими запусками."
+            else
+                update_conf_files_cache temp_cache_update_list.txt "$repo_path" "$CONFIG_PATH_ABS"
+            fi
         fi
         rm -f temp_cache_update_list.txt temp_cache_update_list.uniq
     fi
@@ -3116,11 +3250,21 @@ if [[ "$REOPEN_CLIENT_AFTER_LOAD" == "true" ]]; then
         rm -f temp_changed_files.txt temp_changed_extensions.txt
         exit 1
     fi
-    prepare_launch_connection client
+    if ! prepare_launch_connection client; then
+        log "ERROR" "Загрузка прошла, но клиент не запущен: файловая ИБ осталась за узлом."
+        LOAD_HISTORY_REASON="узел ibsrv не остановлен перед запуском клиента"
+        rm -f temp_changed_files.txt temp_changed_extensions.txt
+        exit 32
+    fi
     log "INFO" "Запуск тонкого клиента 1С:Предприятие: $THIN_CLIENT_CMD ${CLIENT_LAUNCH_KEYS:-}"
     run_1c_command "\"$THIN_CLIENT_CMD\" ENTERPRISE $LAUNCH_CONNECTION ${CLIENT_LAUNCH_KEYS:-}" &
 elif [[ "$REOPEN_DESIGNER_AFTER_LOAD" == "true" ]]; then
-    prepare_launch_connection designer
+    if ! prepare_launch_connection designer; then
+        log "ERROR" "Загрузка прошла, но конфигуратор не запущен: файловая ИБ осталась за узлом."
+        LOAD_HISTORY_REASON="узел ibsrv не остановлен перед запуском конфигуратора"
+        rm -f temp_changed_files.txt temp_changed_extensions.txt
+        exit 32
+    fi
     log "INFO" "Запуск конфигуратора для проверки..."
     run_1c_command "\"$DESIGNER_CMD\" CONFIG $LAUNCH_CONNECTION" &
 else
