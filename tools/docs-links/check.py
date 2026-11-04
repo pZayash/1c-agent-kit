@@ -467,36 +467,50 @@ def command_index(args: argparse.Namespace, config: dict) -> int:
         raise SystemExit(f"docs-links: нет каталога индекса: {source_dir}")
     notes = sorted(
         p
-        for p in source_dir.glob("*.md")
-        if norm(str(p.relative_to(root))) != out_rel and p.name != "README.md"
+        for p in source_dir.rglob("*.md")
+        if norm(str(p.relative_to(root))) != out_rel
+        # README самого каталога индекса — шаблон/формат, не запись; README
+        # подкаталогов — обычные документы.
+        and not (p.parent == source_dir and p.name == "README.md")
     )
-    months: dict[str, list[tuple[str, str | None, list[str]]]] = {}
+    # Группа: месяц из имени файла; иначе первый подкаталог; иначе «без даты».
+    groups: dict[str, list[tuple[Path, str | None, list[str]]]] = {}
     for note in notes:
         name = note.name
+        rel_note = note.relative_to(source_dir)
         match = re.match(r"^(\d{4}-\d{2})-\d{2}", name)
-        month = match.group(1) if match else "без даты"
+        if match:
+            group = match.group(1)
+        elif len(rel_note.parts) > 1:
+            group = rel_note.parts[0]
+        else:
+            group = "без даты"
         title, tags = parse_note(note)
-        months.setdefault(month, []).append((name, title, tags))
+        groups.setdefault(group, []).append((note, title, tags))
 
+    title = config.get("index_title") or (
+        "Индекс памяти" if source == "memory" else f"Индекс: {source}"
+    )
     lines = [
-        "# Индекс памяти",
+        f"# {title}",
         "",
         "Автогенерируется: `python tools/docs-links/check.py index`.",
-        "Руками не править — правь саму запись и перегенерируй.",
-        "Формат записи: [README.md](README.md).",
-        "",
-        f"Всего записей: {len(notes)}.",
-        "",
+        "Руками не править — правь сам документ и перегенерируй.",
     ]
-    dated = sorted((m for m in months if m != "без даты"), reverse=True)
-    ordered = dated + (["без даты"] if "без даты" in months else [])
-    for month in ordered:
-        lines.append(f"## {month}")
+    if (source_dir / "README.md").is_file():
+        lines.append("Формат записи: [README.md](README.md).")
+    lines.extend(["", f"Всего записей: {len(notes)}.", ""])
+    dated = sorted((g for g in groups if re.match(r"^\d{4}-\d{2}$", g)), reverse=True)
+    named = sorted(g for g in groups if g not in dated and g != "без даты")
+    ordered = dated + named + (["без даты"] if "без даты" in groups else [])
+    for group in ordered:
+        lines.append(f"## {group}")
         lines.append("")
-        for name, title, tags in sorted(months[month], reverse=True):
-            label = title or name[:-3]
+        for note, title, tags in sorted(groups[group], key=lambda item: item[0].name, reverse=True):
+            label = title or note.stem
+            link = Path(os.path.relpath(note, (root / out_rel).parent)).as_posix()
             suffix = f" — теги: {', '.join(tags)}" if tags else ""
-            lines.append(f"- [{label}]({name}){suffix}")
+            lines.append(f"- [{label}]({link}){suffix}")
         lines.append("")
     target = root / out_rel
     target.parent.mkdir(parents=True, exist_ok=True)

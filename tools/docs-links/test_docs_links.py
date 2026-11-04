@@ -111,6 +111,24 @@ class DocsLinksTest(unittest.TestCase):
         self.assertIn("[Первый факт](2026-10-01-first.md) — теги: обмен, qmd", text)
         self.assertNotIn("- [Формат](README.md)", text)
 
+    def test_index_recursive_groups_by_subdir(self):
+        root = self.make_root(
+            {
+                "ENTRY.md": "# Вход\n",
+                "research/2026-09-01-dated.md": "# Датированное\n",
+                "research/topic/inner.md": "# Тематическое\n",
+            }
+        )
+        config = docs_links.load_config(root, None)
+        args = docs_links.build_parser().parse_args(
+            ["index", "--root", str(root), "--path", "research", "--out", "research/INDEX.md"]
+        )
+        docs_links.command_index(args, config)
+        text = (root / "research/INDEX.md").read_text(encoding="utf-8")
+        self.assertIn("## 2026-09", text)
+        self.assertIn("## topic", text)
+        self.assertIn("[Тематическое](topic/inner.md)", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,10 @@ bash tools/sandbox/run.sh python tools/docs-links/check.py check --strict --file
 
 # Оглавление памяти: memory/INDEX.md (по месяцам, H1 + теги)
 bash tools/sandbox/run.sh python tools/docs-links/check.py index
+
+# Оглавление исследований: рекурсивно, по месяцам и тематическим папкам
+bash tools/sandbox/run.sh python tools/docs-links/check.py index \
+  --path research --out research/INDEX.md
 ```
 
 В `check_all.py` подключён чек `docs-links` (warning-only, как остальные).
