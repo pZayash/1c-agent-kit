@@ -310,10 +310,14 @@ def analyze(root: Path, config: dict) -> Audit:
                 pass
             if not path_part:
                 continue
-            abs_target = (
-                (root / path_part.lstrip("/")).resolve()
-                if path_part.startswith("/")
-                else (root / src).parent.joinpath(path_part).resolve()
+            # normpath, не resolve: симлинк (CLAUDE.md → AGENTS.md) должен
+            # оставаться собственной целью, иначе документ «теряется».
+            abs_target = Path(
+                os.path.normpath(
+                    str(root / path_part.lstrip("/"))
+                    if path_part.startswith("/")
+                    else str((root / src).parent / path_part)
+                )
             )
             try:
                 rel_target = norm(str(abs_target.relative_to(root.resolve())))
