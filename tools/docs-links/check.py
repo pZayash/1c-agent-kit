@@ -330,7 +330,22 @@ def analyze(root: Path, config: dict) -> Audit:
                 findings.append(Finding("broken", src, lineno, f"битая ссылка: {target} -> {rel_target}"))
                 continue
             if abs_target.is_dir():
-                findings.append(Finding("dir-link", src, lineno, f"ссылка на каталог: {target}"))
+                # Ссылка на каталог допустима, если у него нет оглавления.
+                # Есть README/index — вести надо на него, иначе читатель
+                # получает список файлов вместо TOC.
+                index = next(
+                    (name for name in ("README.md", "index.md") if (abs_target / name).is_file()),
+                    None,
+                )
+                if index:
+                    findings.append(
+                        Finding(
+                            "dir-link",
+                            src,
+                            lineno,
+                            f"ссылка на каталог: {target} (есть {index})",
+                        )
+                    )
                 continue
             real_target = lowered.get(rel_target.lower())
             if real_target is None:

@@ -111,6 +111,20 @@ class DocsLinksTest(unittest.TestCase):
         self.assertIn("[Первый факт](2026-10-01-first.md) — теги: обмен, qmd", text)
         self.assertNotIn("- [Формат](README.md)", text)
 
+    def test_dir_link_only_when_readme_exists(self):
+        found = self.kinds(
+            self.audit(
+                {
+                    "ENTRY.md": "[Оглавление](docs/dir/)\n\n[Данные](docs/data/)\n",
+                    "docs/dir/README.md": "# Оглавление\n",
+                    "docs/dir/x.md": "# X\n",
+                    "docs/data/a.txt": "x\n",
+                }
+            )
+        )
+        self.assertEqual(found.get("dir-link"), ["ENTRY.md"])
+        self.assertEqual(len(found.get("dir-link", [])), 1)
+
     def test_index_recursive_groups_by_subdir(self):
         root = self.make_root(
             {
