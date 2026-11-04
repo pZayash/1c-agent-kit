@@ -346,7 +346,9 @@ Zed/ACP — `node harness/pi/scripts/patch-pi-acp-session-title.mjs`.
 `tools/bsl-check`, `tools/sandbox`, `tools/load-changed-files`,
 `tools/mcp-call` (JSON-RPC к MCP-серверам 1С, в т.ч. streamable HTTP),
 `tools/answer42` (UI 1С через клиент тестирования: [README](tools/answer42/README.md),
-[канон](docs/ai/answer42.md)), `tools/git-partial-stage.py` — в [tools/](tools/).
+[канон](docs/ai/answer42.md)), `tools/docs-links` (граф ссылок документации:
+битые ссылки и достижимость от `AGENTS.md`: [README](tools/docs-links/README.md)),
+`tools/git-partial-stage.py` — в [tools/](tools/).
 Load engine:
 `tools/load-changed-files/load-changed-files.sh`; корень потребителя — wrapper.
 
