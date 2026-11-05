@@ -46,6 +46,9 @@ kit_powershell() {
 
 # WSL-bash (Linux userland под Windows).
 kit_is_wsl() {
+  # Docker-контейнер на WSL-хосте наследует "microsoft" в /proc/version —
+  # внутри контейнера это не WSL-сессия (пути POSIX, диски не /mnt/<drive>).
+  [[ -f /.dockerenv ]] && return 1
   [[ -n "${WSL_DISTRO_NAME:-}" ]] && return 0
   [[ -r /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null && return 0
   return 1

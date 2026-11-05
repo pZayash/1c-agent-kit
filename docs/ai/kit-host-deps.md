@@ -66,6 +66,8 @@ sandbox) печатается `WARN: powershell.exe не в PATH - исполь�
 ## Warn (скрипт не ставит)
 
 - `.env` в корне потребителя
+- `.gitattributes` у потребителя без `*.sh text eol=lf` — bootstrap
+  предупреждает: иначе при `core.autocrlf=true` `.sh` чекаутятся с CRLF
 - `python` / sandbox (`docs/ai/sandbox.md`)
 - Docker Desktop (sandbox, слоты)
 - `qmd`, `uv` / rlm-tools-bsl. Клиент агента: `QMD_CLIENT` / `QMD_MCP_URL`

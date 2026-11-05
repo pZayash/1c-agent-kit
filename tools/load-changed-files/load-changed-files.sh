@@ -324,6 +324,38 @@ source "${_CONSUMER_ROOT}/tools/os/paths.sh"
 source "${_CONSUMER_ROOT}/tools/os/apache.sh"
 source "${_CONSUMER_ROOT}/tools/os/process-1c.sh"
 
+# WSL-баш + виндовые пути/localhost — тихие падения («No such file», пустой
+# ответ по сети): WSL и MSYS/Windows различаются путями и loopback.
+# Детект inline с семантикой kit_is_wsl (harness/scripts/_link-common.sh) —
+# engine standalone, _link-common не sourced. Docker-на-WSL — не WSL-сессия.
+_is_wsl_session() {
+    [[ -f /.dockerenv ]] && return 1
+    [[ -n "${WSL_DISTRO_NAME:-}${WSL_INTEROP:-}" ]] && return 0
+    [[ -r /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null && return 0
+    return 1
+}
+
+preflight_wsl_mismatch() {
+    _is_wsl_session || return 0
+    local haystack="$* ${IB_CONNECTION:-} ${DESIGNER_PATH:-} ${IBCMD_PATH:-}"
+    haystack="$haystack ${IBSRV_PATH:-} ${CONFIG_PATH:-} ${EXTENSIONS_PATH:-}"
+    haystack="$haystack ${VENDOR_CONFIG_PATH:-} ${GIT_PATH:-}"
+    if [[ " $haystack" =~ [\ \"\'=][A-Za-z]:[/\\] ]]; then
+        log "ERROR" "Похоже, вы в WSL-баше (bash = C:/Windows/system32/bash — WSL-лаунчер)."
+        log "ERROR" "Зовите MSYS-баш: /usr/bin/bash $0 $*"
+        log "ERROR" "WSL и MSYS различаются путями и localhost."
+        exit 25
+    fi
+    # localhost/127.0.0.1 в WSL — не тот loopback, что у Windows-хоста.
+    # WSL2-mirrored/portproxy — легальные кейсы, поэтому WARN, не отказ.
+    if [[ "$haystack" =~ (localhost|127\.0\.0\.1) ]]; then
+        log "WARN" "WSL-сессия + localhost/127.0.0.1 в настройках: loopback WSL != Windows."
+        log "WARN" "Если ответ пустой или ECONNREFUSED: /usr/bin/bash $0 $*"
+    fi
+    return 0
+}
+preflight_wsl_mismatch "$@"
+
 run_1c_command() {
     if [[ "${PROJECT_OS}" == "linux" ]]; then
         local cmd="$1"
@@ -3274,8 +3306,23 @@ fi
 # Маркер: после загрузки или если committed-diff целиком закрыт кэшем хешей.
 # При full-resync discover пропущен → COMMITTED_CHANGES_PRESENT=false, но маркер
 # всё равно надо записать (ИБ только что полностью синхронизирована с диском).
-if [[ -z "$LIST_FILE" \
-      && "$SKIP_EXTENSIONS" != "true" \
+# --no-extensions маркеру не мешает, КРОМЕ случая, когда в диапазоне есть
+# реальная дельта cfe.xml: запись HEAD навсегда потеряла бы её — тогда маркер
+# остаётся на старой границе + WARN. При -F поведение как раньше (WARN ниже).
+skip_marker=false
+if [[ "$SKIP_EXTENSIONS" == "true" ]]; then
+    if [[ "$FULL_RESYNC" == "true" ]]; then
+        skip_marker=true
+    elif [[ -z "$LIST_FILE" && -n "$EXTENSIONS_GIT_PREFIX" ]] \
+        && git_all_changed_paths "${RESOLVED_LOAD_MARKER:-}" \
+            | grep -q "^${EXTENSIONS_GIT_PREFIX}/"; then
+        skip_marker=true
+        log "WARN" "--no-extensions: в диапазоне маркера есть изменения $EXTENSIONS_PATH/ —"
+        log "WARN" "маркер НЕ обновлён, иначе committed-дельта расширений потерялась бы."
+        log "WARN" "Догрузка: ./load-changed-files.sh -U   # без --no-extensions"
+    fi
+fi
+if [[ "$skip_marker" != "true" && -z "$LIST_FILE" \
       && ( "$COMMITTED_CHANGES_PRESENT" == "true" || "$FULL_RESYNC" == "true" ) ]]; then
     if [[ "$nothing_to_load" != "true" ]] \
         || { [[ "${conf_list_before_cache:-0}" -gt 0 ]] && [[ "$has_conf_changes" == "false" ]]; }; then
