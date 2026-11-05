@@ -240,6 +240,10 @@ ibcmd infobase config apply ... --force --dynamic=disable --session-terminate=fo
 и держат HTTP-сеансы. Консьюмерский `tools/os/apache.sh` управляет одной службой;
 список `APACHE_SERVICE_NAMES` пока не поддержан (будущее расширение).
 
+Полный разбор «кто ещё может держать базу» (Apache, IIS, `ibsrv`, зависший
+конфигуратор, клиентские и тестовые сессии) и рецепт «остановить → сделать →
+поднять → проверить» — [infobase-exclusive-access.md](infobase-exclusive-access.md).
+
 ## Полная загрузка: флаки-спин и ретраи
 
 Симптом: полная загрузка (`-F`, а также changeset с `Configuration.xml`) **залипает** —

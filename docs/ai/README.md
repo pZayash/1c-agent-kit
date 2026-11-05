@@ -22,6 +22,7 @@
 | [скд.md](скд.md) | проектирование СКД |
 | [async-methods.md](async-methods.md) | `Асинх` / `Ждать` / `Обещание` |
 | [locks-and-transactions.md](locks-and-transactions.md) | блокировки, транзакции |
+| [infobase-exclusive-access.md](infobase-exclusive-access.md) | кто держит базу (Apache/IIS/ibsrv/клиент) |
 | [metadata-xml-load-pitfalls.md](metadata-xml-load-pitfalls.md) | ловушки LoadConfigFromFiles |
 | [grep-ast.md](grep-ast.md) | поиск с контекстом AST |
 | [1c-specs-index.md](1c-specs-index.md) | индекс XML-спек платформы |
