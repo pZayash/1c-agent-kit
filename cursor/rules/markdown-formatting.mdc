@@ -6,5 +6,6 @@ alwaysApply: true
 Канон: [markdown-formatting.md](../../harness/docs/ai/markdown-formatting.md).
 Раскладка docs: [docs-layout.md](../../harness/docs/ai/docs-layout.md).
 
-После правки `.md` — `npx markdownlint путь` (без `rtk`).
+После правки `.md` — `./node_modules/.bin/markdownlint путь` (без `rtk`;
+нет node_modules → `npx markdownlint-cli`).
 Новые имена файлов — латиница. Ссылки — без percent-encoding кириллицы.

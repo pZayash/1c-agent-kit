@@ -17,9 +17,15 @@ kit (пилот и другие проекты).
 
 `markdownlint` запускайте напрямую, без `rtk`.
 
-Рекомендуемая команда проверки одного файла: `npx markdownlint путь/к/файлу.md`.
+Рекомендуемая команда проверки одного файла: `./node_modules/.bin/markdownlint путь/к/файлу.md`.
 
-Неправильно: `rtk npx markdownlint путь/к/файлу.md`.
+Неправильно: `rtk markdownlint путь/к/файлу.md`.
+
+Резолв бинаря по убыванию надёжности: `./node_modules/.bin/markdownlint`
+(версия пинится lockfile'ом) → `markdownlint` / `markdownlint.cmd` →
+`npx markdownlint-cli` (если нет `node_modules`). `npx` как единственный
+способ ненадёжен: extensionless-шим в symlinked-каталоге nvm (SYMLINKD)
+читается, но не исполняется из Git Bash/WSL — ENOENT при живом файле.
 
 ## Кодовые блоки
 
