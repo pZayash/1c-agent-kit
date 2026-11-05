@@ -130,5 +130,81 @@ class SessionStartDivergedTest(unittest.TestCase):
         self.assertIn('promote', out)
 
 
+class CheckIndexTest(unittest.TestCase):
+    """check-index — python-порт hooks/pre-commit-harness."""
+
+    SHA = 'a' * 40
+    ZERO = '0' * 40
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-agent-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / 'harness').mkdir(parents=True)
+
+    def run_check_index(self, responses):
+        def fake_git(_root, *args):
+            return responses.get(args)
+
+        old_git = ka.git
+        ka.git = fake_git
+        try:
+            args = argparse.Namespace(root=str(self.tmp), harness_rel='harness')
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                rc = ka.cmd_check_index(args)
+            return rc, buf.getvalue()
+        finally:
+            ka.git = old_git
+
+    def test_clean_gitlink_ok(self):
+        rc, _ = self.run_check_index({
+            ('diff', '--cached', '--raw'):
+                f':000000 160000 {self.ZERO} {self.SHA} A\tharness',
+            ('ls-files', '-s', '--', 'harness'):
+                f'160000 {self.SHA} 0\tharness',
+        })
+        self.assertEqual(rc, 0)
+
+    def test_staged_blob_blocks(self):
+        rc, err = self.run_check_index({
+            ('diff', '--cached', '--raw'):
+                f':000000 100644 {self.ZERO} {self.SHA} A\tharness/x.md',
+            ('ls-files', '-s', '--', 'harness'):
+                f'100644 {self.SHA} 0\tharness/x.md',
+        })
+        self.assertEqual(rc, 1)
+        self.assertIn('blob', err)
+
+    def test_gitlink_downgraded_to_blob_blocks(self):
+        rc, err = self.run_check_index({
+            ('diff', '--cached', '--raw'):
+                f':160000 100644 {self.SHA} {self.SHA} M\tharness',
+            ('ls-files', '-s', '--', 'harness'):
+                f'100644 {self.SHA} 0\tharness',
+        })
+        self.assertEqual(rc, 1)
+        self.assertIn('160000', err)
+
+    def test_rename_into_harness_blocks(self):
+        # raw rename line carries two paths; new path must also be checked
+        rc, err = self.run_check_index({
+            ('diff', '--cached', '--raw'):
+                f':100644 100644 {self.SHA} {self.SHA} R100\told.md\tharness/y.md',
+            ('ls-files', '-s', '--', 'harness'): '',
+        })
+        self.assertEqual(rc, 1)
+        self.assertIn('harness/y.md', err)
+
+    def test_no_harness_noop(self):
+        shutil.rmtree(self.tmp / 'harness')
+        rc, _ = self.run_check_index({})
+        self.assertEqual(rc, 0)
+
+    def test_git_unavailable_noop(self):
+        # fake git returns None for every call → guard stays silent
+        rc, _ = self.run_check_index({})
+        self.assertEqual(rc, 0)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

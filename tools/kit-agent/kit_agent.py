@@ -12,6 +12,10 @@ Commands (all read-only, offline, fast):
   check-command CMD            Evaluate a bash command against guards.json.
                                exit 1 = blocked (message on stdout),
                                exit 0 = allowed; warnings prefixed "WARN:".
+  check-index                  Blocking guard: harness/ must be a gitlink
+                               (mode 160000) in the index, never blobs.
+                               Python port of hooks/pre-commit-harness for
+                               environments without bash. Exit 1 = refuse.
   guards                       Dump guards.json (for adapters that evaluate
                                rules in-process).
 
@@ -216,6 +220,59 @@ def cmd_check_command(a):
     return 0
 
 
+def cmd_check_index(a):
+    """Блокирующий guard pre-commit-harness — python-порт для сред без bash.
+
+    No-op если harness/ отсутствует или git недоступен.
+    Exit 1, если kit staged/записан в индекс как blob, а не gitlink 160000.
+    """
+    root = Path(a.root).resolve()
+    harness_rel = os.environ.get('HARNESS_REL', a.harness_rel).rstrip('/')
+    if not harness_root(root, harness_rel).exists():
+        return 0
+
+    fail = 0
+
+    # Staged raw: ":oldmode newmode oldsha newsha status<TAB>path[\tnewpath]"
+    for line in (git(root, 'diff', '--cached', '--raw') or '').splitlines():
+        meta, *paths = line.split('\t')
+        parts = meta.split()
+        newmode = parts[1] if len(parts) > 1 else ''
+        for path in paths:
+            if path in (harness_rel, harness_rel + '/'):
+                if newmode != '160000':
+                    print(f"check-index: '{path}' must be gitlink 160000, "
+                          f'got {newmode}', file=sys.stderr)
+                    fail = 1
+            elif path.startswith(harness_rel + '/'):
+                print('check-index: kit file staged as project blob: '
+                      f'{path}', file=sys.stderr)
+                fail = 1
+
+    # Index already has blobs under harness/ even if this commit does not touch them
+    for line in (git(root, 'ls-files', '-s', '--', harness_rel)
+                 or '').splitlines():
+        meta, _, path = line.partition('\t')
+        if not path:
+            continue
+        fields = meta.split()
+        mode = fields[0] if fields else ''
+        if path.startswith(harness_rel + '/'):
+            print(f'check-index: index already has blob under {harness_rel}/: '
+                  f'{path} (mode {mode})', file=sys.stderr)
+            fail = 1
+        elif path == harness_rel and mode != '160000':
+            print(f"check-index: index '{harness_rel}' is mode {mode}, "
+                  'want 160000', file=sys.stderr)
+            fail = 1
+
+    if fail:
+        print('check-index: refuse commit. '
+              'See 1c-agent-kit README / harness-promote.', file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_guards(_a):
     print(GUARDS_FILE.read_text(encoding='utf-8'))
     return 0
@@ -247,6 +304,12 @@ def main(argv=None):
     pf.add_argument('--session-id', default='')
     pf.add_argument('--root', default='.')
     pf.set_defaults(fn=cmd_record_friction)
+
+    pi = sub.add_parser('check-index',
+                        help='blocking guard: harness must be gitlink, not blobs')
+    pi.add_argument('--root', default='.')
+    pi.add_argument('--harness-rel', default='harness')
+    pi.set_defaults(fn=cmd_check_index)
 
     pg = sub.add_parser('guards', help='dump guards.json')
     pg.set_defaults(fn=cmd_guards)

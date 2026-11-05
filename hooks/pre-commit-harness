@@ -8,6 +8,9 @@
 # Wire from project's .githooks/pre-commit:
 #   bash "$repo_root/.githooks/pre-commit-harness"
 # or copy this file from the kit.
+#
+# Эквивалент без bash (sandbox, где msys-хуки не стартуют):
+#   python harness/tools/kit-agent/kit_agent.py check-index
 
 set -euo pipefail
 

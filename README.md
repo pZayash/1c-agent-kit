@@ -105,7 +105,13 @@ no-op и зелёный verify опаснее явной ошибки.
 ```bash
 python harness/tools/kit-agent/kit_agent.py session-start       # подсказки (пусто = ок)
 python harness/tools/kit-agent/kit_agent.py check-command "git add harness/x"  # guards
+python harness/tools/kit-agent/kit_agent.py check-index         # harness gitlink vs blobs (exit 1 = refuse)
 ```
+
+`check-index` — python-порт [hooks/pre-commit-harness](hooks/pre-commit-harness)
+для сред без bash (sandbox, где msys не может создать `\BaseNamedObjects` —
+`.githooks` там не стартуют вовсе). Перед `git commit --no-verify` прогони
+`check-index`, иначе блокирующий guard «kit не коммитить blob» молча снимается.
 
 Адаптеры (тонкие, логика — только в ядре; правила — `guards.json`):
 
@@ -210,11 +216,13 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   Корень: у потребителя `core.autocrlf=true` без `.gitattributes`.
   Kit шлёт `.gitattributes` (`*.sh text eol=lf`), но `git checkout -f <sha>`
   **не** перезаписывает уже существующие файлы. Один раз материализовать LF:
+
   ```bash
   git -C harness config core.autocrlf false
   git -C harness checkout -f <sha>
   git -C harness checkout-index -a -f   # переписать рабочее дерево по атрибутам
   ```
+
 - **WSL-bash + Windows-проект (`/mnt/<drive>/...`)** — Linux-ветка
   создаёт symlink'и на `/mnt/...`, невидимые из Windows. `bootstrap-kit`
   и `kit-layout` отказываются работать (WSL_ALLOW=1 — осознанный обход).
