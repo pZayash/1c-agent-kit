@@ -79,6 +79,10 @@ exit "$status"
 
 ## Windows, WSL и кириллица
 
+- На Windows голый `bash` в PATH часто = `C:\Windows\system32\bash`
+  (WSL-лаунчер), а не MSYS — пути и localhost в WSL другие. Kit-скрипты
+  зовите `/usr/bin/bash …` (MSYS); preflight в load-changed-files/mcp-call
+  ловит это: виндовые пути → exit 25, localhost → WARN.
 - Bash в WSL обычно корректно показывает кириллицу.
 - В PowerShell перед командами ставить UTF-8:
 

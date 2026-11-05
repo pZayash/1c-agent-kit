@@ -67,6 +67,41 @@ require_cmds() {
     return 0
 }
 
+# WSL-баш + виндовые пути/localhost — «No such file» / пустой ответ:
+# WSL и MSYS/Windows различаются путями и loopback. Семантика детекта =
+# kit_is_wsl (harness/scripts/_link-common.sh), inline — скрипт standalone.
+_is_wsl_session() {
+    [[ -f /.dockerenv ]] && return 1
+    [[ -n "${WSL_DISTRO_NAME:-}${WSL_INTEROP:-}" ]] && return 0
+    [[ -r /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null && return 0
+    return 1
+}
+
+preflight_wsl_mismatch() {
+    _is_wsl_session || return 0
+    local haystack="$*"
+    local cfg="${CONFIG:-$(default_config_path)}"
+    [[ -f "$cfg" ]] && haystack="$haystack $(cat "$cfg")"
+    if [[ " $haystack" =~ [\ \"\'=][A-Za-z]:[/\\] ]]; then
+        eprint "mcp-call: похоже, вы в WSL-баше (bash = C:/Windows/system32/bash — WSL-лаунчер)."
+        eprint "Зовите MSYS-баш: /usr/bin/bash $0 $*"
+        eprint "WSL и MSYS различаются путями и localhost."
+        exit 25
+    fi
+    return 0
+}
+
+# localhost/127.0.0.1 endpoint в WSL — не тот loopback, что у Windows-хоста.
+# WSL2-mirrored/portproxy — легальные кейсы, поэтому WARN, не отказ.
+warn_wsl_localhost_endpoint() {
+    local endpoint="$1"
+    _is_wsl_session || return 0
+    [[ "$endpoint" =~ (localhost|127\.0\.0\.1) ]] || return 0
+    eprint "WARN: WSL-сессия + localhost endpoint: loopback WSL != Windows."
+    eprint "WARN: пустой ответ или ECONNREFUSED → /usr/bin/bash $0"
+    return 0
+}
+
 default_config_path() {
     if [[ -f ".cursor/mcp.json" ]]; then
         printf '%s' ".cursor/mcp.json"
@@ -481,6 +516,8 @@ main() {
         exit "$EXIT_ARGS_ERROR"
     fi
 
+    preflight_wsl_mismatch "$@"
+
     if [[ "$LIST" != true && -z "$SCHEMA" && -z "$TOOL" ]]; then
         usage >&2
         eprint "Укажите имя инструмента, либо --list / --schema TOOL."
@@ -491,6 +528,7 @@ main() {
         exit "$EXIT_ARGS_ERROR"
     fi
     local endpoint="$ENDPOINT_URL"
+    warn_wsl_localhost_endpoint "$endpoint"
     local cli_hdr
     for cli_hdr in "${CLI_HEADERS_LINES[@]:-}"; do
         cli_hdr="${cli_hdr//$'\r'/}"

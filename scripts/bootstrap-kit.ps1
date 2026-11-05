@@ -36,6 +36,23 @@ if (-not (Test-Path $harness)) {
     throw "missing harness: $harness (git submodule update --init?)"
 }
 
+# Consumer .gitattributes: without "*.sh ... eol=lf" core.autocrlf=true checks
+# out CRLF into *.sh and they fail ("syntax error"). Warn, not fatal.
+# The .sh twin checks the same on the Linux-native path. ASCII only (PS 5.1).
+$gitattrFile = Join-Path $root ".gitattributes"
+$hasShLf = $false
+if (Test-Path -LiteralPath $gitattrFile) {
+    $hasShLf = [bool](Get-Content -LiteralPath $gitattrFile |
+        Where-Object { $_ -match '^\*\.sh\s.*eol=lf' } |
+        Select-Object -First 1)
+}
+if (-not $hasShLf) {
+    Write-Host "WARN: consumer .gitattributes lacks '*.sh text eol=lf' -"
+    Write-Host "WARN: with core.autocrlf=true .sh files checkout CRLF and fail."
+    Write-Host 'WARN: add: *.sh text eol=lf | *.py text eol=lf | *.ps1 text | *.xml -text | *.bsl -text'
+    Write-Host "WARN: then: git add .gitattributes; git add --renormalize -- '*.sh'; git checkout -- '*.sh'"
+}
+
 # Namespace guard: links created by another namespace (or after the consumer
 # tree was moved) must not be relinked here. The engine also refuses, but this
 # stops legacy link-*.ps1 steps before they touch anything. ASCII only (PS 5.1).
@@ -133,7 +150,9 @@ $thinMarker = "harness/tools/load-changed-files/load-changed-files.sh"
 $thinLines = @(
     '#!/bin/bash',
     '_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
-    'exec bash "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"'
+    '# $BASH, not PATH bash: bare bash may resolve to the WSL launcher',
+    '# (C:\Windows\system32\bash) - paths and localhost differ in WSL.',
+    'exec "$BASH" "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"'
 )
 
 if (Test-Path $engine) {

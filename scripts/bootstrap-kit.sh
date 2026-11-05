@@ -36,6 +36,21 @@ if kit_is_windows; then
   exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi
 
+# Consumer .gitattributes: без "*.sh ... eol=lf" при core.autocrlf=true .sh
+# чекаутятся с CRLF и падают ("syntax error $'{\r'"). Warn, не отказ.
+# Здесь, а не до exec-блока: на Windows ветку проверяет bootstrap-kit.ps1.
+if [[ ! -f "$CONSUMER_ROOT/.gitattributes" ]] \
+    || ! grep -Eq '^[[:space:]]*\*\.sh[[:space:]].*eol=lf' "$CONSUMER_ROOT/.gitattributes"; then
+  cat >&2 <<'EOS'
+WARN: у потребителя нет правила "*.sh text eol=lf" в .gitattributes —
+при core.autocrlf=true .sh чекаутятся с CRLF и падают (syntax error).
+Добавьте:
+  printf '%s\n' '*.sh text eol=lf' '*.py text eol=lf' '*.ps1 text' \
+    '*.bat text eol=crlf' '*.xml -text' '*.bsl -text' >> .gitattributes
+  git add .gitattributes && git add --renormalize -- '*.sh' && git checkout -- '*.sh'
+EOS
+fi
+
 CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
 HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
 
@@ -128,7 +143,9 @@ if [[ -f "$ENGINE" ]]; then
         cat >"$WRAPPER" <<'EOF'
 #!/bin/bash
 _ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"
+# $BASH, не bash из PATH: голый `bash` может резолвиться в WSL-лаунчер
+# (C:\Windows\system32\bash) — пути и localhost в WSL другие.
+exec "$BASH" "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"
 EOF
         chmod +x "$WRAPPER"
       fi
@@ -141,7 +158,9 @@ EOF
       cat >"$WRAPPER" <<'EOF'
 #!/bin/bash
 _ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"
+# $BASH, не bash из PATH: голый `bash` может резолвиться в WSL-лаунчер
+# (C:\Windows\system32\bash) — пути и localhost в WSL другие.
+exec "$BASH" "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"
 EOF
       chmod +x "$WRAPPER"
     fi
