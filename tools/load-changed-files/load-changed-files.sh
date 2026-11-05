@@ -73,8 +73,10 @@
 #                               + авто-UpdateDBCfg; лечит «Неверный путь к данным»/
 #                               «Неизвестный объект» после merge/rebase, когда ИБ отстала
 #                               от диска. Без --list-file.
-#       --force-partial         Не отменять partial, даже если в списке Configuration.xml
-#                               после merge (иначе скрипт шлёт на -F).
+#       --force-partial         Форсировать --partial даже при Configuration.xml в списке.
+#                               Без флага список с корневым файлом грузится changeset-режимом
+#                               (без -partial): так грузятся свойства корня и добавление/
+#                               удаление объектов. В --partial ibcmd корневой файл отвергает.
 #       --force-sessions        При ошибке /UpdateDBCfg из-за HTTP-клиентов повторить его
 #                               с -Dynamic- -SessionTerminate force (сеансы завершаются
 #                               принудительно). Экв. UPDATE_DB_FORCE_SESSIONS=true.
@@ -113,7 +115,8 @@
 #   SKIP_EXTENSIONS           true — только conf, без расширений (то же, что --no-extensions)
 #   RESET_LOAD_MARKER         true — то же, что --reset-marker
 #   FULL_RESYNC               true — то же, что --full-resync
-#   FORCE_PARTIAL             true — то же, что --force-partial
+#   FORCE_PARTIAL             true — то же, что --force-partial (оставить --partial
+#                             даже при Configuration.xml в списке; ibcmd его отвергнет)
 #   LOAD_HIDE_FILES           «;»-список путей относительно корня репо: на время
 #                             LoadConfigFromFiles переименовать в *.hidden-for-load
 #                             (типовая битая форма УНФ при -F / Configuration.xml)
@@ -344,6 +347,9 @@ run_1c_command() {
 # ==============================================================================
 # ibcmd работает с ИБ напрямую (без конфигуратора). Соответствия:
 #   /LoadConfigFromFiles -partial -listFile  → infobase config import files --base-dir --partial <файлы>
+#   /LoadConfigFromFiles -listFile           → infobase config import files --base-dir <файлы>
+#                                             (changeset: единственный режим, где грузится
+#                                             Configuration.xml; в --partial он отвергается)
 #   /LoadConfigFromFiles -Extension          → infobase config import --extension <дир>
 #   /UpdateDBCfg                             → infobase config apply [--extension] --force
 # Подключение к файловой ИБ: --db-path (из /F"..."); серверной — IBCMD_DBMS/IBCMD_DB_*.
@@ -670,6 +676,21 @@ ibcmd_run() {
     run_1c_command "$cmd"
 }
 
+# true, если в списке conf есть Configuration.xml и partial не форсирован:
+# тогда загрузка идёт changeset-режимом (files/-listFile БЕЗ --partial).
+# В true-partial ibcmd мапит каждый файл списка на объект метаданных и
+# отвергает корневой файл («URL ... не может быть преобразован в полное имя
+# объекта метаданных»). Без --partial корневой файл грузится: применяются его
+# свойства, добавление объектов (ChildObjects + файлы объектов в списке) и
+# УДАЛЕНИЕ (объекты, отсутствующие в ChildObjects, удаляются из ИБ — список
+# зеркалит состав конфигурации). Цена — проверка всей конфигурации при загрузке
+# (минуты на больших; битые типовые формы ловятся только LOAD_HIDE_FILES —
+# --no-check их НЕ глушит, это не post-check а load-time валидация).
+conf_changeset_mode() {
+    [[ "$FORCE_PARTIAL" == "true" ]] && return 1
+    grep -qx 'Configuration.xml' temp_changed_files.txt 2>/dev/null
+}
+
 # Частичный импорт conf: список файлов подаётся ibcmd через stdin
 # (документированный способ: type fileList.lst | ibcmd infobase config import files --base-dir ...).
 # Пути в списке — ОТНОСИТЕЛЬНЫЕ --base-dir (полные пути платформа ищет в корне загрузки).
@@ -679,6 +700,24 @@ ibcmd_import_conf() {
     local base_dir_unix="$2"   # unix-путь base-dir (для проверки существования файлов)
     local no_check="" listfile rel full
     [[ "$IBCMD_NO_CHECK" == "true" ]] && no_check="--no-check"
+
+    local partial_sw="--partial"
+    conf_changeset_mode && partial_sw=""
+
+    # Кварк ibcmd: одиночный stdin-элемент Configuration.xml отвергается тем же
+    # «не может быть преобразован» даже без --partial; argv-форма и список
+    # из ≥2 файлов работают. Поэтому один файл всегда идёт через argv.
+    local entries
+    entries=$(grep -c . temp_changed_files.txt 2>/dev/null || echo 0)
+    if [[ "$entries" -eq 1 ]]; then
+        local single
+        single=$(head -1 temp_changed_files.txt)
+        local cmd="\"$IBCMD_CMD\" infobase config import files $IBCMD_DB_ARGS $IBCMD_AUTH $no_check --base-dir=\"$base_dir_cmd\" $partial_sw \"$single\" > \"$LOAD_LOG_FILE\" 2>&1"
+        log "INFO" "Выполнение команды (ibcmd, импорт conf, один файл через argv): $cmd"
+        : > "$LOAD_LOG_FILE"
+        run_1c_command "$cmd"
+        return $?
+    fi
 
     listfile="$repo_path/.tmp/ibcmd-filelist.lst"
     # ibcmd читает список путей из stdin как Windows ANSI (CP1251), не UTF-8 —
@@ -702,7 +741,7 @@ ibcmd_import_conf() {
         listfile_cmd=$(unix_to_win_path "$listfile")
     fi
 
-    local cmd="cat \"$listfile_cmd\" | \"$IBCMD_CMD\" infobase config import files $IBCMD_DB_ARGS $IBCMD_AUTH $no_check --base-dir=\"$base_dir_cmd\" --partial > \"$LOAD_LOG_FILE\" 2>&1"
+    local cmd="cat \"$listfile_cmd\" | \"$IBCMD_CMD\" infobase config import files $IBCMD_DB_ARGS $IBCMD_AUTH $no_check --base-dir=\"$base_dir_cmd\" $partial_sw > \"$LOAD_LOG_FILE\" 2>&1"
     log "INFO" "Выполнение команды (ibcmd, импорт conf по списку через stdin): $cmd"
     : > "$LOAD_LOG_FILE"
     run_1c_command "$cmd"
@@ -838,20 +877,22 @@ diagnose_load_failure() {
     fi
     [[ -z "$log_text" ]] && return 0
 
-    local err_datalink=0 err_unknown=0 err_cmd=0 warn_help=0
+    local err_datalink=0 err_unknown=0 err_cmd=0 warn_help=0 err_root=0
     while IFS= read -r line; do
         case "$line" in
             *"Неверный путь к данным"*)                err_datalink=$((err_datalink+1)) ;;
             *"Неизвестный объект метаданных"*)         err_unknown=$((err_unknown+1)) ;;
+            *"не может быть преобразован в полное имя объекта метаданных"*) err_root=$((err_root+1)) ;;
             *"Неверное имя команды элемента формы"*)   err_cmd=$((err_cmd+1)) ;;
             *"Возможно неверная ссылка"*"внутри справки"*) warn_help=$((warn_help+1)) ;;
         esac
     done <<< "$log_text"
 
-    local blocking=$((err_datalink + err_unknown + err_cmd))
+    local blocking=$((err_datalink + err_unknown + err_cmd + err_root))
     [[ $blocking -eq 0 && $warn_help -eq 0 ]] && return 0
 
     log "ERROR" "── Диагноз ──────────────────────────────────────────────────"
+    [[ $err_root      -gt 0 ]] && log "ERROR" "  • Файл «не может быть преобразован в полное имя объекта метаданных»: $err_root — Configuration.xml попал в --partial-список (ibcmd files его отвергает). Уберите --force-partial; корневой файл грузится changeset-режимом (без --partial)."
     [[ $err_unknown   -gt 0 ]] && log "ERROR" "  • Неизвестный объект метаданных: $err_unknown — объект есть в Configuration.xml, но отсутствует в ИБ и/или в partial-списке."
     [[ $err_datalink  -gt 0 ]] && log "ERROR" "  • Неверный путь к данным: $err_datalink — формы ссылаются на реквизиты/ТЧ, которых нет в ИБ."
     [[ $err_cmd       -gt 0 ]] && log "ERROR" "  • Неверное имя команды элемента формы: $err_cmd — команды ТЧ, которых нет в ИБ."
@@ -868,8 +909,9 @@ diagnose_load_failure() {
         log "ERROR" "  2. Если объект новый и ИБ почти синхронна — корневой XML в --list-file"
         log "ERROR" "       (напр. CommonForms/Имя.xml), не только форму; без Configuration.xml,"
         log "ERROR" "       если можно обойтись."
-        log "ERROR" "  3. После merge marker..HEAD с новыми объектами partial+Configuration.xml"
-        log "ERROR" "       почти всегда проигрывает -F (десятки минут, затем те же ошибки)."
+        log "ERROR" "  3. Список с Configuration.xml грузится changeset-режимом (без -partial),"
+        log "ERROR" "       с проверкой всей конфигурации; при сбое на типовой битой форме —"
+        log "ERROR" "       LOAD_HIDE_FILES (--no-check её не глушит), либо -F -U."
     elif [[ $warn_help -gt 0 ]]; then
         log "WARN" "Блокирующих ошибок нет — только предупреждения по справке типовой УНФ."
         log "WARN" "Если 1С всё равно вернула ненулевой код, проверьте полный лог выше."
@@ -1430,9 +1472,8 @@ warn_if_merge_in_range() {
     merge_count=$(git_nq rev-list --merges --count "$marker_sha..HEAD" 2>/dev/null)
     [[ -z "$merge_count" || "$merge_count" -eq 0 ]] && return 0
     log "WARN" "В диапазоне marker..HEAD найдено merge-коммитов: $merge_count."
-    log "WARN" "После merge ИБ могла отстать от диска — partial с Configuration.xml"
-    log "WARN" "часто идёт десятки минут и падает («Неизвестный объект» / «Неверный путь»)."
-    log "WARN" "Канон при отставании ИБ: ./load-changed-files.sh -F -U"
+    log "WARN" "После merge ИБ могла отстать от диска — при ошибках разрешения ссылок"
+    log "WARN" "(«Неизвестный объект» / «Неверный путь») канон: ./load-changed-files.sh -F -U"
     log "WARN" "Не используйте --reset-marker на чистом дереве: это 0 файлов + только UpdateDB."
 }
 
@@ -1524,13 +1565,14 @@ apply_load_hide_files() {
     fi
 }
 
-# Partial + Configuration.xml после merge: designer валидирует весь dump (десятки минут)
-# и типично падает. Канон — -F, не начинать doomed partial. Обход: --force-partial.
-abort_costly_merge_partial() {
+# Configuration.xml в списке после merge → changeset-режим (без -partial/--partial):
+# платформа проверяет всю конфигурацию (минуты) и применяет удаления из ChildObjects —
+# это и есть ресинк ИБ к диску. Warn, не abort: changeset — штатный путь для
+# добавления/удаления объектов. Канон при сбое — -F -U.
+warn_merge_changeset_load() {
     local marker_sha="$1"
     local list_file="temp_changed_files.txt"
     [[ "$FULL_RESYNC" == "true" ]] && return 0
-    [[ "$FORCE_PARTIAL" == "true" ]] && return 0
     [[ -n "$LIST_FILE" ]] && return 0
     [[ -s "$list_file" ]] || return 0
     grep -qx 'Configuration.xml' "$list_file" || return 0
@@ -1555,19 +1597,18 @@ abort_costly_merge_partial() {
         "$CONFIG_GIT_PREFIX/InformationRegisters/" "$CONFIG_GIT_PREFIX/Enums/" \
         2>/dev/null | grep -E '/[^/]+\.xml$' | grep -v '/Ext/' | wc -l | tr -d ' ')
     added="${added:-0}"
-    local min_files="${LOAD_MERGE_PARTIAL_MAX_FILES:-20}"
-    if [[ "$added" -ge 1 || "$n" -ge "$min_files" ]]; then
-        log "ERROR" "Partial load после merge включает Configuration.xml ($n файлов conf,"
-        log "ERROR" "новых корневых XML объектов: $added)."
-        log "ERROR" "Designer тогда обходит весь dump: десятки минут и почти наверняка"
-        log "ERROR" "«Неизвестный объект метаданных» / «Неверный путь к данным»."
-        log "ERROR" "Канон: ./load-changed-files.sh -F -U"
-        log "ERROR" "  (LOAD_HIDE_FILES — спрятать битую типовую форму на время -F)."
-        log "ERROR" "Если ИБ уже синхронна и нужен именно partial: --force-partial"
-        return 1
+    if [[ "$FORCE_PARTIAL" == "true" ]]; then
+        log "WARN" "--force-partial + Configuration.xml после merge ($n файлов conf,"
+        log "WARN" "новых корневых XML объектов: $added) — doomed partial:"
+        log "WARN" "ibcmd отвергнет корневой файл, designer валидирует весь dump и"
+        log "WARN" "типично падает («Неизвестный объект метаданных» / «Неверный путь»)."
+    else
+        log "WARN" "Список с Configuration.xml после merge ($n файлов conf,"
+        log "WARN" "новых корневых XML объектов: $added) → changeset-режим без -partial:"
+        log "WARN" "проверка всей конфигурации + применение удалений из ChildObjects."
+        log "WARN" "При сбое (битая типовая форма, отставшая ИБ): ./load-changed-files.sh -F -U"
+        log "WARN" "  (LOAD_HIDE_FILES — спрятать битую форму; --no-check её НЕ глушит)."
     fi
-    log "WARN" "В partial-списке Configuration.xml после merge ($n файлов)."
-    log "WARN" "Если загрузка пойдёт долго/упадёт — ./load-changed-files.sh -F -U"
     return 0
 }
 
@@ -2393,7 +2434,7 @@ while [[ $# -gt 0 ]]; do
             echo "      --list-file PATH        Фолбэк: явный список (заменяет git); PATH=- для stdin"
             echo "      --no-extensions         Загружать только conf, без расширений (cfe.xml)"
             echo "      --reset-marker          Сбросить маркер HEAD последней загрузки committed-изменений"
-            echo "      --force-partial         Не отменять partial с Configuration.xml после merge"
+            echo "      --force-partial         Форсировать --partial даже при Configuration.xml в списке"
             echo "  -F, --full-resync           Полная загрузка conf/ целиком (без partial) + reset-marker + авто-UpdateDBCfg"
             echo "      --engine ENGINE         Движок загрузки: designer (по умолчанию) | ibcmd"
             echo "      --ibcmd                 Сокращение для --engine ibcmd"
@@ -2425,7 +2466,7 @@ while [[ $# -gt 0 ]]; do
             echo "  FORCE_CONFIGURATION       true — то же, что --force-configuration (только Configuration.xml)"
             echo "  SKIP_EXTENSIONS           true — то же, что --no-extensions"
             echo "  RESET_LOAD_MARKER         true — то же, что --reset-marker"
-            echo "  FORCE_PARTIAL             true — то же, что --force-partial"
+            echo "  FORCE_PARTIAL             true — то же, что --force-partial (оставить --partial при Configuration.xml)"
             echo "  FULL_RESYNC               true — то же, что --full-resync"
             echo "  LOAD_HIDE_FILES           «;»-список путей (спрятать на время LoadConfigFromFiles)"
             echo "  LOAD_ENGINE               designer | ibcmd (по умолчанию designer)"
@@ -2638,10 +2679,7 @@ elif [[ -n "$LIST_FILE" ]]; then
 else
     discover_changed_files_from_git
     warn_if_merge_in_range "${RESOLVED_LOAD_MARKER:-}"
-    abort_costly_merge_partial "${RESOLVED_LOAD_MARKER:-}" || {
-        rm -f temp_changed_files.txt temp_changed_extensions.txt
-        exit 21
-    }
+    warn_merge_changeset_load "${RESOLVED_LOAD_MARKER:-}"
 fi
 
 if [[ "$SKIP_EXTENSIONS" == "true" ]]; then
@@ -2954,6 +2992,12 @@ if [[ "$nothing_to_load" != "true" ]]; then
 if [[ "$has_conf_changes" == "true" ]]; then
     apply_load_hide_files
     if [[ "$FULL_RESYNC" != "true" ]]; then
+        if conf_changeset_mode; then
+            log "INFO" "В списке Configuration.xml → changeset-режим (без -partial/--partial):"
+            log "INFO" "  корневой файл грузится, платформа проверяет всю конфигурацию"
+            log "INFO" "  (медленнее partial; удалённые из ChildObjects объекты удалятся из ИБ)."
+            log "INFO" "  Обход: --force-partial. При сбое на битой типовой форме: -F -U / LOAD_HIDE_FILES."
+        fi
         if [[ "${PROJECT_OS}" == "linux" ]]; then
             OUTPUT_FILE_CMD="$full_output_file"
         else
@@ -2963,7 +3007,12 @@ if [[ "$has_conf_changes" == "true" ]]; then
             ibcmd_import_conf "$CONFIG_PATH_CMD" "$CONFIG_PATH_ABS"
             load_exit_code=$?
         else
-            LOAD_COMMAND="/LoadConfigFromFiles \"$CONFIG_PATH_CMD\" -listFile \"$OUTPUT_FILE_CMD\" -Format Hierarchical -partial -updateConfigDumpInfo"
+            # Configuration.xml в списке → changeset (-listFile без -partial):
+            # корневой файл грузится только так; с -partial designer валидирует
+            # весь dump и типично падает («doomed partial»).
+            partial_sw="-partial"
+            conf_changeset_mode && partial_sw=""
+            LOAD_COMMAND="/LoadConfigFromFiles \"$CONFIG_PATH_CMD\" -listFile \"$OUTPUT_FILE_CMD\" -Format Hierarchical $partial_sw -updateConfigDumpInfo"
 
             LOAD_COMMAND="$LOAD_COMMAND /Out \"$LOAD_LOG_FILE_CMD\" /DisableStartupDialogs"
             COMMAND="\"$DESIGNER_CMD\" CONFIG $IB_CONNECTION $IB_CONFIG_AUTH $LOAD_COMMAND"

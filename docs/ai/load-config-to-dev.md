@@ -47,7 +47,11 @@ Upstream cc-1c: `db-load-git`, `db-load-xml`, `db-update`, `db-load-cf` —
 - **`--reset-marker`** — удалить файл маркера (мёртвый SHA). **Не** канон
   «залить merge»: на чистом дереве это был бы только UpdateDB; скрипт на
   merge-HEAD сам берёт `HEAD^1`.
-- **`--force-partial`** — не отменять partial с `Configuration.xml` после merge.
+- **`--force-partial`** — форсировать `--partial` даже при `Configuration.xml`
+  в списке. Без флага список с корневым файлом идёт **changeset-режимом**
+  (`files`/`-listFile` без `--partial`): единственный путь, где грузится
+  `Configuration.xml` (в `--partial` ibcmd его отвергает). Changeset проверяет
+  всю конфигурацию (минуты) и применяет удаления объектов из `ChildObjects`.
 - **`--ibcmd`** / `LOAD_ENGINE=ibcmd` — headless/CI (медленнее designer).
   **Автономный сервер (`IBSRV_PID_FILE` задан):** тот же движок идёт через шлюз
   администрирования `ibcmd --pid=<pid>`: монопольного доступа нет, Apache и сервер
@@ -238,7 +242,7 @@ ibcmd infobase config apply ... --force --dynamic=disable --session-terminate=fo
 
 ## Полная загрузка: флаки-спин и ретраи
 
-Симптом: полная загрузка (`-F`, а также partial с `Configuration.xml`) **залипает** —
+Симптом: полная загрузка (`-F`, а также changeset с `Configuration.xml`) **залипает** —
 сначала минуты живого I/O, затем CPU ~100% при **нуле** I/O, файл ИБ не меняется,
 `/Out` пуст. Это не ошибка и не занятость: **флаки-гонка платформы**, а не свойство
 дампа или монополии (проверено 26.09.2026: одна и та же `conf/` на пустой ИБ —

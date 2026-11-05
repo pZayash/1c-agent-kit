@@ -82,9 +82,13 @@ Git-режим: working-tree **плюс** committed с маркера после
 
 - Нет маркера и `HEAD` — merge-коммит → граница = **первый родитель** (`HEAD^1`),
   дельта merge попадает в список. WARN в логе.
-- После merge в списке есть `Configuration.xml` и много файлов / новые корневые
-  XML объектов → **exit 21**, не начинает десятки минут doomed partial.
-  Канон: `-F -U`. Обход, если ИБ уже синхронна: `--force-partial`.
+- `Configuration.xml` в списке → **changeset-режим** (без `-partial`/`--partial`):
+  корневой файл грузится только так — в `--partial` ibcmd его отвергает
+  («не может быть преобразован в полное имя объекта метаданных»), designer идёт
+  десятки минут и падает. Changeset применяет свойства корня, добавление и
+  **удаление** объектов (ChildObjects — зеркало состава); цена — проверка всей
+  конфигурации (на УНФ ~6–9 мин). После merge — WARN, не abort.
+  Обход старого поведения: `--force-partial` (ibcmd тогда отвергнет корень).
 - Пути `conf/`/`cfe.xml/` есть в индексе и нет на диске (NTFS case-fold после
   merge) → `git restore --worktree`, иначе они выпадут из listFile.
 - `--reset-marker` на чистом дереве **не** заливает merge (удаляет маркер).
@@ -207,7 +211,8 @@ ibcmd-аналог: `infobase config apply ... --force --dynamic=disable
 # ИБ отстала от диска после merge (новые объекты, exit 21)
 ./load-changed-files.sh -F -U
 
-# Partial с Configuration.xml после merge всё же нужен (ИБ уже синхронна)
+# Старый режим: --partial даже при Configuration.xml в списке
+# (ibcmd тогда отвергнет корневой файл — только для отладки/особых случаев)
 ./load-changed-files.sh -U --force-partial
 ```
 
@@ -247,7 +252,7 @@ cfe.xml/MCP_Сервер/…/Module.bsl
 | `--list-file PATH` | Фолбэк: явный список (заменяет git); `PATH=-` для stdin |
 | `--no-extensions` | Только `conf/`; обязателен, если агент не трогал `cfe.xml/` (env: `SKIP_EXTENSIONS=true`) |
 | `--reset-marker` | Сбросить файл маркера (rebase/мёртвый SHA). На merge сам по себе не заменяет `-F` |
-| `--force-partial` | Не отменять partial с `Configuration.xml` после merge (env: `FORCE_PARTIAL=true`) |
+| `--force-partial` | Форсировать `--partial` даже при `Configuration.xml` в списке; без флага список с корнем идёт changeset-режимом без `--partial` (env: `FORCE_PARTIAL=true`) |
 | `-F`, `--full-resync` | Полная загрузка `conf/` без partial + UpdateDB; когда ИБ отстала от диска |
 | `--force-sessions` | Авто-retry UpdateDB при HTTP: `-Dynamic- -SessionTerminate force` (env: default true) |
 | `--no-force-sessions` | Не завершать сеансы при HTTP-ошибке (env: `false`) |
@@ -276,8 +281,10 @@ SUCCESS, итог по времени); `--verbose` или `-H`/`-C` — пре�
    (`…Form.…Ext`). Родитель forced против кэша. См. memory
    `partial-load-form-module-bsl`.
 3. Файлы conf из списка с неизменённым SHA-256 (кэш manifest) — убрать из listfile.
-4. Merge + `Configuration.xml` в списке и новые объекты / длинный список →
-   **exit 21** (канон `-F`), если нет `--force-partial`.
+4. `Configuration.xml` в списке → **changeset**: `files`/`-listFile` без
+   `--partial`/`-partial` (иначе корневой файл не грузится). Один файл в списке
+   (ibcmd) → argv-форма, не stdin (кварк одиночного `Configuration.xml` в stdin).
+   После merge — WARN: changeset медленнее и применяет удаления.
 5. Partial `LoadConfigFromFiles` + listfile **или** `-F` без listfile. Перед
    вызовом — `LOAD_HIDE_FILES` (`.hidden-for-load`, trap на возврат).
 6. Изменённые расширения — загрузка каталога расширения целиком (пропуск при `--no-extensions`).
