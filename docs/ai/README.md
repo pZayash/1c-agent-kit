@@ -43,6 +43,7 @@
 | Файл | Зачем |
 | --- | --- |
 | [load-config-to-dev.md](load-config-to-dev.md) | load conf в dev-ИБ |
+| [ibcmd-cli.md](ibcmd-cli.md) | ibcmd: хелп, креды, кодировка, import/export |
 
 Скиллы: `harness/cursor/skills/` (срез B). Tools: `harness/tools/{bsl-check,sandbox,load-changed-files}`.
 
