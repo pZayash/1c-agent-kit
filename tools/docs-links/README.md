@@ -60,6 +60,7 @@ bash tools/sandbox/run.sh python tools/docs-links/check.py index \
 | `exclude` | префиксы вне аудита (код, генерируемые деревья, рабочие артефакты) |
 | `stubs.max_bytes`, `stubs.markers` | как распознать заглушку |
 | `severity` | `error` / `warning` для видов находок |
+| `untracked_targets` | `true` — цель ссылки вне git — warning, а не `broken` (см. ниже) |
 | `max_per_section` | сколько строк печатать в `report` без `--all` |
 | `index_source`, `index_path` | каталог записей и файл индекса для `index` |
 
@@ -82,14 +83,20 @@ bash tools/sandbox/run.sh python tools/docs-links/check.py index \
 
 | Вид | По умолчанию | Что значит |
 | --- | --- | --- |
-| `broken` | error | файла-цели нет |
+| `broken` | error | файла-цели нет и путь есть в git |
+| `untracked-target` | warning | файла-цели нет, и такого пути в git нет (`handoffs/`, выгрузки, `*.xlsx`) |
 | `anchor` | error | файл есть, заголовка с таким якорем нет |
 | `unreachable` | error | не достигается от `entry` |
 | `dangling` | warning | ноль входящих ссылок |
 | `dir-link` | warning | ссылка на каталог вместо файла/оглавления |
 
-Формат строки в `check`:
+Почему `untracked-target` отдельно от `broken`: ссылка на путь вне git
+(`handoffs/`, сгенерированные выгрузки, `*.xlsx`/`*.docx`, локальные движки)
+работает только у автора и никогда — у остальных; текстом это не лечится
+(либо артефакт в git, либо ссылки быть не должно), поэтому это warning, а не
+`error`. Выключается `"untracked_targets": false`.
 
+Формат строки в `check`:
 ```text
 docs-links: <файл>[:<строка>]: <severity>: <сообщение>
 ```
