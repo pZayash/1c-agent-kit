@@ -66,6 +66,7 @@ if (Test-Path -LiteralPath $reparseLib) {
         ".kilo\plugin", ".opencode\plugin",
         "tools\bsl-check", "tools\sandbox",
         "tools\load-changed-files", "tools\mcp-call", "tools\answer42", "tools\rights-xml-lint",
+        "tools\docs-links",
         "tools\git-partial-stage.py"
     )
     foreach ($d in @(".cursor\skills", ".cursor\rules", ".cursor\commands")) {

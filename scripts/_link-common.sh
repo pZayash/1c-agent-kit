@@ -155,6 +155,7 @@ kit_consumer_link_paths() {
     "$root/.kilo/plugin" "$root/.opencode/plugin" \
     "$root/tools/bsl-check" "$root/tools/sandbox" \
     "$root/tools/load-changed-files" "$root/tools/mcp-call" "$root/tools/answer42" "$root/tools/rights-xml-lint" \
+    "$root/tools/docs-links" \
     "$root/tools/git-partial-stage.py"; do
     printf '%s\n' "$p"
   done
