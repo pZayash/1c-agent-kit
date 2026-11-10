@@ -104,10 +104,16 @@
 #   PARENT_CONFIG_PY          Путь к parent_config.py для preflight поддержки
 #                             (по умолчанию: scripts/parent_config.py потребителя, иначе канон в kit)
 #   UPDATE_DB                 Обновить конфигурацию базы данных после загрузки (true/false, по умолчанию: false)
-#   UPDATE_DB_FORCE_SESSIONS  true (по умолчанию) — если /UpdateDBCfg упал из-за HTTP-клиентов
-#                             (вторую публикацию ИБ держит другая служба Apache), повторить
-#                             обновление с -Dynamic- -SessionTerminate force. Пользователи
-#                             отключаются принудительно, в лог пишется WARN. На prod — false.
+#   UPDATE_DB_FORCE_SESSIONS  true (по умолчанию; false автоматически, если задан IBSRV_PID_FILE)
+#                             — если /UpdateDBCfg упал из-за активных сеансов (HTTP-клиенты,
+#                             исключительная блокировка), повторить обновление с
+#                             -Dynamic- -SessionTerminate force. Пользователи отключаются
+#                             принудительно, в лог пишется WARN. На базах на автономном
+#                             сервере (ibsrv) force роняет сервер в mdmp — там false.
+#   XML_LINT                  true (по умолчанию) — preflight линтера метаданных потребителя
+#                             (tools/metadata-xml-lint/check.py) по загружаемым XML;
+#                             [ERROR] = стоп до импорта. Нет тулзы — пропуск с WARN.
+#   METADATA_LINT_PY          Путь к check.py линтера (по умолчанию tools/metadata-xml-lint/check.py)
 #   APACHE_SERVICE_NAME       Имя службы Apache (например, Apache2.4). Если задано и UPDATE_DB=true —
 #                             служба останавливается перед /UpdateDBCfg и запускается после.
 #                             Освобождает lock файловой ИБ и пересоздаёт worker httpd.exe с wsap24.dll
@@ -839,7 +845,8 @@ read_1c_log_text() {
     fi
 }
 
-# true, если лог UpdateDB содержит признак активных HTTP-клиентов.
+# true, если лог UpdateDB содержит признак конфликта сеансов:
+# HTTP-клиенты (вторая публикация ИБ) ИЛИ исключительная блокировка / активные сеансы.
 # Пробуем все кодировки: UTF-16LE-декодирование произвольных байт «успешно»,
 # но осмысленную фразу даст только верная кодировка.
 log_has_http_clients() {
@@ -848,7 +855,7 @@ log_has_http_clients() {
     for enc in UTF-8 UTF-16LE UTF-16BE CP1251 CP866; do
         text=$(iconv -f "$enc" -t UTF-8 "$log_file" 2>/dev/null | tr -d '\000') || continue
         [[ -n "$text" ]] || continue
-        if grep -qiE 'работающие по HTTP|по HTTP|HTTP[ -]?клиент|HTTP clients' <<< "$text"; then
+        if grep -qiE 'работающие по HTTP|по HTTP|HTTP[ -]?клиент|HTTP clients|исключительн[а-я]* блокировк|активн[а-я]* сеанс|exclusive lock|active sessions' <<< "$text"; then
             return 0
         fi
     done
@@ -2278,10 +2285,16 @@ DESIGNER_PATH="${DESIGNER_PATH:-$(resolve_designer_default)}"
 AUTO_CLOSE_DESIGNER="${AUTO_CLOSE_DESIGNER:-false}"  # Автоматически закрывать конфигуратор
 AUTO_UNSUPPORT_OBJECTS="${AUTO_UNSUPPORT_OBJECTS:-false}"
 UPDATE_DB="${UPDATE_DB:-false}"
-# Авто-retry UpdateDB при ошибке из-за HTTP-клиентов (вторая публикация ИБ).
-# true по умолчанию: завершает сеансы принудительно ТОЛЬКО при таком сбое и с WARN.
-# На prod-хостах выключайте (false), чтобы не рвать пользователей молча.
+# Авто-retry UpdateDB при конфликте сеансов (HTTP-клиенты / исключительная блокировка).
+# true по умолчанию, НО на базе автономного сервера (IBSRV_PID_FILE) — false:
+# -SessionTerminate force роняет ibsrv.exe в mdmp (04.11.2026).
+if [[ -z "${UPDATE_DB_FORCE_SESSIONS+set}" && -n "${IBSRV_PID_FILE:-}" ]]; then
+    UPDATE_DB_FORCE_SESSIONS="false"
+fi
 UPDATE_DB_FORCE_SESSIONS="${UPDATE_DB_FORCE_SESSIONS:-true}"
+# Preflight линтера метаданных потребителя (объект «не в формате дампа» → mdmp/вис).
+XML_LINT="${XML_LINT:-true}"
+METADATA_LINT_PY="${METADATA_LINT_PY:-}"
 REOPEN_DESIGNER_AFTER_LOAD="${REOPEN_DESIGNER_AFTER_LOAD:-false}"
 AUTO_CLOSE_CLIENT="${AUTO_CLOSE_CLIENT:-false}"
 REOPEN_CLIENT_AFTER_LOAD="${REOPEN_CLIENT_AFTER_LOAD:-false}"
@@ -2381,6 +2394,10 @@ while [[ $# -gt 0 ]]; do
             UPDATE_DB_FORCE_SESSIONS="false"
             shift
             ;;
+        --no-xml-lint)
+            XML_LINT="false"
+            shift
+            ;;
         --drop-designer-sessions)
             IB_LOAD_DROP_DESIGNER_SESSIONS="true"
             shift
@@ -2474,6 +2491,7 @@ while [[ $# -gt 0 ]]; do
             echo "      --ibcmd-no-check        ibcmd: --no-check у import files (быстро, без проверки метаданных)"
             echo "      --force-sessions        При ошибке UpdateDB из-за HTTP-клиентов повторить с -Dynamic- -SessionTerminate force"
             echo "      --no-force-sessions     Запретить принудительное завершение сеансов (переопределяет UPDATE_DB_FORCE_SESSIONS)"
+            echo "      --no-xml-lint           Не проверять XML метаданных перед импортом (preflight линтера)"
             echo "      --drop-designer-sessions  Снять висячие сеансы «Конфигуратор» в ИБ (ibcmd session terminate;"
             echo "                              узел не перезапускается). Иначе при таком сеансе — отказ с подсказкой"
             echo "      --verbose               Подробный вывод (по умолчанию краткий; -H/-C — подробный)"
@@ -2489,8 +2507,10 @@ while [[ $# -gt 0 ]]; do
             echo "  AUTO_UNSUPPORT_OBJECTS    Автоматически снимать с поддержки загружаемые объекты"
             echo "  PARENT_CONFIG_PY          Путь к parent_config.py для preflight (default: scripts/ потребителя, иначе kit)"
             echo "  UPDATE_DB                 Обновить конфигурацию базы данных после загрузки"
-            echo "  UPDATE_DB_FORCE_SESSIONS  true (default) — авто-retry UpdateDB с -Dynamic- -SessionTerminate force"
-            echo "                            при ошибке «обнаружены клиенты, работающие по HTTP»; false — не завершать сеансы"
+            echo "  UPDATE_DB_FORCE_SESSIONS  true (default; false при IBSRV_PID_FILE) — авто-retry UpdateDB с -Dynamic- -SessionTerminate force"
+            echo "                            при активных сеансах / исключительной блокировке ИБ; false — не завершать сеансы"
+            echo "  XML_LINT                  true (default) — preflight см. tools/metadata-xml-lint/check.py по загружаемым XML"
+            echo "  METADATA_LINT_PY          Путь к check.py линтера метаданных"
             echo "  REOPEN_DESIGNER_AFTER_LOAD Открывать конфигуратор после загрузки"
             echo "  APACHE_SERVICE_NAME       Имя службы Apache для остановки/запуска при UPDATE_DB"
             echo "                            (пусто = не управлять; пример: Apache2.4)"
@@ -3006,6 +3026,54 @@ fi
 
 if [[ "$has_conf_changes" == "true" && "$FULL_RESYNC" == "true" && -f "$PARENT_CONFIG_BIN" ]]; then
     log "WARN" "Full-resync: preflight по поддержке пропущен (грузим conf/ целиком, без list-file). Проверьте поддержку объектов вручную, если есть сомнения."
+fi
+
+# ── Preflight линтера метаданных (тулза потребителя) ─────────────────────────
+# Объект «не в формате дампа» (inline-шаблон, нет Templates/<Имя>.xml,
+# TemplateType не по содержимому) роняет LoadConfigFromFiles/ibcmd import нативно
+# (mdmp) без внятного сообщения — дешевле стоп до импорта, чем 25 минут виса.
+# Линтер живёт в репозитории потребителя: нет его — пропускаем с WARN.
+if [[ "$XML_LINT" == "true" && "$has_conf_changes" == "true" && "$nothing_to_load" != "true" ]]; then
+    lint_py="${METADATA_LINT_PY:-$repo_path/tools/metadata-xml-lint/check.py}"
+    if [[ ! -f "$lint_py" ]]; then
+        log "WARN" "Preflight XML-метаданных пропущен: нет линтера $lint_py (ключ --no-xml-lint, XML_LINT=false)"
+        timing_mark "preflight XML-метаданных (пропущен)"
+    else
+        lint_targets=()
+        if [[ "$FULL_RESYNC" == "true" ]]; then
+            lint_targets=("$CONFIG_PATH_ABS")
+        else
+            while IFS= read -r rel; do
+                [[ -n "$rel" ]] || continue
+                case "$rel" in
+                    *.xml) lint_targets+=("$CONFIG_PATH_ABS/$rel") ;;
+                esac
+            done < temp_changed_files.txt
+        fi
+        if [[ ${#lint_targets[@]} -eq 0 ]]; then
+            timing_mark "preflight XML-метаданных (нет XML в списке)"
+        else
+            log "INFO" "Preflight XML-метаданных: ${#lint_targets[@]} файл(ов)"
+            lint_out=$(run_python "$lint_py" -q "${lint_targets[@]}" 2>&1)
+            lint_rc=$?
+            if [[ $lint_rc -eq 1 ]]; then
+                while IFS= read -r lint_line; do
+                    [[ -n "$lint_line" ]] && log "ERROR" "lint: $lint_line"
+                done <<< "$lint_out"
+                log "ERROR" "Загрузка остановлена: XML метаданных не в формате дампа (см. выше)"
+                log "ERROR" "Линтер: $lint_py; обход (осознанно): --no-xml-lint или XML_LINT=false"
+                LOAD_HISTORY_REASON="preflight XML-метаданных: ошибки линтера"
+                rm -f temp_changed_files.txt temp_changed_extensions.txt
+                exit 26
+            elif [[ $lint_rc -ne 0 ]]; then
+                log "WARN" "Preflight XML-метаданных завершился с кодом $lint_rc — продолжаем загрузку"
+                while IFS= read -r lint_line; do
+                    [[ -n "$lint_line" ]] && log "WARN" "lint: $lint_line"
+                done <<< "$lint_out"
+            fi
+            timing_mark "preflight XML-метаданных"
+        fi
+    fi
 fi
 
 # Преобразуем пути для командной строки 1С

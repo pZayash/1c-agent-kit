@@ -41,6 +41,14 @@
 - `--no-check` глушит **post-check** метаданных, но НЕ load-time валидацию
   (битые формы «Неверный путь к данным» всё равно валят прогон — прятать их
   файлы на время загрузки).
+- Падение **до** любых проверок (`rc≠0`, stderr пуст, свежий `*.mdmp`
+  в `%LOCALAPPDATA%\1C\1cv8\dumps\`, счётчик `[N/M]` не растёт) — битый файл
+  разбора: объект не в формате дампа. `--no-check` не лечит; искать линтером
+  (см. [load-config-to-dev.md](load-config-to-dev.md) § «Загрузка виснет молча»).
+- `config apply --dynamic=disable --session-terminate=force` на базе, живущей
+  на автономном сервере, **роняет `ibsrv.exe` в mdmp**: force-терминейт уносит
+  сервер, а не только клиентские сеансы. Снимать сеансы явно:
+  `ibcmd session list --pid=<pid>` → `ibcmd session terminate --pid=<pid>`.
 - `export` обратно: `infobase config export <dir>` — весь дамп;
   `export objects <Объект> --out=<dir>` — **один объект** (напр. `Configuration`)
   — дешёвый способ сравнить ИБ с диском. `export status --base <ConfigDumpInfo>`
@@ -48,5 +56,6 @@
 
 ## См. также
 
-- [load-config-to-dev.md](load-config-to-dev.md) — пайплайн загрузки conf/ в ИБ.
+- [load-config-to-dev.md](load-config-to-dev.md) — пайплайн загрузки conf/ в ИБ,
+  preflight линтера метаданных (`XML_LINT`), диагностика молчаливых висов.
 - [mcp-tool-eventlog-post.md](mcp-tool-eventlog-post.md) — журнал регистрации ИБ.
