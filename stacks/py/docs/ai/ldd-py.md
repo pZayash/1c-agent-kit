@@ -9,11 +9,11 @@
 | --- | --- |
 | Библиотека | stdlib `logging` (дефолт) или `structlog` (если уже в проекте) |
 | Формат | структурный JSON на строку |
+| Событие | имя логгера или поле `event`; dotted `<домен>.<операция>` (`order.submit`) |
+| Wide event | один dict на операцию, копим поля, финальный emit в конце |
 
 stdlib `logging` сам JSON не пишет — нужен formatter (`python-json-logger`)
 или `structlog`.
-| Событие | имя логгера или поле `event`; dotted `<домен>.<операция>` (`order.submit`) |
-| Wide event | один dict на операцию, копим поля, финальный emit в конце |
 
 ## Уровни
 
