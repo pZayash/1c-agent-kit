@@ -197,7 +197,7 @@ Working on task 4/7: <task description>
 
 All tasks complete! Invoke skill `openspec-archive-change` to archive this change.
 If `operator-checklist.md` exists with unchecked items — operator must complete
-manual verification first (smoke tests, 1C checks). Archive is blocked until then.
+manual verification first (smoke tests, stack checks). Archive is blocked until then.
 ```
 
 **Output On Pause (Issue Encountered)**

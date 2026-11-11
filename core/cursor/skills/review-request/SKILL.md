@@ -167,7 +167,7 @@ slug: <slug>
   ссылается. Дрифт требований — по
   [openspec-apply-change](../openspec-apply-change/SKILL.md).
 - Не дублирует `memory/` и `handoff`.
-- Не гонять по ревью-файлам check-bsl.py / xml-wellformed — это не код.
+- Не гонять по ревью-файлам стековые чеки — это не код.
 
 ## Связанные скиллы
 

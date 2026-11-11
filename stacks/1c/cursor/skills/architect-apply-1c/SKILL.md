@@ -3,8 +3,8 @@ name: architect-apply-1c
 description: >-
   1C-дополнение к architect-apply: стоп-зона (Form.xml, XML метаданных, MXL;
   загрузка в dev/prod-ИБ), стандарты .bsl (яя_, MODIFICATION_COMMENT_TEMPLATE),
-  чек bsl-check, скиллы meta-*/form-*/mxl-*. Вызывается из architect-apply
-  §stack: 1c, напрямую не вызывать.
+  чек bsl-check, скиллы meta-*/form-*/mxl-*. Вызывается из architect-apply,
+  напрямую не вызывать.
 ---
 
 # architect-apply-1c — 1C-дополнение к architect-apply

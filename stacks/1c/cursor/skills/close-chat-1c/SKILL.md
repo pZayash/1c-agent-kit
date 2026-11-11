@@ -3,7 +3,7 @@ name: close-chat-1c
 description: >-
   1C-дополнение к close-chat: 1С-темы memory-уроков (шаг 0б), зоны смешанных
   файлов conf/ и cfe.xml/, проверки в ИБ в operator-checklist. Вызывается из
-  close-chat §stack: 1c, напрямую не вызывать.
+  close-chat, напрямую не вызывать.
 ---
 
 # close-chat-1c — 1C-дополнение к close-chat

@@ -3,7 +3,7 @@ name: orchestrated-child-1c
 description: >-
   1C-дополнение к orchestrated-child: механика общей ИБ и дампа conf/,
   бутстрап worktree (BSL-сервер, dev_dt/prod_dt, ConfigDumpInfo), стековые
-  чеки. Вызывается из orchestrated-child §stack: 1c, напрямую не вызывать.
+  чеки. Вызывается из orchestrated-child, напрямую не вызывать.
 ---
 
 # orchestrated-child-1c — 1C-дополнение к orchestrated-child

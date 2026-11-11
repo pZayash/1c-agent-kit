@@ -15,8 +15,9 @@ argument-hint: "<задания/<id>-<slug>/programmer-task.md>"
 задаёт результат, границы и отчёт. Канон роли:
 [agent-orchestration.md](../../../docs/ai/agent-orchestration.md).
 
-Если выбран стек `1c` и существует `.cursor/skills/orchestrated-child-1c/SKILL.md` —
-прочти его до шага 1.
+Если для стека `<s>` из `.kit.json stacks[]` существует
+`.cursor/skills/orchestrated-child-<s>/SKILL.md` — прочти все такие
+компаньоны до шага 1, в порядке `stacks:[]`.
 
 ## Стоп-зона (никогда без явной команды оркестратора)
 
@@ -126,10 +127,3 @@ argument-hint: "<задания/<id>-<slug>/programmer-task.md>"
 поработав с тредом напрямую). Пока ты «у оператора», оркестратор о тебе ничего
 не получает — это нормально и временно; контекст и рабочая копия сохраняются.
 По замечаниям приёмки правки — тоже в своей ветке.
-
-#### stack: 1c
-
-Компаньон `.cursor/skills/orchestrated-child-1c/SKILL.md`: 1С-механика стоп-зоны
-(общая ИБ, дамп `conf/`, `/UpdateDBCfg`, кэш `ConfigDumpInfo.xml`), что
-копировать при бутстрапе (BSL-сервер, `.env` с адресом ИБ, `dev_dt`/`prod_dt`),
-стековые чеки (BSL, XML well-formedness).

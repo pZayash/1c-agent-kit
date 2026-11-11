@@ -34,8 +34,9 @@ touched — включаем в коммит без вопроса (целико
 - `--dry-run` — показать план по каждому шагу, ничего не менять и не коммитить.
 - `--skip 0|1|2|3` — пропустить указанный шаг (можно повторять: `--skip 0 --skip 2`).
 
-Если выбран стек `1c` и существует `.cursor/skills/close-chat-1c/SKILL.md` —
-прочти его до шага 1.
+Если для стека `<s>` из `.kit.json stacks[]` существует
+`.cursor/skills/close-chat-<s>/SKILL.md` — прочти все такие
+компаньоны до шага 1, в порядке `stacks:[]`.
 
 ## Подготовка
 
@@ -276,9 +277,3 @@ bash tools/sandbox/run.sh python tools/git-partial-stage.py "путь/к/фай�
 - [git-workflow.md](../../../docs/ai/git-workflow.md) — группировка по `№%`, partial stage смешанных файлов.
 - [agent-session-lessons.md](../../../docs/ai/agent-session-lessons.md) — memory → docs, шаг 0б.
 - [retro](../retro/SKILL.md) — ретроспектива среды агента (не код, не закрытие сессии).
-
-#### stack: 1c
-
-Компаньон `.cursor/skills/close-chat-1c/SKILL.md`: 1С-темы memory-уроков для
-шага 0б (правка `conf/` — метаданные, формы, load; `web-test` + MCP), зоны
-смешанных файлов `conf/` и `cfe.xml/`, проверки в ИБ в operator-checklist.

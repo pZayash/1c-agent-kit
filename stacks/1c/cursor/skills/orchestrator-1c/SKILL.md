@@ -3,8 +3,8 @@ name: orchestrator-1c
 description: >-
   1C-дополнение к orchestrator: общая ИБ как общий ресурс, дочка-интегратор
   (скилл integrator), загрузка конфигурации из conf/ — долгий процесс,
-  Form.xml/XML метаданных — тяжёлые артефакты. Вызывается из orchestrator
-  §stack: 1c, напрямую не вызывать.
+  Form.xml/XML метаданных — тяжёлые артефакты. Вызывается из orchestrator,
+  напрямую не вызывать.
 ---
 
 # orchestrator-1c — 1C-дополнение к orchestrator

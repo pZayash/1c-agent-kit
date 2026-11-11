@@ -1,7 +1,7 @@
 ---
 name: explore
 description: >
-  Режим исследования перед proposal в 1С-проекте.
+  Режим исследования перед proposal в проекте потребителя.
   Гибрид upstream explore-stance + grill-with-docs: гипотезы перед опросом,
   сбор намерения/постановщика/ролей (ROLES.md), свободное исследование,
   уточнение пачками независимых вопросов, словарь терминов, CONTEXT/ADR inline,
@@ -10,7 +10,7 @@ license: MIT
 metadata:
   derivedFrom:
     - https://github.com/mattpocock/skills/tree/main/skills/engineering/grill-with-docs
-  projectAdaptation: 1С-проект (локальные правила)
+  projectAdaptation: проект-потребитель kit (локальные правила)
 ---
 
 # /explore

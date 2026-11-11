@@ -47,7 +47,7 @@ from conversation context. If vague or ambiguous you MUST prompt for available c
    Count tasks marked with `- [ ]` (incomplete) vs `- [x]` (complete).
 
    **`operator-checklist.md` НЕ входит в подсчёт.** Это отдельный файл ручных
-   задач оператора (smoke, проверки в 1С), не парсится openspec CLI. Но если файл
+   задач оператора (smoke, стековые проверки), не парсится openspec CLI. Но если файл
    существует и содержит незакрытые `- [ ]` — **блокер**: вывести содержимое в
    чат и спросить оператора. Архивация возможна только после подтверждения
    оператора (или явного «архивировать как есть»).

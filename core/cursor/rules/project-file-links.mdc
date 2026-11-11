@@ -53,7 +53,7 @@ alwaysApply: true
 | Backticks вместо ссылки | `` `src/…/file.ext` `` — не file-link |
 | `file:///…` | URI ОС |
 | Wikilinks | `[[src/…]]` |
-| Windows-абсолют | `C:\path\to\file.bsl` |
+| Windows-абсолют | `C:\path\to\file.ext` |
 
 ## Быстрая проверка
 

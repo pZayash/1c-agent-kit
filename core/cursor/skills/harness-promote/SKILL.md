@@ -7,7 +7,7 @@ description: >-
 
 # harness-promote
 
-Когда агент меняет общее (дока `docs/ai` kit, tools, skills шаблоны, **stacks/1c/skills** — vendored cc-1c):
+Когда агент меняет общее (дока `docs/ai` kit, tools, skills шаблоны, **stacks/<s>/skills** — vendored скиллы стека):
 
 1. Рабочий каталог правок — `harness/` (submodule), не копия в корне проекта.
 2. `git -C harness status` / commit / push — **в репо kit**.
@@ -15,7 +15,7 @@ description: >-
    инфра (IP/хосты/пути/кодовые имена/секреты). Канон:
    [commit-hygiene.md](../../../docs/ai/commit-hygiene.md).
    Перед commit skills — frontmatter lint:
-   `python tools/skill-frontmatter/skill-frontmatter.py lint core/cursor/skills stacks/1c/cursor/skills stacks/1c/skills`
+   `python tools/skill-frontmatter/skill-frontmatter.py lint core/cursor/skills stacks/*/cursor/skills stacks/*/skills`
    (fixable-проблемы: `... fix <те же каталоги>`).
 3. В репо проекта: `git add harness` (только gitlink SHA). Сообщение:
    `chore(harness): bump kit to <short-sha>`.
@@ -37,15 +37,15 @@ HEAD не предок — это **diverged**, а не behind: `checkout origin
 bash harness/scripts/bootstrap-kit.sh .   # engine: print-config → sparse → apply → verify
 ```
 
-Legacy link-скрипты (без движка): `link-cc-1c-skills.sh`,
+Legacy link-скрипты (без движка): `link-*-skills.sh`,
 `link-cursor-overlay.sh`, `link-kit-tools.sh` — local-манифесты по
 умолчанию `.kit/local-{skills,overlay,tools}.txt` (legacy-путь
-`tools/cc-1c-skills-sync/` читается при отсутствии новых).
+`tools/*-skills-sync/` читается при отсутствии новых).
 
-**Promote cc-1c upstream (maintainer kit):**
+**Promote vendored skills upstream (maintainer kit):**
 
 ```bash
-cd harness && python tools/cc-1c-skills-sync/sync.py
+cd harness && python tools/*-skills-sync/sync.py
 ```
 
 Скрипт: `harness/scripts/promote.sh <consumer-root>`.
