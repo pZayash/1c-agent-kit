@@ -23,6 +23,8 @@ Kit разделён на стеко-нейтральное ядро и стек
 | stacks/1c | `stacks/1c/cursor/{skills,rules,commands}` | 1С-скиллы + компаньоны `<name>-1c` к core-пайплайнам | `.cursor/*` |
 | stacks/1c | `stacks/1c/docs/ai` | 1С-каноны (запросы, СКД, метаданные) | через заглушки `docs/ai/` |
 | stacks/1c | `stacks/1c/tools` | `bsl-check`, `load-changed-files`, `mcp-call`, `answer42`, `rights-xml-lint` | `tools/` |
+| stacks/py | `stacks/py/docs/ai` | Python-каноны (LDD-binding и др.) | через заглушки `docs/ai/` |
+| stacks/node | `stacks/node/docs/ai` | Node (JS/TS)-каноны (LDD-binding и др.) | через заглушки `docs/ai/` |
 | kit-internal | `pi/`, `kilo/`, `hooks/`, `templates/`, `openspec/`, `scripts/`, `tools/{kit-layout,kit-agent,kit-lint,cc-1c-skills-sync,section-patch,skill-frontmatter,cc-1c-skills}` | механика kit, не монтируется | — |
 
 Манифесты слоёв: `core/core.json`, `stacks/<id>/stack.json` — `id` +
