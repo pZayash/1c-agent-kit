@@ -2,8 +2,10 @@
 <#
 .SYNOPSIS
   Check (and optionally install) kit host PATH tools. Never openspec init / rtk init.
-  Deps: harness/core/deps.json + harness/stacks/<s>/stack.json of the stacks
-  selected in the consumer .kit.json.
+  Deps: core/core.json + stacks/<s>/stack.json of the stacks selected in the
+  consumer .kit.json, read structurally via kit_layout.py print-config --json
+  (key `deps`). Stack-specific ids without a core dep_<d> go to the stack
+  hook stacks/<s>/deps-check.ps1.
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -126,62 +128,49 @@ function dep_qmd { if (Test-OnPath "qmd") { Write-Host "OK qmd" } else { Write-H
 
 function dep_unzip { if (Test-OnPath "unzip") { Write-Host "OK unzip" } else { Write-Host "WARN unzip not on PATH (BSLLS download)" } }
 
-function dep_answer42 {
-    if (Test-Path -LiteralPath (Join-Path $root "tools\answer42")) {
-        Write-Host "OK answer42 (consumer tools/)"
-    } else {
-        Write-Host "WARN answer42 not linked (tools/answer42) - bootstrap-kit"
-    }
-}
-
-function dep_bsl_language_server {
-    $bsllsPy = $null
-    foreach ($c in @("python", "python3", "py")) {
-        if (Test-OnPath $c) { $bsllsPy = $c; break }
-    }
-    $bsllsScript = Join-Path $harness "stacks\1c\tools\bsl-check\check-bsl.py"
-    if (-not (Test-Path -LiteralPath $bsllsScript)) {
-        $bsllsScript = Join-Path $root "tools\bsl-check\check-bsl.py"
-    }
-    if (-not $bsllsPy) {
-        Write-Host "WARN BSLLS: no python to run check-bsl.py --which"
-    } elseif (-not (Test-Path -LiteralPath $bsllsScript)) {
-        Write-Host "WARN BSLLS: check-bsl.py missing"
-    } else {
-        $bsllsOut = & $bsllsPy $bsllsScript --which 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "OK BSLLS $($bsllsOut.Trim())"
-        } else {
-            Write-Host "WARN BSLLS runtime missing"
-            Write-Host $bsllsOut.TrimEnd()
-        }
-    }
-}
-
-function dep_designer_ibcmd {
-    if ((Test-OnPath "ibcmd") -or (Test-OnPath "designer")) {
-        Write-Host "OK designer/ibcmd"
-    } else {
-        Write-Host "WARN designer/ibcmd not on PATH (check DESIGNER_PATH in .env)"
-    }
-}
-
-function Invoke-Dep([string]$id) {
+# Dep-id dispatch (spec "Per-stack deps-check hook"): a dep_<d> function in
+# this script runs once (seen-dedup across stacks); other ids collect into the
+# stack's unhandled list -> one call of stacks/<s>/deps-check.ps1.
+function Invoke-CoreDep([string]$id) {
+    if ($seen.ContainsKey($id)) { return }
     $fn = "dep_" + ($id -replace '-', '_')
     if (Get-Command $fn -ErrorAction SilentlyContinue) {
+        $seen[$id] = $true
         & $fn
     } else {
         Write-Host "WARN unknown dep id: $id (no check function)"
     }
 }
 
-function Get-DepsIds([string]$file) {
-    if (-not (Test-Path -LiteralPath $file)) { return @() }
-    try {
-        $j = (Get-Content -LiteralPath $file -Raw -Encoding UTF8) | ConvertFrom-Json
-        return @($j.deps)
-    } catch {
-        return @()
+# unhandled -> stack hook with env CONSUMER_ROOT/HARNESS_ROOT/INSTALL/
+# STACK_DEPS, cwd = consumer root; exit != 0 -> fail. No hook -> WARN.
+# "WARN unknown dep id" is NOT printed for unhandled - the hook owns them.
+function Invoke-StackDeps([string]$Stack, [string[]]$Ids) {
+    $unhandled = @()
+    foreach ($d in $Ids) {
+        $fn = "dep_" + ($d -replace '-', '_')
+        if (Get-Command $fn -ErrorAction SilentlyContinue) {
+            Invoke-CoreDep $d
+        } else {
+            $unhandled += $d
+        }
+    }
+    if ($unhandled.Count -eq 0) { return }
+    $hook = Join-Path $harness "stacks\$Stack\deps-check.ps1"
+    if (Test-Path -LiteralPath $hook) {
+        $env:CONSUMER_ROOT = $root
+        $env:HARNESS_ROOT = $harness
+        $env:INSTALL = $(if ($Install) { "1" } else { "0" })
+        $env:STACK_DEPS = ($unhandled -join ' ')
+        Push-Location $root
+        try {
+            & $hook
+            if ($LASTEXITCODE -ne 0) { $script:fail = 1 }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        Write-Host "WARN stack ${Stack}: deps not covered by core dep_* ($($unhandled -join ' ')) and no stacks/$Stack/deps-check.ps1"
     }
 }
 
@@ -208,22 +197,30 @@ if ($stacks -contains "*") {
 
 Write-Host "=== check ==="
 $seen = @{}
-function Check-DepsFile([string]$file, [string]$label) {
-    if (-not (Test-Path -LiteralPath $file)) {
-        Write-Host "WARN missing deps registry: $file"
-        return
-    }
-    Write-Host "=== deps: $label ==="
-    foreach ($d in (Get-DepsIds $file)) {
-        if ($seen.ContainsKey($d)) { continue }
-        $seen[$d] = $true
-        Invoke-Dep $d
+
+# deps registry - structural, key `deps` of print-config --json (textual JSON
+# parsing is forbidden). No python -> WARN + sections skipped.
+$depsRows = $null
+$py = Get-Command python -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+$klDeps = Join-Path $harness "tools\kit-layout\kit_layout.py"
+if ($py -and (Test-Path -LiteralPath $klDeps)) {
+    $depsText = & $py.Source $klDeps print-config $root --harness-rel $HarnessRel --json 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        try { $depsRows = (($depsText | Out-String) | ConvertFrom-Json).deps } catch { }
     }
 }
-
-Check-DepsFile (Join-Path $harness "core\deps.json") "core"
-foreach ($s in $stacks) {
-    Check-DepsFile (Join-Path $harness "stacks\$s\stack.json") "stack $s"
+if ($null -eq $depsRows) {
+    Write-Host "WARN deps registry unread (no python / print-config) - deps sections skipped"
+} else {
+    Write-Host "=== deps: core ==="
+    foreach ($d in @($depsRows.core)) { Invoke-CoreDep $d }
+    foreach ($s in $stacks) {
+        $prop = $depsRows.stacks.PSObject.Properties[$s]
+        if ($null -eq $prop -or @($prop.Value).Count -eq 0) { continue }
+        Write-Host "=== deps: stack $s ==="
+        Invoke-StackDeps $s @($prop.Value)
+    }
 }
 
 Write-Host "=== consumer ==="

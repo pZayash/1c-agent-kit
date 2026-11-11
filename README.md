@@ -25,7 +25,7 @@ Kit разделён на стеко-нейтральное ядро и стек
 | stacks/1c | `stacks/1c/tools` | `bsl-check`, `load-changed-files`, `mcp-call`, `answer42`, `rights-xml-lint` | `tools/` |
 | kit-internal | `pi/`, `kilo/`, `hooks/`, `templates/`, `openspec/`, `scripts/`, `tools/{kit-layout,kit-agent,kit-lint,cc-1c-skills-sync,section-patch,skill-frontmatter,cc-1c-skills}` | механика kit, не монтируется | — |
 
-Манифесты слоёв: `core/deps.json`, `stacks/<id>/stack.json` — `id` +
+Манифесты слоёв: `core/core.json`, `stacks/<id>/stack.json` — `id` +
 host-deps (список id на check-функции `init-kit-deps`).
 
 ## `.kit.json` — выбор стеков у потребителя
@@ -63,6 +63,74 @@ sha256, gitignored) и lock `.kit/lock`. Локальные манифесты
 **tracked**, consumer-owned: имена детей, которые потребитель не линкует
 из kit. В `.gitignore` — только `.kit/fallback.txt` и `.kit/lock`;
 паттерн `.kit*` — **никогда** (съест `.kit.json`).
+
+## Stack authoring
+
+Новый стек = `stacks/<s>/` + `stack.json` + каноничные каталоги — **ноль
+правок** `layout.json` и core-скиллов. `stack.json` (та же схема у
+`core/core.json`):
+
+```json
+{"id": "<s>", "description": "…", "layout_version": 1, "deps": ["…"]}
+```
+
+**Каноничные каталоги** (engine синтезирует ресурсы `auto:*`; все
+опциональны — отсутствие каталога это норма, не WARN):
+
+| Каталог `stacks/<s>/` | Ресурс | kind → target |
+| --- | --- | --- |
+| `cursor/skills` | `auto:overlay-skills-<s>` | child-dirs → `.cursor/skills` |
+| `cursor/rules` | `auto:overlay-rules-<s>` | child-files → `.cursor/rules` |
+| `cursor/commands` | `auto:overlay-commands-<s>` | child-files → `.cursor/commands` |
+| `tools` | `auto:kit-tools-<s>` | child-dirs → `tools` |
+
+Прочие каталоги (`skills/` vendor-набор, `docs/ai`) — своими механизмами
+(cc-1c sync, docs-заглушки). Служебные имена `.*` и `__pycache__` не
+публикуются **никаким** ресурсом — явным или синтезированным.
+Синтезированные несут полный контракт явных: `local_manifest`
+(`.kit/local-overlay.txt` / `.kit/local-tools.txt`), `missing_source` при
+«в HEAD есть, на диске нет», порядок `core → stacks → aliases`; явный
+ресурс с тем же `kind+source+target` — duplicate ERROR.
+
+**Компаньоны скиллов.** Стеко-вариативные шаги core-пайплайна живут в
+`stacks/<s>/cursor/skills/<name>-<s>/`; core-скилл держит единый
+generic-указатель до шага 1: «Если для стека `<s>` из `.kit.json
+stacks[]` существует `.cursor/skills/<имя-этого-скилла>-<s>/SKILL.md` —
+прочти все такие компаньоны до шага 1, в порядке `stacks:[]`»
+(подстановка: `handoff` → `handoff-<s>`; multi-stack — читать **все**
+существующие компаньоны в порядке `stacks:[]`). Description компаньона:
+без триггеров core-скилла + «вызывается из `<name>`, напрямую не
+вызывать». Указатель ставится только в скиллах со стеко-вариативным
+пайплайном.
+
+**Доки стека** `stacks/<s>/docs/ai/`: документ на общий межстековый
+топик именуется `<topic>-<s>.md` (иначе два стека создадут одноимённые
+файлы); индексный `README.md` каталога — исключение; уникальный для
+стека топик MAY иметь собственное имя; при core-аналоге — ссылка на
+него первым абзацем. Существующие `stacks/1c/docs/ai/*.md` без суффикса
+— grandfathered, не переименовываются.
+
+**deps-check хук.** `deps` из `stack.json`/`core.json` диспетчеризует
+`init-kit-deps` структурно (ключ `deps` из `print-config --json`; оба
+файла читаются `ConvertFrom-Json`/JSON-парсером — текстовый парсинг
+запрещён): id с core-функцией `dep_<d>` выполняется один раз (дедуп
+между стеками), остальные — `unhandled`. При непустом `unhandled`
+вызывается `stacks/<s>/deps-check.{sh,ps1}` — **оба файла обязательны**
+(на Windows `.sh` exec'ит `.ps1`; `.ps1` — ASCII-safe): env
+`CONSUMER_ROOT`, `HARNESS_ROOT`, `INSTALL`, `STACK_DEPS` (id через
+пробел), cwd — корень потребителя; stdout — статусные строки формата
+`dep_*`; `exit 0` при OK и при WARN-only, `exit != 0` → fail в
+`init-kit-deps`. Нет хука при непустом `unhandled` → WARN (правило в
+kit-lint). Стек с `deps`, целиком покрытыми core `dep_*`, хук иметь не
+обязан. `init-kit-deps.*` не содержит литералов конкретных stack-id —
+только `stacks/$s/…`.
+
+**`layout_version`** (optional, default 1, int ≥ 1) — в `.kit.json`,
+`stack.json`, `core.json`: совместимость engine↔kit; значение выше
+`SUPPORTED_LAYOUT_VERSION` — ERROR с sha kit (engine валидирует
+effective-стеки, kit-lint — все). Три оси версий: `.kit.json "version"`
+— схема файла потребителя; `layout_version` — механизм core/stacks;
+`layout.json "version"` — схема манифеста ресурсов.
 
 ## Bootstrap (рекомендуемый вход)
 
@@ -363,7 +431,7 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   `setup-project-symlinks.sh` целиком (`src/cf` — layout потребителя).
 - **Нет node / openspec / rtk на голом Windows-worktree** — слот Docker
   уже содержит их в образе; 42/`features` — нет. Скрипт
-  `init-kit-deps` (`-Install`) ставит core-зависимости (`core/deps.json`)
+  `init-kit-deps` (`-Install`) ставит core-зависимости (`core/core.json`)
   + зависимости выбранных стеков (`stacks/<id>/stack.json`). **Не** `openspec init` (свои
   `openspec/` + kit skills). **Не** `rtk init` (CLAUDE.md). Канон:
   [core/docs/ai/kit-host-deps.md](core/docs/ai/kit-host-deps.md).
@@ -405,7 +473,7 @@ architect-apply, review, review-request, retro.
 Mid-pipeline core-скиллы (handoff, close-chat, architect-apply,
 orchestrated-child, orchestrator) переписаны линейно без 1С; 1С-шаги — в
 компаньонах `stacks/1c/cursor/skills/<name>-1c`, которые core-версия
-вызывает по инструкции в начале пайплайна (секция `#### stack: 1c`).
+вызывает по generic-указателю в начале пайплайна (см. § Stack authoring).
 
 **Потребитель** после cc-1c link:
 

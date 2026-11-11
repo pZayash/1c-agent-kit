@@ -1,0 +1,14 @@
+{
+  "id": "core",
+  "description": "Stack-neutral kit core host dependencies",
+  "layout_version": 1,
+  "deps": [
+    "git",
+    "node",
+    "npm",
+    "openspec",
+    "rtk",
+    "rg",
+    "docker"
+  ]
+}

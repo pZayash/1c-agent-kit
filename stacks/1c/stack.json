@@ -1,1 +1,13 @@
-{"id":"1c","description":"1C:Enterprise stack","deps":["bsl-language-server","designer-ibcmd","answer42","python","unzip","qmd"]}
+{
+  "id": "1c",
+  "description": "1C:Enterprise stack",
+  "layout_version": 1,
+  "deps": [
+    "bsl-language-server",
+    "designer-ibcmd",
+    "answer42",
+    "python",
+    "unzip",
+    "qmd"
+  ]
+}

@@ -152,13 +152,12 @@ kit_consumer_link_paths() {
   for p in \
     "$root/.agents/skills" "$root/.claude/skills" "$root/.claude/commands" \
     "$root/.pi/skills" "$root/.pi/prompts" "$root/.pi/extensions" \
-    "$root/.kilo/plugin" "$root/.opencode/plugin" \
-    "$root/tools/bsl-check" "$root/tools/sandbox" \
-    "$root/tools/load-changed-files" "$root/tools/mcp-call" "$root/tools/answer42" "$root/tools/rights-xml-lint" \
-    "$root/tools/git-partial-stage.py"; do
+    "$root/.kilo/plugin" "$root/.opencode/plugin"; do
     printf '%s\n' "$p"
   done
-  for d in "$root/.cursor/skills" "$root/.cursor/rules" "$root/.cursor/commands"; do
+  # Динамический скан reparse-ссылок — новые kit-tools стеков подхватываются
+  # без правки этого списка (как для .cursor/*).
+  for d in "$root/.cursor/skills" "$root/.cursor/rules" "$root/.cursor/commands" "$root/tools"; do
     [[ -d "$d" ]] || continue
     for p in "$d"/*; do
       [[ -L "$p" ]] && printf '%s\n' "$p"

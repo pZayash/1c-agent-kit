@@ -5,7 +5,7 @@
 | Слой | Что | Скрипт |
 | --- | --- | --- |
 | **Links** | junctions/symlink skills/tools (по `.kit.json` — core + выбранные стеки) | `bootstrap-kit` |
-| **Host PATH** | git, node, openspec CLI, rtk, rg + per-stack (`stacks/<id>/stack.json`) | `init-kit-deps` |
+| **Host PATH** | git, node, openspec CLI, rtk, rg + per-stack (`stack.json` → хук `deps-check`) | `init-kit-deps` |
 
 Docker-слот (`org-agent-*`): node 20 + `@fission-ai/openspec@1.2.0` + rtk
 уже в образе. Голый Windows-worktree (42/`features`) — **нет**.
@@ -72,8 +72,8 @@ sandbox) печатается `WARN: powershell.exe не в PATH - исполь�
 - Docker Desktop (sandbox, слоты)
 - `qmd`, `uv` / rlm-tools-bsl. Клиент агента: `QMD_CLIENT` / `QMD_MCP_URL`
   ([qmd-search.md](qmd-search.md), шаблон [env-qmd.example](../../../templates/env-qmd.example))
-- `unzip` + `gh`/`curl` (скачать BSLLS **в кэш хоста**, не в worktree:
-  `bash harness/stacks/1c/tools/bsl-check/update-bsl-language-server.sh`)
+- `unzip` + `gh`/`curl` (скачивание стековых бинарей **в кэш хоста**, не в
+  worktree — точная команда в доках стека и его `deps-check`)
 - Windows Developer Mode (file `mklink` для `.mdc`; без прав — hardlink,
   в крайнем случае copy-fallback; учёт в `.kit/fallback.txt`)
 - `harness/.git` file-gitdir — `fix-harness-gitdir`
@@ -85,8 +85,18 @@ sandbox) печатается `WARN: powershell.exe не в PATH - исполь�
 2. Merge канон-ветки (чтобы был `openspec/` в git).
 3. `init-kit-deps -Install` — **не** `openspec init`.
 4. `bootstrap-kit` → `kit_layout.py verify`.
-5. BSLLS: один раз на хост (не на worktree)
-   `bash harness/stacks/1c/tools/bsl-check/update-bsl-language-server.sh` (без `--latest`).
-   На 42 сначала User env `KIT_BSLLS_ROOT=D:\tools\bslls`.
-   Проверка: `python harness/stacks/1c/tools/bsl-check/check-bsl.py --which`.
+5. Стековые инструменты — по докам выбранных стеков (их `deps-check`
+   показывает, чего не хватает; бинари ставятся один раз на хост, не в
+   worktree).
 6. Reload Window Cursor.
+
+## deps-check хук стека
+
+`deps` из `stack.json` диспетчеризует `init-kit-deps`: id с core-функцией
+`dep_<d>` выполняется один раз (дедуп между стеками), остальные —
+`unhandled`. При непустом `unhandled` вызывается
+`stacks/<s>/deps-check.{sh,ps1}` (оба файла, `.ps1` — ASCII): env
+`CONSUMER_ROOT`, `HARNESS_ROOT`, `INSTALL`, `STACK_DEPS` (id через пробел),
+cwd — корень потребителя; stdout — статусы `dep_*`; `exit 0` при OK и
+WARN-only, `!= 0` → fail. Что проверяет хук и как ставить недостающее —
+в `docs/ai` соответствующего стека.

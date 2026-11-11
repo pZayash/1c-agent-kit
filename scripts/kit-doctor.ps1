@@ -73,12 +73,10 @@ if (Test-Path -LiteralPath $reparseLib) {
     $nsCandidates = @(
         ".agents\skills", ".claude\skills", ".claude\commands",
         ".pi\skills", ".pi\prompts", ".pi\extensions",
-        ".kilo\plugin", ".opencode\plugin",
-        "tools\bsl-check", "tools\sandbox",
-        "tools\load-changed-files", "tools\mcp-call", "tools\answer42", "tools\rights-xml-lint",
-        "tools\git-partial-stage.py"
+        ".kilo\plugin", ".opencode\plugin"
     )
-    foreach ($d in @(".cursor\skills", ".cursor\rules", ".cursor\commands")) {
+    # Dynamic reparse scan - new stack kit-tools without a list edit.
+    foreach ($d in @(".cursor\skills", ".cursor\rules", ".cursor\commands", "tools")) {
         $full = Join-Path $root $d
         if (Test-Path -LiteralPath $full) {
             Get-ChildItem -LiteralPath $full -Force | ForEach-Object {

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Check (and optionally install) kit host PATH tools. Never openspec init / rtk init.
-# Deps: core/deps.json + stacks/<s>/stack.json выбранных стеков (.kit.json).
+# Deps: core/core.json + stacks/<s>/stack.json выбранных стеков (.kit.json),
+# структурно — ключ `deps` из `kit_layout.py print-config --json`.
+# Стеко-специфичные id без core dep_<d> → хук stacks/<s>/deps-check.sh.
 #
 # Usage:
 #   bash harness/scripts/init-kit-deps.sh [ConsumerRoot]
@@ -59,45 +61,47 @@ dep_docker()  { warn_have docker; }
 dep_python()  { if have python || have python3; then echo "OK python"; else echo "WARN python not on PATH"; fi; }
 dep_qmd()     { warn_have qmd; }
 dep_unzip()   { warn_have unzip "BSLLS download"; }
-dep_answer42() {
-  if [[ -e "$CONSUMER_ROOT/tools/answer42" ]]; then echo "OK answer42 (consumer tools/)"
-  else echo "WARN answer42 не слинкован (tools/answer42) — bootstrap-kit"; fi
-}
-dep_bsl_language_server() {
-  local bslls_py="" bslls_script bslls_out bslls_rc
-  if have python3; then bslls_py="python3"; elif have python; then bslls_py="python"; fi
-  bslls_script="$HARNESS_ROOT/stacks/1c/tools/bsl-check/check-bsl.py"
-  [[ -f "$bslls_script" ]] || bslls_script="$CONSUMER_ROOT/tools/bsl-check/check-bsl.py"
-  if [[ -z "$bslls_py" ]]; then
-    echo "WARN BSLLS: no python to run check-bsl.py --which"
-  elif [[ ! -f "$bslls_script" ]]; then
-    echo "WARN BSLLS: check-bsl.py missing"
-  else
-    bslls_out=""; bslls_rc=0
-    bslls_out="$("$bslls_py" "$bslls_script" --which 2>&1)" || bslls_rc=$?
-    if [[ "$bslls_rc" -eq 0 ]]; then
-      echo "OK BSLLS $bslls_out"
-    else
-      echo "WARN BSLLS runtime missing"
-      printf '%s\n' "$bslls_out"
-    fi
-  fi
-}
-dep_designer_ibcmd() {
-  if have ibcmd || have designer; then echo "OK designer/ibcmd"
-  else echo "WARN designer/ibcmd not on PATH (проверь DESIGNER_PATH в .env)"; fi
-}
 
-run_dep() { # $1=dep id → dep_*
+# Диспетчеризация dep-id (spec «Per-stack deps-check хук»):
+# есть dep_<d> в этом скрипте → выполнить (дедуп seen между стеками);
+# иначе id уходит в unhandled стека → один вызов stacks/<s>/deps-check.sh.
+run_core_dep() { # $1=dep id
   local fn="dep_${1//-/_}"
-  if declare -F "$fn" >/dev/null; then "$fn"; else
+  [[ -n "${seen[$1]:-}" ]] && return 0
+  if declare -F "$fn" >/dev/null; then
+    seen["$1"]=1
+    "$fn"
+  else
     echo "WARN unknown dep id: $1 (нет check-функции)"
   fi
 }
 
-# dep ids из JSON-реестра (однострочный формат stack.json/deps.json).
-deps_ids() { # $1=json file
-  tr -d ' \t' <"$1" | sed -n 's/.*"deps":\[\(.*\)\].*/\1/p' | tr ',' '\n' | tr -d '"'
+# $1=stack id, остальные — его dep ids. unhandled → хук стека с env
+# CONSUMER_ROOT/HARNESS_ROOT/INSTALL/STACK_DEPS, cwd=consumer root;
+# exit != 0 → fail. Нет хука → WARN. «WARN unknown dep id» для unhandled
+# здесь не печатается — это норма, их разбирает хук.
+run_stack_deps() {
+  local s="$1"; shift
+  local unhandled=() d fn hook
+  for d in "$@"; do
+    fn="dep_${d//-/_}"
+    if declare -F "$fn" >/dev/null; then
+      run_core_dep "$d"
+    else
+      unhandled+=("$d")
+    fi
+  done
+  [[ "${#unhandled[@]}" -gt 0 ]] || return 0
+  hook="$HARNESS_ROOT/stacks/$s/deps-check.sh"
+  if [[ -f "$hook" ]]; then
+    if ! (cd "$CONSUMER_ROOT" && \
+          CONSUMER_ROOT="$CONSUMER_ROOT" HARNESS_ROOT="$HARNESS_ROOT" \
+          INSTALL="$INSTALL" STACK_DEPS="${unhandled[*]}" "$BASH" "$hook"); then
+      fail=1
+    fi
+  else
+    echo "WARN stack $s: deps не покрыты core dep_* (${unhandled[*]}) и нет stacks/$s/deps-check.sh"
+  fi
 }
 
 echo "NEVER: openspec init  (own openspec/ + kit skills)"
@@ -118,22 +122,38 @@ esac
 
 echo "=== check ==="
 declare -A seen=()
-check_deps_file() { # $1=json $2=label
-  [[ -f "$1" ]] || { echo "WARN missing deps registry: $1"; return; }
-  echo "=== deps: $2 ==="
-  local d
-  while IFS= read -r d; do
-    [[ -n "$d" ]] || continue
-    [[ -n "${seen[$d]:-}" ]] && continue
-    seen["$d"]=1
-    run_dep "$d"
-  done < <(deps_ids "$1")
-}
 
-check_deps_file "$HARNESS_ROOT/core/deps.json" "core"
-for s in $stacks; do
-  check_deps_file "$HARNESS_ROOT/stacks/$s/stack.json" "stack $s"
-done
+# deps-реестр — структурно, ключ deps из print-config --json
+# (текстовый парсинг JSON запрещён). Нет python → WARN + пропуск секций.
+deps_rows=""
+deps_cfg=""
+PY="$(command -v python || command -v python3 || true)"
+if [[ -n "$PY" ]] && deps_cfg="$(kit_print_config_json "$CONSUMER_ROOT" "$HARNESS_REL" 2>/dev/null)"; then
+  deps_rows="$(printf '%s' "$deps_cfg" | "$PY" -c 'import json,sys
+c=json.load(sys.stdin)
+d=c.get("deps") or {}
+print("core\t"+" ".join(str(x) for x in (d.get("core") or [])))
+for s,ids in sorted((d.get("stacks") or {}).items()):
+    print("stack\t"+s+"\t"+" ".join(str(x) for x in ids))' 2>/dev/null | tr -d '\r')" || deps_rows=""
+fi
+
+if [[ -z "$deps_rows" ]]; then
+  echo "WARN deps registry не прочитан (нет python / print-config) — секции deps пропущены"
+else
+  while IFS=$'\t' read -r kind s ids; do
+    case "$kind" in
+      core)
+        [[ -n "$s" ]] || continue
+        echo "=== deps: core ==="
+        for d in $s; do run_core_dep "$d"; done ;;
+      stack)
+        [[ -n "$ids" && " $stacks " == *" $s "* ]] || continue
+        echo "=== deps: stack $s ==="
+        # разбиение $ids по пробелам — намеренно
+        run_stack_deps "$s" $ids ;;
+    esac
+  done <<<"$deps_rows"
+fi
 
 echo "=== consumer ==="
 if [[ -d "$CONSUMER_ROOT/openspec" ]]; then

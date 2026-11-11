@@ -42,7 +42,10 @@ Consumer config .kit.json (repo root):
    "paths": {...}, "sparse": false}
   Missing file  -> stacks [] (core-only) + WARN.
   KIT_LEGACY=1  -> stacks ["*"] (all stacks) + WARN; env beats file.
-  print-config --json is the ONLY parser scripts may use.
+  print-config --json is the ONLY parser scripts may use; besides the
+  resolved config it emits `deps` ({'core': [...], 'stacks': {<s>: [...]}}
+  from core.json + stack.json — the dep-id registry init-kit-deps
+  dispatches) and `resources` (resource ids, synthesized ones auto:-prefixed).
 
 State files live in .kit/ (tracked dir): fallback.txt + lock are
 engine-owned (gitignored via the managed block); local-*.txt exclusion
