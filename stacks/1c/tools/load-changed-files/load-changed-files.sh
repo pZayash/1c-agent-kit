@@ -111,8 +111,10 @@
 #                             принудительно, в лог пишется WARN. На базах на автономном
 #                             сервере (ibsrv) force роняет сервер в mdmp — там false.
 #   XML_LINT                  true (по умолчанию) — preflight линтера метаданных потребителя
-#                             (tools/metadata-xml-lint/check.py) по загружаемым XML;
-#                             [ERROR] = стоп до импорта. Нет тулзы — пропуск с WARN.
+#                             (tools/metadata-xml-lint/check.py): XML дельты conf/ + каталоги
+#                             изменённых расширений, список — файлом (--list-file).
+#                             Стоп до импорта только на коде 1 ([ERROR]); коды 2/3/4 — WARN.
+#                             Нет тулзы — пропуск с WARN.
 #   METADATA_LINT_PY          Путь к check.py линтера (по умолчанию tools/metadata-xml-lint/check.py)
 #   APACHE_SERVICE_NAME       Имя службы Apache (например, Apache2.4). Если задано и UPDATE_DB=true —
 #                             служба останавливается перед /UpdateDBCfg и запускается после.
@@ -125,7 +127,8 @@
 #                             даже при Configuration.xml в списке; ibcmd его отвергнет)
 #   LOAD_HIDE_FILES           «;»-список путей относительно корня репо: на время
 #                             LoadConfigFromFiles переименовать в *.hidden-for-load
-#                             (типовая битая форма УНФ при -F / Configuration.xml)
+#                             (типовая битая форма УНФ при -F / Configuration.xml).
+#                             Спрятанные пути не проверяются preflight-линтом
 #   LOAD_VERBOSE              true — то же, что --verbose
 #   LOG_FILE_LIST_THRESHOLD   Порог поименного вывода файлов в -H/-C/--verbose (по умолчанию: 100)
 #   IB_LOAD_STRICT            true — защиты «ворктри» и «чужая грязь conf/» дают жёсткий
@@ -845,17 +848,30 @@ read_1c_log_text() {
     fi
 }
 
+# Причина конфликта сеансов, найденная `log_has_http_clients`:
+#   http — ИБ публикует ещё одна служба Apache (клиенты работают по HTTP);
+#   lock — базу держат активные сеансы / исключительная блокировка (force может не
+#          помочь и рвёт пользователей);
+#   пусто — признаков не найдено.
+LOG_CONFLICT_KIND=""
+
 # true, если лог UpdateDB содержит признак конфликта сеансов:
 # HTTP-клиенты (вторая публикация ИБ) ИЛИ исключительная блокировка / активные сеансы.
 # Пробуем все кодировки: UTF-16LE-декодирование произвольных байт «успешно»,
 # но осмысленную фразу даст только верная кодировка.
 log_has_http_clients() {
     local log_file="$1" enc text
+    LOG_CONFLICT_KIND=""
     [[ -f "$log_file" && -s "$log_file" ]] || return 1
     for enc in UTF-8 UTF-16LE UTF-16BE CP1251 CP866; do
         text=$(iconv -f "$enc" -t UTF-8 "$log_file" 2>/dev/null | tr -d '\000') || continue
         [[ -n "$text" ]] || continue
-        if grep -qiE 'работающие по HTTP|по HTTP|HTTP[ -]?клиент|HTTP clients|исключительн[а-я]* блокировк|активн[а-я]* сеанс|exclusive lock|active sessions' <<< "$text"; then
+        if grep -qiE 'работающие по HTTP|по HTTP|HTTP[ -]?клиент|HTTP clients' <<< "$text"; then
+            LOG_CONFLICT_KIND="http"
+            return 0
+        fi
+        if grep -qiE 'исключительн[а-я]* блокировк|активн[а-я]* сеанс|exclusive lock|active sessions' <<< "$text"; then
+            LOG_CONFLICT_KIND="lock"
             return 0
         fi
     done
@@ -1214,6 +1230,24 @@ run_python() {
     fi
 }
 
+# Мягкий запуск Python для необязательных проверок: нет интерпретатора → код 4 и
+# строка-причина в stdout. Отдельный код нужен потому, что код 1 у линтера
+# означает «есть [ERROR]-находки» — вернуть из $(…) 1 значило бы остановить
+# загрузку из-за отсутствия Python.
+LINT_NO_PYTHON_CODE=4
+run_python_soft() {
+    if command -v python >/dev/null 2>&1; then
+        python "$@"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 "$@"
+    elif command -v py >/dev/null 2>&1; then
+        py -3 "$@"
+    else
+        printf '%s\n' "нет интерпретатора Python (python/python3/py -3)"
+        return $LINT_NO_PYTHON_CODE
+    fi
+}
+
 # ── Журнал загрузок: .tmp/load-history.jsonl (append-only, JSONL) ───────────
 # Одна строка = одна попытка: движок/флаги/argv, время старта/конца и
 # длительность, exit-код, поколение конфигурации до/после, что грузилось,
@@ -1365,6 +1399,7 @@ cleanup_temp_files() {
             "$d"/temp_rewritten_form_modules.txt \
             "$d"/temp_cache_update_list.txt "$d"/temp_cache_update_list.txt.* \
             "$d"/temp_full_resync_cache_seed.txt "$d"/temp_full_resync_cache_seed.txt.* \
+            "$d"/.tmp/"$LINT_OUTPUT_FILE" \
             2>/dev/null || true
     done
 }
@@ -1565,6 +1600,7 @@ restore_missing_worktree_from_index() {
 }
 
 HIDDEN_LOAD_FILES=()
+_load_hide_applied="false"   # хайдинг уже сделан (раньше импорта — ради preflight-линта)
 
 restore_load_hide_files() {
     local f
@@ -2280,6 +2316,7 @@ CONFIG_PATH="${CONFIG_PATH:-conf}"
 EXTENSIONS_PATH="${EXTENSIONS_PATH:-cfe.xml}"
 GIT_PATH="${GIT_PATH:-.}"
 OUTPUT_FILE="changed_files.txt"  # Фиксированное имя файла
+LINT_OUTPUT_FILE="xml_lint_files.txt"  # Список целей preflight-линта (--list-file), в .tmp/
 IB_CONNECTION="${IB_CONNECTION:-"/F\"C:/base/proj\""}"
 DESIGNER_PATH="${DESIGNER_PATH:-$(resolve_designer_default)}"
 AUTO_CLOSE_DESIGNER="${AUTO_CLOSE_DESIGNER:-false}"  # Автоматически закрывать конфигуратор
@@ -2288,7 +2325,10 @@ UPDATE_DB="${UPDATE_DB:-false}"
 # Авто-retry UpdateDB при конфликте сеансов (HTTP-клиенты / исключительная блокировка).
 # true по умолчанию, НО на базе автономного сервера (IBSRV_PID_FILE) — false:
 # -SessionTerminate force роняет ibsrv.exe в mdmp (04.11.2026).
-if [[ -z "${UPDATE_DB_FORCE_SESSIONS+set}" && -n "${IBSRV_PID_FILE:-}" ]]; then
+# «Не задано» проверяем через `-z "${VAR:-}"`: `${VAR+set}` считает явным значением
+# и ПУСТУЮ строку (`UPDATE_DB_FORCE_SESSIONS=` из .env) → на ibsrv это давало
+# ровно тот force, из-за которого падает mdmp.
+if [[ -z "${UPDATE_DB_FORCE_SESSIONS:-}" && -n "${IBSRV_PID_FILE:-}" ]]; then
     UPDATE_DB_FORCE_SESSIONS="false"
 fi
 UPDATE_DB_FORCE_SESSIONS="${UPDATE_DB_FORCE_SESSIONS:-true}"
@@ -2489,9 +2529,11 @@ while [[ $# -gt 0 ]]; do
             echo "      --ibcmd                 Сокращение для --engine ibcmd"
             echo "      --ibcmd-path PATH       Путь к ibcmd.exe (по умолчанию рядом с DESIGNER_PATH)"
             echo "      --ibcmd-no-check        ibcmd: --no-check у import files (быстро, без проверки метаданных)"
-            echo "      --force-sessions        При ошибке UpdateDB из-за HTTP-клиентов повторить с -Dynamic- -SessionTerminate force"
+            echo "      --force-sessions        При ошибке UpdateDB из-за конфликта сеансов (HTTP-клиенты второй публикации /"
+            echo "                              исключительная блокировка, активные сеансы) повторить с -Dynamic- -SessionTerminate force"
             echo "      --no-force-sessions     Запретить принудительное завершение сеансов (переопределяет UPDATE_DB_FORCE_SESSIONS)"
-            echo "      --no-xml-lint           Не проверять XML метаданных перед импортом (preflight линтера)"
+            echo "      --no-xml-lint           Не проверять XML метаданных перед импортом (preflight линтера по XML дельты"
+            echo "                              conf/ и каталогам изменённых расширений)"
             echo "      --drop-designer-sessions  Снять висячие сеансы «Конфигуратор» в ИБ (ibcmd session terminate;"
             echo "                              узел не перезапускается). Иначе при таком сеансе — отказ с подсказкой"
             echo "      --verbose               Подробный вывод (по умолчанию краткий; -H/-C — подробный)"
@@ -2508,9 +2550,11 @@ while [[ $# -gt 0 ]]; do
             echo "  PARENT_CONFIG_PY          Путь к parent_config.py для preflight (default: scripts/ потребителя, иначе kit)"
             echo "  UPDATE_DB                 Обновить конфигурацию базы данных после загрузки"
             echo "  UPDATE_DB_FORCE_SESSIONS  true (default; false при IBSRV_PID_FILE) — авто-retry UpdateDB с -Dynamic- -SessionTerminate force"
-            echo "                            при активных сеансах / исключительной блокировке ИБ; false — не завершать сеансы"
-            echo "  XML_LINT                  true (default) — preflight см. tools/metadata-xml-lint/check.py по загружаемым XML"
-            echo "  METADATA_LINT_PY          Путь к check.py линтера метаданных"
+            echo "                            при активных сеансах / исключительной блокировке ИБ; false — не завершать сеансы."
+            echo "                            Пустое значение = не задано (на ibsrv всё равно false)"
+            echo "  XML_LINT                  true (default) — preflight линтера XML: дельта conf/ + каталоги изменённых расширений,"
+            echo "                            список — файлом (--list-file); стоп только на коде 1, коды 2/3/4 — WARN"
+            echo "  METADATA_LINT_PY          Путь к check.py линтера (по умолчанию <корень>/tools/metadata-xml-lint/check.py)"
             echo "  REOPEN_DESIGNER_AFTER_LOAD Открывать конфигуратор после загрузки"
             echo "  APACHE_SERVICE_NAME       Имя службы Apache для остановки/запуска при UPDATE_DB"
             echo "                            (пусто = не управлять; пример: Apache2.4)"
@@ -3033,29 +3077,86 @@ fi
 # TemplateType не по содержимому) роняет LoadConfigFromFiles/ibcmd import нативно
 # (mdmp) без внятного сообщения — дешевле стоп до импорта, чем 25 минут виса.
 # Линтер живёт в репозитории потребителя: нет его — пропускаем с WARN.
-if [[ "$XML_LINT" == "true" && "$has_conf_changes" == "true" && "$nothing_to_load" != "true" ]]; then
+#
+# Контракт кодов возврата линтера (tools/metadata-xml-lint/README.md § «Контракт
+# кодов выхода»): 0 — находок нет; 1 — есть [ERROR] — единственный повод стоп;
+# 2 — ошибка использования; 3 — линтер не смог проверить (среда) → WARN и
+# загрузка продолжается. Код 4 — локальный: нет интерпретатора Python
+# (run_python_soft), тоже WARN (иначе отсутствие python выглядело бы находками).
+#
+# Цели передаются ФАЙЛОМ (`--list-file`), а не argv: на большой дельте argv даёт
+# E2BIG (400 путей × ~75 симв. → «Argument list too long», rc=126) — защита молча
+# исчезала ровно на больших merge/changeset. Пути в списке — от корня репозитория.
+#
+# ⚠ НЕ добавляйте `set -e` в этот скрипт: `lint_rc=$?` после `lint_out=$(…)`
+#   с ненулевым кодом линтера убьёт скрипт ДО разбора кода возврата, и «стоп
+#   только по 1» превратится в «стоп по любому коду». `set -u` безопасен.
+if [[ "$XML_LINT" == "true" && "$nothing_to_load" != "true" \
+      && ( "$has_conf_changes" == "true" || "$has_extension_changes" == "true" ) ]]; then
     lint_py="${METADATA_LINT_PY:-$repo_path/tools/metadata-xml-lint/check.py}"
     if [[ ! -f "$lint_py" ]]; then
         log "WARN" "Preflight XML-метаданных пропущен: нет линтера $lint_py (ключ --no-xml-lint, XML_LINT=false)"
         timing_mark "preflight XML-метаданных (пропущен)"
     else
-        lint_targets=()
-        if [[ "$FULL_RESYNC" == "true" ]]; then
-            lint_targets=("$CONFIG_PATH_ABS")
-        else
-            while IFS= read -r rel; do
-                [[ -n "$rel" ]] || continue
-                case "$rel" in
-                    *.xml) lint_targets+=("$CONFIG_PATH_ABS/$rel") ;;
-                esac
-            done < temp_changed_files.txt
+        # LOAD_HIDE_FILES: спрятанный файл не должен проверяться — иначе
+        # документированный обход «спрятать битую типовую форму» перестаёт работать,
+        # а сообщение врёт про формат XML. В partial хватает вычитания отсутствующих
+        # файлов из списка; в -F линтуется каталог целиком, поэтому прячем ДО линта
+        # (восстановление — в restore_load_hide_files после импорта и на EXIT-trap).
+        if [[ "$has_conf_changes" == "true" && -n "${LOAD_HIDE_FILES:-}" && "$_load_hide_applied" != "true" ]]; then
+            apply_load_hide_files
+            _load_hide_applied="true"
         fi
-        if [[ ${#lint_targets[@]} -eq 0 ]]; then
-            timing_mark "preflight XML-метаданных (нет XML в списке)"
+
+        mkdir -p "$repo_path/.tmp"
+        _LINT_LIST_FILE="$repo_path/.tmp/$LINT_OUTPUT_FILE"
+        : > "$_LINT_LIST_FILE"
+        lint_skipped=0
+        if [[ "$has_conf_changes" == "true" ]]; then
+            if [[ "$FULL_RESYNC" == "true" ]]; then
+                printf '%s\n' "$CONFIG_GIT_PREFIX" >> "$_LINT_LIST_FILE"
+                log "WARN" "Preflight XML-метаданных на -F проверяет ВЕСЬ $CONFIG_PATH/ (десятки тысяч XML;"
+                log "WARN" "замер 12.11.2026 — 4 м 04 с на 47277 файлов): несколько минут тишины — это норма."
+            else
+                while IFS= read -r rel; do
+                    [[ -n "$rel" ]] || continue
+                    case "$rel" in
+                        *.xml) ;;
+                        *) continue ;;
+                    esac
+                    if [[ ! -f "$CONFIG_PATH_ABS/$rel" ]]; then
+                        # спрятано LOAD_HIDE_FILES или уже исчезло из ворктри
+                        lint_skipped=$((lint_skipped + 1))
+                        continue
+                    fi
+                    printf '%s\n' "${CONFIG_GIT_PREFIX:+$CONFIG_GIT_PREFIX/}$rel" >> "$_LINT_LIST_FILE"
+                done < temp_changed_files.txt
+            fi
+        fi
+        if [[ "$has_extension_changes" == "true" ]]; then
+            ext_lint_dirs=0
+            while IFS= read -r ext_name; do
+                [[ -n "$ext_name" ]] || continue
+                [[ -d "$EXTENSIONS_PATH_ABS/$ext_name" ]] || continue
+                printf '%s\n' "${EXTENSIONS_GIT_PREFIX:+$EXTENSIONS_GIT_PREFIX/}$ext_name" >> "$_LINT_LIST_FILE"
+                ext_lint_dirs=$((ext_lint_dirs + 1))
+            done < temp_changed_extensions.txt
+            log "INFO" "Preflight XML-метаданных: каталоги изменённых расширений — $ext_lint_dirs"
+        fi
+        if [[ $lint_skipped -gt 0 ]]; then
+            log "INFO" "Preflight XML-метаданных: пропущено отсутствующих/спрятанных (LOAD_HIDE_FILES): $lint_skipped"
+        fi
+
+        lint_goals=$(grep -c . "$_LINT_LIST_FILE" 2>/dev/null)
+        lint_goals="${lint_goals:-0}"
+        if [[ "$lint_goals" -eq 0 ]]; then
+            rm -f "$_LINT_LIST_FILE"
+            timing_mark "preflight XML-метаданных (нет целей)"
         else
-            log "INFO" "Preflight XML-метаданных: ${#lint_targets[@]} файл(ов)"
-            lint_out=$(run_python "$lint_py" -q "${lint_targets[@]}" 2>&1)
+            log "INFO" "Preflight XML-метаданных: $lint_goals цел(ей), список — файлом (--list-file)"
+            lint_out=$(run_python_soft "$lint_py" -q --list-file "$_LINT_LIST_FILE" 2>&1)
             lint_rc=$?
+            rm -f "$_LINT_LIST_FILE"
             if [[ $lint_rc -eq 1 ]]; then
                 while IFS= read -r lint_line; do
                     [[ -n "$lint_line" ]] && log "ERROR" "lint: $lint_line"
@@ -3065,8 +3166,18 @@ if [[ "$XML_LINT" == "true" && "$has_conf_changes" == "true" && "$nothing_to_loa
                 LOAD_HISTORY_REASON="preflight XML-метаданных: ошибки линтера"
                 rm -f temp_changed_files.txt temp_changed_extensions.txt
                 exit 26
-            elif [[ $lint_rc -ne 0 ]]; then
-                log "WARN" "Preflight XML-метаданных завершился с кодом $lint_rc — продолжаем загрузку"
+            elif [[ $lint_rc -eq 0 ]]; then
+                : # находок нет (WARN-ы линтера в -q не печатаются)
+            else
+                # 2 — ошибка использования, 3 — среда, 4 — нет Python: это НЕ находки,
+                # отказывать потребителю по ним нельзя — только «проверка не выполнена».
+                lint_reason=$(printf '%s\n' "$lint_out" | grep -v '^[[:space:]]*$' | head -1)
+                if [[ $lint_rc -eq $LINT_NO_PYTHON_CODE ]]; then
+                    log "WARN" "Preflight XML-метаданных НЕ выполнен (код $lint_rc): ${lint_reason:-нет интерпретатора Python}"
+                else
+                    log "WARN" "Preflight XML-метаданных НЕ выполнен (код $lint_rc): ${lint_reason:-причина не сообщена}"
+                fi
+                log "WARN" "Загрузка продолжается без проверки XML. Линтер: $lint_py"
                 while IFS= read -r lint_line; do
                     [[ -n "$lint_line" ]] && log "WARN" "lint: $lint_line"
                 done <<< "$lint_out"
@@ -3090,7 +3201,7 @@ fi
 if [[ "$nothing_to_load" != "true" ]]; then
 # Выполняем загрузку измененных файлов основной конфигурации (partial + listFile)
 if [[ "$has_conf_changes" == "true" ]]; then
-    apply_load_hide_files
+    [[ "$_load_hide_applied" == "true" ]] || apply_load_hide_files   # прятали уже до preflight-линта
     if [[ "$FULL_RESYNC" != "true" ]]; then
         if conf_changeset_mode; then
             log "INFO" "В списке Configuration.xml → changeset-режим (без -partial/--partial):"
@@ -3287,8 +3398,19 @@ if [[ "$UPDATE_DB" == "true" ]]; then
             update_db_exit_code=$?
         fi
         if [[ $update_db_exit_code -ne 0 ]] && log_has_http_clients "$LOAD_LOG_FILE"; then
+            # Два разных повода, общей у них только реакция (force-retry):
+            # HTTP-клиенты (вторая публикация) и активные сеансы/исключительная блокировка.
+            UPDATE_DB_CONFLICT_KIND="${LOG_CONFLICT_KIND:-unknown}"
+            if [[ "$UPDATE_DB_CONFLICT_KIND" == "http" ]]; then
+                log "WARN" "UpdateDB: обнаружены клиенты, работающие по HTTP — ИБ публикует ещё одна служба Apache."
+                log "WARN" "Сеансы держит вторая публикация (своя служба ${APACHE_SERVICE_NAME:-Apache} движком уже остановлена)."
+            else
+                log "WARN" "UpdateDB: база удерживается активными сеансами / исключительной блокировкой"
+                log "WARN" "(в логе — «Ошибка исключительной блокировки информационной базы … Активные сеансы»)."
+                log "WARN" "Это не только HTTP: держать базу может конфигуратор, ibcmd или длинная транзакция;"
+                log "WARN" "завершение сеансов такую блокировку снимает не всегда."
+            fi
             if [[ "$UPDATE_DB_FORCE_SESSIONS" == "true" ]]; then
-                log "WARN" "UpdateDB: обнаружены HTTP-клиенты (ИБ публикует другая служба Apache)."
                 log "WARN" "Повторяю обновление с ПРИНУДИТЕЛЬНЫМ завершением сеансов: -Dynamic- -SessionTerminate force."
                 log "WARN" "ВНИМАНИЕ: активные сеансы пользователей будут прерваны."
                 if [[ "$LOAD_ENGINE" == "ibcmd" ]]; then
@@ -3304,7 +3426,7 @@ if [[ "$UPDATE_DB" == "true" ]]; then
                 fi
                 [[ $update_db_exit_code -eq 0 ]] && log "SUCCESS" "UpdateDB с принудительным завершением сеансов прошёл"
             else
-                log "WARN" "UpdateDB упёрся в HTTP-клиенты, но UPDATE_DB_FORCE_SESSIONS=false."
+                log "WARN" "UpdateDB упёрся в конфликт сеансов (${UPDATE_DB_CONFLICT_KIND}), но UPDATE_DB_FORCE_SESSIONS=false."
                 log "WARN" "Принудительное завершение сеансов выключено. Запустите с --force-sessions"
                 log "WARN" "(или UPDATE_DB_FORCE_SESSIONS=true), чтобы повторить как -Dynamic- -SessionTerminate force."
             fi
@@ -3312,7 +3434,15 @@ if [[ "$UPDATE_DB" == "true" ]]; then
         if [[ $update_db_exit_code -ne 0 ]]; then
             log "ERROR" "Обновление основной конфигурации базы данных завершилось с ошибкой (код: $update_db_exit_code)"
             dump_load_log "$LOAD_LOG_FILE"
-            LOAD_HISTORY_REASON="UpdateDB основной конфигурации: exit $update_db_exit_code"
+            _conflict_note=""
+            case "${UPDATE_DB_CONFLICT_KIND:-}" in
+                http) _conflict_note=" (конфликт сеансов: HTTP-клиенты второй публикации)" ;;
+                lock) _conflict_note=" (конфликт сеансов: активные сеансы/исключительная блокировка)" ;;
+            esac
+            if [[ -n "$_conflict_note" && "$UPDATE_DB_FORCE_SESSIONS" == "true" ]]; then
+                _conflict_note="$_conflict_note, force-терминация не помогла"
+            fi
+            LOAD_HISTORY_REASON="UpdateDB основной конфигурации: exit $update_db_exit_code$_conflict_note"
             rm -f temp_changed_files.txt temp_changed_extensions.txt
             exit $update_db_exit_code
         fi
