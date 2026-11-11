@@ -84,7 +84,8 @@ def main() -> int:
                 findings.append(("FAIL", f"stacks/{s}/stack.json: "
                                          f"layout_version {v} > поддерживаемого "
                                          f"{kl.SUPPORTED_LAYOUT_VERSION}"))
-        if claimed.get(s, 0) == 0:
+        if (claimed.get(s, 0) == 0
+                and not kl.stack_has_content(kit_root, s)):
             findings.append(("WARN", f'stack "{s}": no publishable resources'))
         unhandled = [d for d in (meta.get("deps") or [])
                      if d.replace("-", "_") not in dep_ids]

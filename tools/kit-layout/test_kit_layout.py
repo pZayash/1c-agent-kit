@@ -669,6 +669,18 @@ class ConventionSynthTest(unittest.TestCase):
         self.assertIn('no publishable resources', out)
         self.assertIn('"qq"', out)
 
+    def test_no_warn_for_docs_only_stack(self):
+        # docs/ai synthesizes no resources but is a canonical layer —
+        # a docs-only stack is legitimate and must not WARN.
+        self.add_stack('dz')
+        d = self.tmp / 'harness' / 'stacks' / 'dz' / 'docs' / 'ai'
+        d.mkdir(parents=True)
+        (d / 'topic-dz.md').write_text('# doc\n', encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['dz']})
+        rc, out, _ = self.call(*self.args('plan'))
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('no publishable resources', out)
+
     def test_child_path_collision_returns_2(self):
         self.add_stack('zz', 'cursor/skills')
         self.add_skill('zz', 'bsl-check')  # same name as 1c's
