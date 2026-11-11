@@ -1,4 +1,4 @@
-# LDD — binding для Node (JS/TS)
+# LDD — binding Node (JS/TS)
 
 Стеко-нейтральный контракт: [core/docs/ai/ldd.md](../../../../core/docs/ai/ldd.md).
 Здесь — только привязка к Node: чем писать, куда мапить события и уровни.
@@ -21,13 +21,13 @@
 | INFO | `log.info` |
 | DEBUG | `log.debug` / `log.trace` — выключены по умолчанию (`level: 'info'`) |
 
-## Correlation
+## Correlation id
 
 Request id — через `AsyncLocalStorage`; middleware хранит id на запрос,
 child-logger (`log.child({ requestId })`) или hook подставляет в каждую
 запись.
 
-## Triage
+## Triage gate
 
 | Задача | Инструмент |
 | --- | --- |
