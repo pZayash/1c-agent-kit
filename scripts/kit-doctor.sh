@@ -119,6 +119,7 @@ if [[ -e "$HARNESS_ROOT" ]]; then
   else
     bad "verify-kit-links:"
     sed 's/^/       /' "$vlog"
+    echo "       -> исправить: bash $HARNESS_REL/scripts/bootstrap-kit.sh ."
   fi
   rm -f "$vlog"
 
