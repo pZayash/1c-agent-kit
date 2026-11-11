@@ -16,6 +16,27 @@ Resource fields:
   stacks          list of stack ids; resource is effective only when the
                   consumer selected one of them in .kit.json (absent = core)
 
+Convention synthesis (kit-stacks-hardening): every stacks/<s>/stack.json
+yields auto:<res> resources for canonical dirs —
+  cursor/skills -> .cursor/skills (child-dirs), cursor/rules ->
+  .cursor/rules (child-files), cursor/commands -> .cursor/commands
+  (child-files), tools -> tools (child-dirs); each carries stacks:[<s>]
+  and the same local_manifest contract (.kit/local-overlay.txt for
+  overlay-*, .kit/local-tools.txt for kit-tools-<s>). Synthesis key:
+  dir on disk (untracked counts) or in git HEAD (a missing checkout dir
+  keeps the resource -> missing_source FAIL, sparse protection); absent
+  in both -> skipped silently, a stack need not ship all four dirs.
+  Synthesized resources sit between stack-explicit and alias resources
+  (canonical order core -> stacks -> aliases); an explicit resource with
+  identical kind+source+target is a hard duplicate ERROR.
+Service names (.* and __pycache__) are never published, explicit or
+synthesized.
+layout_version (optional, default 1, int >= 1) in .kit.json, core.json,
+stack.json — engine<->kit mechanism compatibility; a value above
+SUPPORTED_LAYOUT_VERSION is an ERROR naming the kit sha. Three version
+axes: .kit.json "version" = consumer file schema, layout_version =
+engine mechanism, layout.json "version" = resource manifest schema.
+
 Consumer config .kit.json (repo root):
   {"version": 1, "stacks": ["1c"], "source_root": "conf/",
    "paths": {...}, "sparse": false}
@@ -105,6 +126,19 @@ DEFAULT_SOURCE_ROOT = 'conf/'
 GITIGNORE_BEGIN = '# >>> kit-managed: begin (bootstrap-kit) >>>'
 GITIGNORE_END = '# <<< kit-managed: end <<<'
 _FILE_SYMLINK_OK = None  # cached result of file_symlink_available()
+SUPPORTED_LAYOUT_VERSION = 1
+# Canonical stack dirs -> convention-synthesized resources:
+# (id_prefix, source_rel, kind, target, local_manifest).
+CANON_STACK_RESOURCES = (
+    ('overlay-skills', 'cursor/skills', 'child-dirs',
+     '.cursor/skills', KIT_STATE_DIR + '/local-overlay.txt'),
+    ('overlay-rules', 'cursor/rules', 'child-files',
+     '.cursor/rules', KIT_STATE_DIR + '/local-overlay.txt'),
+    ('overlay-commands', 'cursor/commands', 'child-files',
+     '.cursor/commands', KIT_STATE_DIR + '/local-overlay.txt'),
+    ('kit-tools', 'tools', 'child-dirs',
+     'tools', KIT_STATE_DIR + '/local-tools.txt'),
+)
 
 
 def is_wsl():
@@ -255,6 +289,11 @@ def rel_posix(path, root):
         return os.path.relpath(str(path), str(root)).replace(os.sep, '/')
     except ValueError:
         return str(path).replace(os.sep, '/')
+
+
+def service_name(name):
+    """.* and __pycache__ children are never published (all resources)."""
+    return name.startswith('.') or name == '__pycache__'
 
 
 def is_within(path, root):
@@ -422,7 +461,7 @@ class Ctx:
 # ── consumer config (.kit.json) ───────────────────────────────────
 
 KNOWN_KIT_KEYS = {'version', 'stacks', 'source_root', 'paths', 'sparse',
-                  'options'}
+                  'options', 'layout_version'}
 
 
 def load_kit_config(root):
@@ -497,6 +536,12 @@ def _kit_cfg_types_ok(raw, errors):
     if 'source_root' in raw and type(raw['source_root']) is not str:
         errors.append('.kit.json "source_root" must be a string')
         return False
+    if 'layout_version' in raw and (
+            type(raw['layout_version']) is not int
+            or raw['layout_version'] < 1):
+        errors.append('.kit.json "layout_version" must be int >= 1 '
+                      '(bool is not int)')
+        return False
     return True
 
 
@@ -524,6 +569,176 @@ def stack_known(ctx, name, registry):
     rc, _, _ = git_run(ctx.resolve('harness'), 'cat-file', '-e',
                        f'HEAD:stacks/{name}/stack.json')
     return rc == 0
+
+
+# ── convention synthesis (stack resources) ────────────────────────
+
+def discover_stacks(harness_abs):
+    """Stack ids with stacks/<s>/stack.json on disk or in HEAD (sparse
+    checkouts may hide a whole stack dir; its stack.json lives in HEAD)."""
+    harness_abs = Path(harness_abs)
+    ids = {p.parent.name for p in harness_abs.glob('stacks/*/stack.json')}
+    if (harness_abs / '.git').exists():
+        rc, out, _ = git_run(harness_abs, 'ls-tree', '-d', '--name-only',
+                             'HEAD', 'stacks/')
+        if rc == 0:
+            for line in out.splitlines():
+                name = line.strip().rstrip('/')
+                if not name.startswith('stacks/'):
+                    continue
+                name = name[len('stacks/'):]
+                if '/' in name or name in ids:
+                    continue
+                rc2, _, _ = git_run(harness_abs, 'cat-file', '-e',
+                                    f'HEAD:stacks/{name}/stack.json')
+                if rc2 == 0:
+                    ids.add(name)
+    return sorted(ids)
+
+
+def head_stack_dirs(harness_abs):
+    """Every dir under stacks/ present in HEAD, one ls-tree batch
+    (git ls-tree -r -d HEAD stacks/). None when the kit is not a git
+    checkout - synthesis then falls back to disk-only semantics
+    (on-disk dir = untracked = synthesize)."""
+    harness_abs = Path(harness_abs)
+    if not (harness_abs / '.git').exists():
+        return None
+    rc, out, _ = git_run(harness_abs, 'ls-tree', '-r', '-d',
+                         '--name-only', 'HEAD', 'stacks/')
+    if rc != 0:
+        return None
+    return {x.strip() for x in out.splitlines() if x.strip()}
+
+
+def synthesized_stack_resources(harness_abs):
+    """Convention resources for every stack with stacks/<s>/stack.json
+    (all stacks, not only effective - scan_namespace/find_orphans and
+    --all-stacks depend on the full list).
+
+    A canonical dir synthesizes when it is on disk (untracked counts) or
+    present in HEAD - a dir that is in HEAD but hidden by sparse-checkout
+    keeps its resource, so the usual missing_source FAIL + abort-sweep
+    protection still applies. Absent in both -> skipped silently: a stack
+    need not ship all four canonical dirs."""
+    harness_abs = Path(harness_abs)
+    head_dirs = head_stack_dirs(harness_abs)
+    out = []
+    for s in discover_stacks(harness_abs):
+        for prefix, rel, kind, target, manifest in CANON_STACK_RESOURCES:
+            p = f'stacks/{s}/{rel}'
+            if not (harness_abs / p).is_dir() and not (
+                    head_dirs is not None and p in head_dirs):
+                continue
+            out.append({
+                'id': f'{prefix}-{s}',
+                'kind': kind,
+                'source': f'harness/{p}',
+                'target': target,
+                'local_manifest': manifest,
+                'stacks': [s],
+                'synthesized': True,
+            })
+    return out
+
+
+def resource_name(res):
+    """Display id; synthesized resources carry the auto: prefix."""
+    return ('auto:' if res.get('synthesized') else '') + res.get('id', '?')
+
+
+def all_layout_resources(layout, harness_abs):
+    """Explicit layout resources + synthesized stack resources inserted
+    before the first alias (canonical order core -> stacks -> aliases).
+    Returns (resources, errors): an explicit resource with the same
+    kind+source+target as a synthesized one is a hard duplicate ERROR."""
+    resources = list(layout['resources'])
+    sig = {(r['kind'], r['source'], r['target']): r.get('id')
+           for r in resources}
+    synth = synthesized_stack_resources(harness_abs)
+    errors = []
+    for r in synth:
+        key = (r['kind'], r['source'], r['target'])
+        if key in sig:
+            errors.append(f'duplicate (explicit vs synthesized): '
+                          f'"{sig[key]}" vs auto:{r["id"]}')
+    idx = next((i for i, r in enumerate(resources)
+                if r['kind'] == 'alias'), len(resources))
+    resources[idx:idx] = synth
+    return resources, errors
+
+
+def load_deps_registry(harness_abs):
+    """{'core': [...], 'stacks': {s: [...]}} read from core/core.json
+    (legacy core/deps.json fallback) and stacks/*/stack.json on disk."""
+    harness_abs = Path(harness_abs)
+    deps = {'core': [], 'stacks': {}}
+    for name in ('core/core.json', 'core/deps.json'):
+        p = harness_abs / name
+        if p.is_file():
+            try:
+                raw = json.loads(p.read_text(encoding='utf-8'))
+                deps['core'] = list(raw.get('deps') or [])
+            except (OSError, ValueError):
+                pass
+            break
+    for sj in sorted(harness_abs.glob('stacks/*/stack.json')):
+        try:
+            raw = json.loads(sj.read_text(encoding='utf-8'))
+            deps['stacks'][sj.parent.name] = list(raw.get('deps') or [])
+        except (OSError, ValueError):
+            deps['stacks'][sj.parent.name] = []
+    return deps
+
+
+def kit_sha(ctx):
+    rc, out, _ = git_run(ctx.resolve('harness'), 'rev-parse',
+                         '--short', 'HEAD')
+    return out.strip() if rc == 0 and out.strip() else 'unknown'
+
+
+def _layout_version_check(raw, where, ctx, errors):
+    if not isinstance(raw, dict) or 'layout_version' not in raw:
+        return
+    v = raw['layout_version']
+    if type(v) is not int or v < 1:
+        errors.append(f'{where}: "layout_version" must be int >= 1, '
+                      f'got {v!r}')
+        return
+    if v > SUPPORTED_LAYOUT_VERSION:
+        errors.append(f'{where}: layout_version {v} > поддерживаемого '
+                      f'{SUPPORTED_LAYOUT_VERSION} (kit {kit_sha(ctx)})')
+
+
+def validate_layout_versions(ctx, cfg, stack_ids):
+    """layout_version in .kit.json (raw), core/core.json (deps.json
+    fallback) and stack.json of effective stacks; kit-lint re-checks
+    stack.json for ALL stacks."""
+    errors = []
+    if cfg['raw'] is not None:
+        _layout_version_check(cfg['raw'], '.kit.json', ctx, errors)
+    harness = ctx.resolve('harness')
+    for name in ('core/core.json', 'core/deps.json'):
+        p = harness / name
+        if p.is_file():
+            try:
+                _layout_version_check(
+                    json.loads(p.read_text(encoding='utf-8')),
+                    name, ctx, errors)
+            except (OSError, ValueError):
+                pass
+            break
+    ids = known_stack_ids(ctx) if '*' in stack_ids else stack_ids
+    for s in sorted(ids):
+        p = harness / 'stacks' / s / 'stack.json'
+        if p.is_file():
+            try:
+                _layout_version_check(
+                    json.loads(p.read_text(encoding='utf-8')),
+                    f'stacks/{s}/stack.json', ctx, errors)
+            except (OSError, ValueError):
+                pass
+    return errors
 
 
 def validate_kit_config(ctx, cfg):
@@ -559,12 +774,12 @@ def validate_kit_config(ctx, cfg):
     return errors
 
 
-def validate_layout_stacks(ctx, layout):
+def validate_layout_stacks(ctx, resources):
     """Kit-side: resource "stacks" values must exist in the stack registry
     (an unknown id = dead resource that never lays out)."""
     registry = known_stack_ids(ctx)
     return [f'layout.json resource "{res.get("id")}": unknown stack "{s}"'
-            for res in layout['resources']
+            for res in resources
             for s in res.get('stacks') or [] if s != '*'
             and not stack_known(ctx, s, registry)]
 
@@ -596,7 +811,7 @@ def env_source_root(root):
     return None
 
 
-def print_config(ctx, cfg, as_json):
+def print_config(ctx, cfg, as_json, resources=None):
     """Resolved view of the consumer config - the ONLY .kit.json parser
     scripts (bootstrap/doctor/init-deps/link-*) are allowed to call."""
     if cfg['source_root'] is not None:
@@ -618,6 +833,9 @@ def print_config(ctx, cfg, as_json):
         'paths': cfg['paths'],
         'harness_rel': ctx.harness_rel,
         'manifests': {'fallback': ctx.manifest_rel, 'lock': LOCK_REL},
+        'resources': [resource_name(r) for r in
+                      effective_resources(resources or [], cfg['stacks'])],
+        'deps': load_deps_registry(ctx.resolve('harness')),
         'warnings': cfg['warn'],
     }
     if as_json:
@@ -741,6 +959,8 @@ def run_child(ctx, res):
     include = set(res.get('include') or [])
     want_dir = res['kind'] == 'child-dirs'
     for child in sorted(source.iterdir()):
+        if service_name(child.name):
+            continue
         if child.is_dir() != want_dir:
             continue
         if include and child.name not in include:
@@ -809,6 +1029,8 @@ def verify_resource(ctx, res):
     want_dir = res['kind'] == 'child-dirs'
     target = ctx.resolve(res['target'])
     for child in sorted(source.iterdir()):
+        if service_name(child.name):
+            continue
         if child.is_dir() != want_dir:
             continue
         if include and child.name not in include:
@@ -856,6 +1078,8 @@ def expected_names(ctx, resources):
         include = set(res.get('include') or [])
         want_dir = res['kind'] == 'child-dirs'
         for child in source.iterdir():
+            if service_name(child.name):
+                continue
             if child.is_dir() != want_dir:
                 continue
             if include and child.name not in include:
@@ -899,15 +1123,15 @@ def _link_points_into(ctx, entry):
     return 'foreign', raw
 
 
-def find_orphans(ctx, layout, eff_resources):
+def find_orphans(ctx, all_resources, eff_resources):
     """Read-only orphan scan over the managed targets of ALL layout
     resources. Returns (orphans, foreign) where orphans are (path, rel)
     kit links safe to remove and foreign are (rel, raw) kept unmanaged."""
     expected = expected_names(ctx, eff_resources)
-    locals_ = local_names_map(ctx, layout['resources'])
+    locals_ = local_names_map(ctx, all_resources)
     keep_alias = expected.get('\0alias', set())
     orphans, foreign = [], []
-    targets = sorted({res['target'] for res in layout['resources']
+    targets = sorted({res['target'] for res in all_resources
                       if res['kind'] != 'alias'})
     for t in targets:
         tdir = ctx.resolve(t)
@@ -923,7 +1147,7 @@ def find_orphans(ctx, layout, eff_resources):
                 orphans.append((entry, rel))
             elif kind == 'foreign':
                 foreign.append((rel, raw))
-    for res in layout['resources']:
+    for res in all_resources:
         if res['kind'] != 'alias' or res['target'] in keep_alias:
             continue
         target = ctx.resolve(res['target'])
@@ -938,10 +1162,10 @@ def find_orphans(ctx, layout, eff_resources):
     return orphans, foreign
 
 
-def sweep_orphans(ctx, layout, eff_resources):
+def sweep_orphans(ctx, all_resources, eff_resources):
     """Remove kit-owned links dropped from the effective set. Returns the
     number removed (would-be removed in dry-run)."""
-    orphans, foreign = find_orphans(ctx, layout, eff_resources)
+    orphans, foreign = find_orphans(ctx, all_resources, eff_resources)
     for path, rel in orphans:
         ctx.act(f'REMOVE orphan link: {rel}',
                 lambda p=path: remove_link_or_tree(p))
@@ -1027,6 +1251,8 @@ def iter_expected_links(ctx, resources):
         include = set(res.get('include') or [])
         want_dir = res['kind'] == 'child-dirs'
         for child in sorted(source.iterdir()):
+            if service_name(child.name):
+                continue
             if child.is_dir() != want_dir:
                 continue
             if include and child.name not in include:
@@ -1034,6 +1260,46 @@ def iter_expected_links(ctx, resources):
             if child.name in local:
                 continue
             yield target / child.name
+
+
+def check_target_collisions(ctx, eff):
+    """Pure pre-pass (before acquire_lock and any mutation in plan, apply,
+    verify, tracked): two different kit sources must not claim the same
+    consumer path. The map covers linkable children (after the
+    include-filter, minus service names; local_manifest does NOT exempt -
+    a consumer override cannot reconcile two kit sources) and alias
+    targets, prefix-aware (is_within). Two resources sharing a target dir
+    with disjoint child names is fine. Returns deterministic error
+    strings sorted by rel_posix."""
+    claims = []  # (rel_posix, display id)
+    for res in eff:
+        rid = resource_name(res)
+        if res['kind'] == 'alias':
+            claims.append((res['target'].rstrip('/'), rid))
+            continue
+        source = ctx.resolve(res['source'])
+        if not source.is_dir():
+            continue  # missing_source reports itself downstream
+        include = set(res.get('include') or [])
+        want_dir = res['kind'] == 'child-dirs'
+        base = res['target'].rstrip('/')
+        for child in source.iterdir():
+            if service_name(child.name):
+                continue
+            if child.is_dir() != want_dir:
+                continue
+            if include and child.name not in include:
+                continue
+            claims.append((f'{base}/{child.name}', rid))
+    hits = set()
+    for i, (a, ra) in enumerate(claims):
+        for b, rb in claims[i + 1:]:
+            if ra == rb:
+                continue
+            if a == b or a.startswith(b + '/') or b.startswith(a + '/'):
+                hits.add((*sorted((a, b)), *sorted((ra, rb))))
+    return [f'target collision: {a} vs {b} (resources "{ra}" and "{rb}")'
+            for a, b, ra, rb in sorted(hits)]
 
 
 def scan_namespace(ctx, resources):
@@ -1325,7 +1591,12 @@ def main(argv=None):
     # parser scripts may use for it.
     cfg = load_kit_config(ctx.root)
     errors = validate_kit_config(ctx, cfg)
-    errors += validate_layout_stacks(ctx, layout)
+    resources, res_errors = all_layout_resources(
+        layout, ctx.resolve('harness'))
+    errors += res_errors
+    errors += validate_layout_stacks(ctx, resources)
+    errors += validate_layout_versions(
+        ctx, cfg, cfg['stacks'] if not errors else [])
     for w in cfg['warn']:
         print(f'WARN {w}', file=sys.stderr)
     if errors:
@@ -1333,16 +1604,35 @@ def main(argv=None):
             print(f'ERROR {e}', file=sys.stderr)
         return 2
     if a.command == 'print-config':
-        print_config(ctx, cfg, a.json)
+        print_config(ctx, cfg, a.json, resources)
         return 0
-    eff = (layout['resources'] if a.all_stacks or '*' in cfg['stacks']
-           else effective_resources(layout['resources'], cfg['stacks']))
+    eff = (resources if a.all_stacks or '*' in cfg['stacks']
+           else effective_resources(resources, cfg['stacks']))
     if a.command == 'resolve-source':
         return resolve_source(ctx, eff, a.consumer_root)
 
+    # Target-collision pre-pass: pure, before acquire_lock/mutations.
+    if a.command in ('plan', 'apply', 'verify', 'tracked'):
+        col = check_target_collisions(ctx, eff)
+        if col:
+            for e in col:
+                print(f'ERROR {e}', file=sys.stderr)
+            return 2
+        # A stack in this command's scope without a single publishable
+        # resource is suspicious (forgot the canonical dirs?). WARN only.
+        if a.command in ('plan', 'apply'):
+            scope = (known_stack_ids(ctx)
+                     if a.all_stacks or '*' in cfg['stacks']
+                     else cfg['stacks'])
+            claimed = {s for r in resources for s in (r.get('stacks') or [])}
+            for s in sorted(scope):
+                if s != '*' and s not in claimed and '*' not in claimed:
+                    ctx.say('WARN', f'WARN stack "{s}": no publishable '
+                                    f'resources')
+
     # Namespace pre-scan: never start link work in a tree owned by another
     # OS/namespace (silent no-op + green verify is worse than a hard error).
-    scan_namespace(ctx, layout['resources'])
+    scan_namespace(ctx, resources)
     where = 'sandbox' if is_sandbox_namespace(ctx.root) else 'foreign'
     if ctx.foreign and a.command in ('plan', 'apply'):
         print(f'ERROR: kit-layout {where} namespace: {len(ctx.foreign)} kit link(s) '
@@ -1358,7 +1648,7 @@ def main(argv=None):
     if a.command == 'verify':
         for res in eff:
             failed |= not verify_resource(ctx, res)
-        orphans, for_orph = find_orphans(ctx, layout, eff)
+        orphans, for_orph = find_orphans(ctx, resources, eff)
         for _, rel in orphans:
             ctx.say('WARN', f'WARN orphan kit link (not in effective set): {rel}')
         for rel, raw in for_orph:
@@ -1394,6 +1684,8 @@ def main(argv=None):
             load_fallback_manifest(ctx)
             warn_gitignore_overlap(ctx)
             for res in eff:
+                if res.get('synthesized'):
+                    ctx.say('INFO', f'== auto:{res["id"]} ==')
                 runner = run_alias if res['kind'] == 'alias' else run_child
                 failed |= not runner(ctx, res)
             if ctx.missing_source:
@@ -1404,7 +1696,7 @@ def main(argv=None):
                                '(re-run bootstrap-kit to fix sparse-checkout)')
                 failed = True
             else:
-                sweep_orphans(ctx, layout, eff)
+                sweep_orphans(ctx, resources, eff)
                 sweep_fallback_orphans(ctx)
             upgrade_fallbacks(ctx)
             write_fallback_manifest(ctx)

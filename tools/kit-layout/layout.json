@@ -57,53 +57,6 @@
       ]
     },
     {
-      "id": "overlay-skills-1c",
-      "kind": "child-dirs",
-      "source": "harness/stacks/1c/cursor/skills",
-      "target": ".cursor/skills",
-      "local_manifest": ".kit/local-overlay.txt",
-      "stacks": [
-        "1c"
-      ]
-    },
-    {
-      "id": "overlay-rules-1c",
-      "kind": "child-files",
-      "source": "harness/stacks/1c/cursor/rules",
-      "target": ".cursor/rules",
-      "local_manifest": ".kit/local-overlay.txt",
-      "stacks": [
-        "1c"
-      ]
-    },
-    {
-      "id": "overlay-commands-1c",
-      "kind": "child-files",
-      "source": "harness/stacks/1c/cursor/commands",
-      "target": ".cursor/commands",
-      "local_manifest": ".kit/local-overlay.txt",
-      "stacks": [
-        "1c"
-      ]
-    },
-    {
-      "id": "kit-tools-1c",
-      "kind": "child-dirs",
-      "source": "harness/stacks/1c/tools",
-      "target": "tools",
-      "include": [
-        "bsl-check",
-        "load-changed-files",
-        "mcp-call",
-        "answer42",
-        "rights-xml-lint"
-      ],
-      "local_manifest": ".kit/local-tools.txt",
-      "stacks": [
-        "1c"
-      ]
-    },
-    {
       "id": "agents-skills",
       "kind": "alias",
       "source": ".cursor/skills",

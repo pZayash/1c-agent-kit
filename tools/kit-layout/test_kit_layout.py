@@ -265,12 +265,11 @@ STACKED_LAYOUT = {
         {'id': 'core-skills', 'kind': 'child-dirs',
          'source': 'harness/core/cursor/skills', 'target': '.cursor/skills',
          'local_manifest': '.kit/local-skills.txt'},
-        {'id': 'skills-1c', 'kind': 'child-dirs',
-         'source': 'harness/stacks/1c/cursor/skills',
-         'target': '.cursor/skills',
-         'local_manifest': '.kit/local-skills.txt', 'stacks': ['1c']},
     ],
 }
+# NOTE: harness/stacks/1c/cursor/skills is published by the
+# convention-synthesized auto:overlay-skills-1c resource
+# (.kit/local-overlay.txt manifest), not by an explicit entry.
 
 
 def build_stacked_consumer(root):
@@ -462,7 +461,7 @@ class OrphanSweepTest(unittest.TestCase):
 
     def test_local_manifest_name_survives_sweep(self):
         (self.tmp / '.kit').mkdir()
-        (self.tmp / '.kit' / 'local-skills.txt').write_text(
+        (self.tmp / '.kit' / 'local-overlay.txt').write_text(
             'my-skill\n', encoding='utf-8')
         write_kit_json(self.tmp, {'version': 1, 'stacks': []})
         mine = self.tmp / '.cursor' / 'skills' / 'my-skill'
@@ -567,6 +566,179 @@ class OrphanSweepTest(unittest.TestCase):
         self.assertIn('orphan kit link', out)
 
 
+class ConventionSynthTest(unittest.TestCase):
+    """kit-stacks-hardening: convention-synthesized stack resources,
+    target collisions, dedup and layout_version."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-synth-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build_stacked_consumer(self.tmp)
+        self.layout = STACKED_LAYOUT
+        (self.tmp / 'layout.json').write_text(
+            json.dumps(self.layout), encoding='utf-8')
+        self._env = mock.patch.dict(os.environ)
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        os.environ.pop('KIT_LEGACY', None)
+
+    def write_layout(self, resources):
+        self.layout = {'gitignore': False, 'resources': resources}
+        (self.tmp / 'layout.json').write_text(
+            json.dumps(self.layout), encoding='utf-8')
+
+    def add_stack(self, sid, *canon_dirs):
+        sroot = self.tmp / 'harness' / 'stacks' / sid
+        sroot.mkdir(parents=True, exist_ok=True)
+        (sroot / 'stack.json').write_text(f'{{"id": "{sid}"}}',
+                                         encoding='utf-8')
+        for rel in canon_dirs:
+            (sroot / rel).mkdir(parents=True)
+
+    def add_skill(self, sid, name):
+        d = self.tmp / 'harness' / 'stacks' / sid / 'cursor' / 'skills' / name
+        d.mkdir(parents=True)
+        (d / 'SKILL.md').write_text(f'{sid} {name}\n', encoding='utf-8')
+
+    def args(self, command, *extra):
+        return [command, str(self.tmp), '--layout',
+                str(self.tmp / 'layout.json'), '--no-gitignore',
+                '--no-untrack', *extra]
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = kl.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def linked(self, name, target='.cursor/skills'):
+        return kl.is_link(self.tmp / target / name)
+
+    def test_fake_stack_zz_synthesizes_without_layout_edit(self):
+        # New stack = stack.json + canonical dirs; zero layout.json edits.
+        self.add_stack('zz', 'cursor/skills', 'tools')
+        self.add_skill('zz', 'zz-skill')
+        (self.tmp / 'harness' / 'stacks' / 'zz' / 'tools' /
+         'zz-tool').mkdir(parents=True)
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['zz']})
+        rc, out, _ = self.call(*self.args('plan'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('auto:overlay-skills-zz', out)
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.linked('zz-skill'))
+        self.assertTrue(self.linked('zz-tool', 'tools'))
+
+    def test_synth_skip_local_via_local_overlay(self):
+        (self.tmp / '.kit').mkdir()
+        (self.tmp / '.kit' / 'local-overlay.txt').write_text(
+            'bsl-check\n', encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('SKIP LOCAL: bsl-check', out)
+        self.assertFalse(self.linked('bsl-check'))
+
+    def test_missing_source_when_in_head_not_on_disk(self):
+        harness = self.tmp / 'harness'
+        subprocess.run(['git', 'init', '-q'], cwd=harness, check=True)
+        subprocess.run(['git', 'add', 'stacks'], cwd=harness, check=True)
+        subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
+                        'commit', '-qm', 'x'], cwd=harness, check=True)
+        shutil.rmtree(harness / 'stacks' / '1c' / 'cursor' / 'skills')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, out, _ = self.call(*self.args('plan'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('missing kit source', out)
+        self.assertIn('aborting sweep', out)
+
+    def test_no_warn_for_partial_canonical_dirs(self):
+        # 1c ships only cursor/skills — no WARN about missing canon dirs.
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, out, _ = self.call(*self.args('plan'))
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('no publishable resources', out)
+        self.assertNotIn('cursor/rules', out)
+        self.assertNotIn('cursor/commands', out)
+
+    def test_warn_stack_without_resources(self):
+        self.add_stack('qq')  # stack.json only, no canonical dirs
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['qq']})
+        rc, out, _ = self.call(*self.args('plan'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('no publishable resources', out)
+        self.assertIn('"qq"', out)
+
+    def test_child_path_collision_returns_2(self):
+        self.add_stack('zz', 'cursor/skills')
+        self.add_skill('zz', 'bsl-check')  # same name as 1c's
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c', 'zz']})
+        rc, _, err = self.call(*self.args('plan'))
+        self.assertEqual(rc, 2, err)
+        self.assertIn('collision', err)
+        self.assertIn('.cursor/skills/bsl-check', err)
+        self.assertFalse((self.tmp / '.cursor' / 'skills').exists())
+
+    def test_alias_prefix_collision_returns_2(self):
+        self.write_layout([
+            {'id': 'core-skills', 'kind': 'child-dirs',
+             'source': 'harness/core/cursor/skills',
+             'target': '.cursor/skills'},
+            {'id': 'x-alias', 'kind': 'alias',
+             'source': 'harness/stacks/1c/cursor/skills/bsl-check',
+             'target': '.cursor/skills/bsl-check'},
+        ])
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, _, err = self.call(*self.args('plan'))
+        self.assertEqual(rc, 2, err)
+        self.assertIn('collision', err)
+        self.assertIn('bsl-check', err)
+
+    def test_explicit_vs_synthesized_duplicate_errors(self):
+        self.write_layout([
+            {'id': 'overlay-skills-1c', 'kind': 'child-dirs',
+             'source': 'harness/stacks/1c/cursor/skills',
+             'target': '.cursor/skills', 'stacks': ['1c']},
+        ])
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, _, err = self.call(*self.args('plan'))
+        self.assertEqual(rc, 2, err)
+        self.assertIn('duplicate', err)
+        self.assertIn('synthesized', err)
+
+    def test_layout_version_too_new_errors(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': [],
+                                  'layout_version': 99})
+        rc, _, err = self.call(*self.args('plan'))
+        self.assertEqual(rc, 2, err)
+        self.assertIn('layout_version 99', err)
+
+    def test_layout_version_bool_errors(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': [],
+                                  'layout_version': True})
+        rc, _, err = self.call(*self.args('plan'))
+        self.assertEqual(rc, 2, err)
+        self.assertIn('layout_version', err)
+
+    def test_layout_version_in_stack_json_errors(self):
+        (self.tmp / 'harness' / 'stacks' / '1c' / 'stack.json').write_text(
+            '{"id": "1c", "layout_version": 99}', encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, _, err = self.call(*self.args('plan'))
+        self.assertEqual(rc, 2, err)
+        self.assertIn('stacks/1c/stack.json', err)
+        self.assertIn('layout_version 99', err)
+
+    def test_service_names_never_published(self):
+        (self.tmp / 'harness' / 'stacks' / '1c' / 'cursor' / 'skills' /
+         '.hidden').mkdir(parents=True)
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((self.tmp / '.cursor' / 'skills' / '.hidden')
+                         .exists())
+
+
 class PrintConfigTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='kit-pconf-test-'))
@@ -615,6 +787,17 @@ class PrintConfigTest(unittest.TestCase):
         cfg = json.loads(out)
         self.assertEqual(cfg['source_root'], 'conf/')
         self.assertEqual(cfg['source_root_source'], 'default')
+
+    def test_resources_and_deps_keys(self):
+        (self.tmp / 'harness' / 'stacks' / '1c' / 'stack.json').write_text(
+            '{"id": "1c", "deps": ["python", "tool-x"]}', encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, out, _ = self.call(*self.args('--json'))
+        self.assertEqual(rc, 0)
+        cfg = json.loads(out)
+        self.assertIn('core-skills', cfg['resources'])
+        self.assertIn('auto:overlay-skills-1c', cfg['resources'])
+        self.assertEqual(cfg['deps']['stacks']['1c'], ['python', 'tool-x'])
 
 
 class ResolveSourceTest(unittest.TestCase):
