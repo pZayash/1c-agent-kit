@@ -87,3 +87,9 @@ Tool: `harness/stacks/1c/tools/answer42/` (`answer42.ps1` / `answer42.sh`, `smok
 | Файл | Зачем |
 | --- | --- |
 | [agent-integrator.md](agent-integrator.md) | дочка-интегратор: сведение веток, загрузка в dev-ИБ, доказательство применения |
+
+## Срез ldd (2026-11-12)
+
+| Файл | Зачем |
+| --- | --- |
+| [ldd-1c.md](ldd-1c.md) | binding LDD на 1С: ЖР, уровни, correlation, triage |

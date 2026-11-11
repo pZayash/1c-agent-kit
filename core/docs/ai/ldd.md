@@ -6,12 +6,14 @@ Log-driven development: логи проектируются вместе с ди
 фактом прочитанных логов.
 
 Практика из индустрии: обязательные логи/метрики/алерты уже в initial commit
-(Logz.io); spec-first logging — события объявляются артефактом спецификации
-(GitLab Artifact Registry, spec S03-a-logging).
+([Logz.io](https://logz.io/blog/log-driven-development/)); spec-first logging —
+события объявляются артефактом спецификации
+([GitLab Artifact Registry, spec S03-a-logging](https://gitlab.com/gitlab-org/ops/artifact-registry/-/blob/main/docs/specs/S03-a-logging.md)).
 
 > **Граница.** Здесь — стеко-нейтральный контракт проектирования. Runtime-правила
 > «когда и как писать в журнал» — [logging-strategy.md](logging-strategy.md)
-> (не рефакторить). Маппинг уровней и механика записи/чтения — в binding-доке
+> (не рефакторить; на сегодня канон 1С-ориентирован, разнесение по стекам —
+> отдельный change). Маппинг уровней и механика записи/чтения — в binding-доке
 > стека `stacks/<s>/docs/ai/ldd-<s>.md`.
 
 ## 1. Секция «Логирование» в design.md
@@ -26,7 +28,7 @@ Log-driven development: логи проектируются вместе с ди
 | order.submit | ERROR | order_id, error | error | отказ |
 ```
 
-- `Точка` — entry / exit / error / boundary (см. § 4).
+- `Точка` — entry / exit / error (см. § 4).
 - Поля, содержащие секреты или PII, помечать явно — см. redaction в § 4.
 - Стековые детали (имя функции записи, объект журнала) в таблицу не вносить —
   это binding.

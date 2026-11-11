@@ -34,6 +34,7 @@
 | Файл | Зачем |
 | --- | --- |
 | [logging-strategy.md](logging-strategy.md) | когда логировать, уровни, `Попытка/Исключение` |
+| [ldd.md](ldd.md) | проектирование логов на фазе спеки (LDD) |
 
 Пилот: `logging-strategy-org.md`.
 

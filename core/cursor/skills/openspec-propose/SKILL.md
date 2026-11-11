@@ -119,6 +119,7 @@ After completing all artifacts, summarize:
   обработка ошибок, многошаговые сценарии) — включить секцию «Логирование» по
   [ldd.md](../../../docs/ai/ldd.md): таблица событие/уровень/поля/точка,
   стеко-нейтрально. Нет логируемых границ — секцию не добавлять.
+  Triage gate (прочтение логов прогона) — чекбокс в `operator-checklist.md`.
 - **IMPORTANT**: `context` and `rules` are constraints for YOU, not content for the file
   - Do NOT copy `<context>`, `<rules>`, `<project_context>` blocks into the artifact
   - These guide what you write, but should never appear in the output
