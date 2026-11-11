@@ -83,12 +83,14 @@ DEFAULT_CONFIG: dict = {
     },
     "severity": {
         "broken": "error",
+        "untracked-target": "warning",
         "anchor": "error",
         "unreachable": "error",
         "dangling": "warning",
         "dir-link": "warning",
     },
     "max_per_section": 15,
+    "untracked_targets": True,
 }
 
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+[\"'][^\"']*[\"'])?\s*\)")
@@ -192,6 +194,33 @@ def list_tracked(root: Path) -> list[str] | None:
     return [norm(p) for p in proc.stdout.split("\0") if p]
 
 
+def list_tracked_paths(root: Path) -> set[str] | None:
+    """Все git-пути (файлы): отличить «вне git» от битой ссылки."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return {norm(p) for p in proc.stdout.split("\0") if p}
+
+
+def is_tracked_target(rel: str, tracked: set[str]) -> bool:
+    """Цель в git: сам файл или каталог, под которым есть отслеживаемые файлы."""
+    if rel in tracked:
+        return True
+    prefix = rel.rstrip("/") + "/"
+    return any(p.startswith(prefix) for p in tracked)
+
+
 def walk_md(root: Path) -> list[str]:
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -287,6 +316,9 @@ def analyze(root: Path, config: dict) -> Audit:
     findings: list[Finding] = []
     link_count = 0
     anchor_cache: dict[str, set[str]] = {}
+    tracked_paths = (
+        list_tracked_paths(root) if config.get("untracked_targets", True) else None
+    )
 
     for src in nodes:
         try:
@@ -327,7 +359,23 @@ def analyze(root: Path, config: dict) -> Audit:
                 )
                 continue
             if not abs_target.exists():
-                findings.append(Finding("broken", src, lineno, f"битая ссылка: {target} -> {rel_target}"))
+                if tracked_paths is not None and not is_tracked_target(rel_target, tracked_paths):
+                    # Цель вне git (handoffs/, сгенерированные выгрузки, xlsx/docx):
+                    # у автора локально работает, у остальных — никогда. Warning,
+                    # не error: текстом такое не лечится — либо артефакт в git,
+                    # либо ссылки быть не должно.
+                    findings.append(
+                        Finding(
+                            "untracked-target",
+                            src,
+                            lineno,
+                            f"ссылка на путь вне git: {target} -> {rel_target}",
+                        )
+                    )
+                else:
+                    findings.append(
+                        Finding("broken", src, lineno, f"битая ссылка: {target} -> {rel_target}")
+                    )
                 continue
             if abs_target.is_dir():
                 # Ссылка на каталог допустима, если у него нет оглавления.
