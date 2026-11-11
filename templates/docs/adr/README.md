@@ -2,7 +2,7 @@
 
 Каталог коротких записей о необратимых и неочевидных архитектурных решениях.
 
-Формат: [harness/docs/ai/ADR-FORMAT.md](../../harness/docs/ai/ADR-FORMAT.md).
+Формат: [harness/core/docs/ai/ADR-FORMAT.md](../../harness/core/docs/ai/ADR-FORMAT.md).
 
 ## Индекс
 

@@ -1,0 +1,60 @@
+---
+description: Кликабельные ссылки на файлы репозитория в ответах агентов (Cursor, Composer, agent-slot)
+alwaysApply: true
+---
+
+# Ссылки на файлы проекта
+
+Полный гайд: [docs/ai/project-file-links.md](../../docs/ai/project-file-links.md).
+
+Пути в **ответах агента** и в markdown — кликабельны в Cursor только в форматах ниже.
+Кириллица в пути — UTF-8 как на диске, **никогда** `%D0%…`.
+
+## Рабочие форматы
+
+### A. Code citation — показать код (тело обязательно)
+
+Пустой citation **невидим** в Cursor. Не substitutе им `[](path#Ln)`.
+
+```text
+```startLine:endLine:src/справочники/номенклатура/module.ext
+// минимум одна строка кода из файла
+```
+```
+
+### B. Markdown-ссылка на файл
+
+```markdown
+[module.ext](src/справочники/номенклатура/module.ext)
+```
+
+### C. Markdown-ссылка на строку (место без кода — первый выбор)
+
+```markdown
+[module.ext:42](src/справочники/номенклатура/module.ext#L42)
+[module.ext:42-50](src/справочники/номенклатура/module.ext#L42-L50)
+```
+
+## Обязательно
+
+- Путь от **корня репозитория** (`src/…`, корень исходников из `.kit.json`
+  и т.п.), разделитель `/`.
+- Agent-slot: не `/work/src/…` — всё равно `src/…`.
+- Строка без кода → `[](path#Ln)`; citation только с непустым телом.
+
+## Запрещено (не открывается)
+
+| Антипаттерн | Пример |
+| --- | --- |
+| Percent-encoding | `src/.../%D1%8F%D1%8F_...` |
+| Encoded + `#Ln` | `...%D0%.../module.ext#L1` |
+| Citation без тела | невидим; для строки — `[](path#Ln)` |
+| Голый `path` / `path#Ln` | без `[]()` → auto-encode → не открывается |
+| Backticks вместо ссылки | `` `src/…/file.ext` `` — не file-link |
+| `file:///…` | URI ОС |
+| Wikilinks | `[[src/…]]` |
+| Windows-абсолют | `C:\path\to\file.bsl` |
+
+## Быстрая проверка
+
+Перед ответом: кириллица читаема в URL, оформлено как `[text](path)`, `[text](path#Ln)` или code citation.

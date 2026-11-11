@@ -125,7 +125,7 @@ def write_skill(path, text, bom, eol):
 
 
 def scan_dir(d, out):
-    """A dir with SKILL.md is a skill; otherwise descend (container like skills/cc-1c)."""
+    """A dir with SKILL.md is a skill; otherwise descend (container like stacks/1c/skills)."""
     if (d / 'SKILL.md').is_file():
         out.append(check_skill(d))
         return

@@ -1,7 +1,7 @@
 # LOCAL skills — шаблон для нового потребителя kit
-# Скопируйте в tools/cc-1c-skills-sync/local-skills.txt и дополните.
-# cc-1c junction: harness/skills/cc-1c/
-# Overlay A+B: harness/cursor/skills/ (link-cursor-overlay)
+# Скопируйте в .kit/local-skills.txt (tracked, consumer-owned) и дополните.
+# cc-1c junction: harness/stacks/1c/skills/
+# Overlay A+B: harness/core/cursor/skills/ + harness/stacks/1c/cursor/skills/ (link-cursor-overlay)
 
 web-test
 sandbox

@@ -4,9 +4,65 @@
 Потребители подключают этот репозиторий как **git submodule** в `harness/`.
 
 Канон решений — отдельный пилот-репозиторий (не этот kit). Срез общих
-`docs/ai` — [docs/ai/README.md](docs/ai/README.md). Раскладка `docs/` у
-потребителя — [docs/ai/docs-layout.md](docs/ai/docs-layout.md). Навыки cc-1c —
-[skills/cc-1c/](skills/cc-1c/) + sync [tools/cc-1c-skills-sync/](tools/cc-1c-skills-sync/).
+`docs/ai` — [core/docs/ai/README.md](core/docs/ai/README.md). Раскладка `docs/` у
+потребителя — [core/docs/ai/docs-layout.md](core/docs/ai/docs-layout.md). Навыки cc-1c —
+[stacks/1c/skills/](stacks/1c/skills/) + sync [tools/cc-1c-skills-sync/](tools/cc-1c-skills-sync/).
+
+## Структура: core / stacks
+
+Kit разделён на стеко-нейтральное ядро и стеки. Потребитель выбирает
+стеки в `.kit.json`; без него раскладывается **только core** (core-only
+дефолт).
+
+| Слой | Путь | Содержимое | Куда монтируется |
+| --- | --- | --- | --- |
+| core | `core/cursor/{skills,rules,commands}` | стеко-нейтральные навыки, правила, команды | `.cursor/*` |
+| core | `core/docs/ai` | общие каноны агентов | через заглушки `docs/ai/` потребителя |
+| core | `core/tools` | `sandbox`, `docs-links`, `git-partial-stage.py` | `tools/` |
+| stacks/1c | `stacks/1c/skills` | вендорные cc-1c skills | `.cursor/skills` |
+| stacks/1c | `stacks/1c/cursor/{skills,rules,commands}` | 1С-скиллы + компаньоны `<name>-1c` к core-пайплайнам | `.cursor/*` |
+| stacks/1c | `stacks/1c/docs/ai` | 1С-каноны (запросы, СКД, метаданные) | через заглушки `docs/ai/` |
+| stacks/1c | `stacks/1c/tools` | `bsl-check`, `load-changed-files`, `mcp-call`, `answer42`, `rights-xml-lint` | `tools/` |
+| kit-internal | `pi/`, `kilo/`, `hooks/`, `templates/`, `openspec/`, `scripts/`, `tools/{kit-layout,kit-agent,kit-lint,cc-1c-skills-sync,section-patch,skill-frontmatter,cc-1c-skills}` | механика kit, не монтируется | — |
+
+Манифесты слоёв: `core/deps.json`, `stacks/<id>/stack.json` — `id` +
+host-deps (список id на check-функции `init-kit-deps`).
+
+## `.kit.json` — выбор стеков у потребителя
+
+Корень репозитория потребителя:
+
+```json
+{"version": 1, "stacks": ["1c"], "source_root": "conf/",
+ "paths": {"cf": "conf/", "cfe": "cfe.xml/", "vendor": "vendor.xml/"},
+ "sparse": false}
+```
+
+- `stacks` — выбранные стеки; `"*"` внутри файла запрещён.
+  **Отсутствует `.kit.json` → core-only** (`stacks: []`) + WARN —
+  раскладываются только core-ресурсы.
+- `source_root` — корень исходников у потребителя; резолв:
+  `.kit.json` → `.env CONFIG_PATH` → дефолт `conf/`.
+- `paths` — именованные пути исходников потребителя (`cf`, `cfe`, `vendor`).
+- `sparse: true` — bootstrap включает `git sparse-checkout` для
+  `harness/`: `/*`, `!/stacks/*`, `/stacks/*/stack.json`,
+  `/stacks/<выбранные>/` (stack.json всегда в checkout — валидация имён).
+- `options` — reserved.
+- `KIT_LEGACY=1` — force-override `stacks: ["*"]` (env > файл) + WARN;
+  для окружений без `.kit.json` до миграции.
+
+Единственный парсер `.kit.json` — `kit_layout.py print-config --json`
+(валидация до мутаций); скрипты не читают файл сами. Нет python + есть
+`.kit.json` → явный отказ.
+
+### `.kit/` у потребителя
+
+`apply` ведёт **fallback-манифест** `.kit/fallback.txt` (hardlink/copy +
+sha256, gitignored) и lock `.kit/lock`. Локальные манифесты
+`.kit/local-*.txt` (`local-skills`, `local-overlay`, `local-tools`) —
+**tracked**, consumer-owned: имена детей, которые потребитель не линкует
+из kit. В `.gitignore` — только `.kit/fallback.txt` и `.kit/lock`;
+паттерн `.kit*` — **никогда** (съест `.kit.json`).
 
 ## Bootstrap (рекомендуемый вход)
 
@@ -23,43 +79,57 @@ powershell -NoProfile -ExecutionPolicy Bypass -File harness/scripts/bootstrap-ki
 powershell -NoProfile -File harness/scripts/init-kit-deps.ps1 -ConsumerRoot . -Install
 # Linux: INSTALL=1 bash harness/scripts/init-kit-deps.sh .
 
-# Проверка links (копия ≠ kit link)
-bash harness/scripts/verify-kit-links.sh .
+# Проверка раскладки (все ресурсы)
+python harness/tools/kit-layout/kit_layout.py verify .
 
 # Сводная диагностика (read-only): gitlink, gitdir, links,
-# stale-ссылки (WOULD PRUNE), host deps, ps1-ASCII
+# pending actions, host deps, ps1-ASCII
 bash harness/scripts/kit-doctor.sh .
 ```
 
-### Движок раскладки kit-layout (opt-in)
+### Движок раскладки kit-layout
 
-Альтернатива link-скриптам — декларативная таблица
-`tools/kit-layout/layout.json` + движок `kit_layout.py` (idea: teamai
-ResourceHandler): один кроссплатформенный код вместо пар sh/ps1,
-встроенные tombstones и идемпотентность (`OK` без перелинковки).
+Декларативная таблица `tools/kit-layout/layout.json` + движок
+`kit_layout.py` (idea: teamai ResourceHandler): один кроссплатформенный
+код вместо пар sh/ps1, встроенные tombstones и идемпотентность (`OK` без
+перелинковки). Ресурсы с полем `"stacks"` раскладываются только при
+выбранном стеке в `.kit.json`; без поля — всегда (core).
 
 ```bash
-# посмотреть план, ничего не меняя
+# посмотреть план, ничего не меняя (по .kit.json)
 python harness/tools/kit-layout/kit_layout.py plan .
-# раскладка через движок в bootstrap
+# план по ВСЕМ стекам (игнорировать фильтр)
+python harness/tools/kit-layout/kit_layout.py plan . --all-stacks
+# раскладка через движок в bootstrap (дефолт; LEGACY_LINKS=1 — link-скрипты)
 LAYOUT_ENGINE=1 bash harness/scripts/bootstrap-kit.sh .
-# проверка (все ресурсы; verify-kit-links.sh — только spot-check)
+# проверка (все ресурсы)
 python harness/tools/kit-layout/kit_layout.py verify .
 # kit-пути, всё ещё трекнутые в индексе потребителя (Windows/junction)
 python harness/tools/kit-layout/kit_layout.py tracked .
+# consumer-путь → kit source (promote copy-fallback)
+python harness/tools/kit-layout/kit_layout.py resolve-source .cursor/skills/handoff --root .
+# effective-конфиг: стеки, source_root, sparse, пути манифестов
+python harness/tools/kit-layout/kit_layout.py print-config --json .
 ```
 
 Паритет с link-скриптами проверен синтетикой (440 путей идентично) и на
 живом потребителе (нулевой plan). Движок — **дефолт** bootstrap; откат на
 legacy-скрипты: `LEGACY_LINKS=1` / `-LegacyLinks`.
 
-`apply` ведёт **fallback-манифест** `tools/cc-1c-skills-sync/kit-fallback.txt`
+`apply` ведёт **fallback-манифест** `.kit/fallback.txt`
 (hardlink/copy + sha256) и регенерирует managed-блок `.gitignore`, чтобы
 ссылки и фолбэки не попадали в `git status` потребителя. Если symlink-права
 появились позже (Developer Mode) — `apply` апгрейдит in-sync hardlink/copy
 до symlink, `apply --upgrade-fallbacks` (`KIT_UPGRADE_FALLBACKS=1`) догоняет
 и записи старого манифеста, а `kit-doctor` показывает фактический режим
 (`N link(s), M hardlink(s), K copy(ies)`) и подсказывает апгрейд.
+
+**Orphan-sweep (stateless).** При `apply` ссылки-«сироты» (reparse point /
+symlink, чей `readlink` указывает внутрь `harness/`, имя не в effective-наборе
+и не в `local-*.txt`) снимаются (`removed N link(s)`) — снятие стека в
+`.kit.json` чистит его ссылки само. Фолбэк с sha из старого манифеста —
+удаляется; с правкой потребителя — `WARN` и сохраняется в манифесте
+(иначе 2-й apply забудет). `plan` печатает `WOULD REMOVE`, `verify` — WARN.
 
 **Windows (junction).** Без symlink-привилегии каталоги линкуются через
 `mklink /J`. Git при `core.symlinks=false` идёт **внутрь** junction и трекает
@@ -80,7 +150,6 @@ OS/namespace (Windows-checkout, открытый из Linux-sandbox/WSL), их t
 - `verify` печатает `WARN FOREIGN-NS` по каждой ссылке и, если **все** ссылки
   вне root, `FAIL` + подсказку «запускайте в namespace хоста»;
 - `bootstrap-kit` ловит то же до link-шагов (exit 2); `kit-doctor` — `[FAIL]`;
-  `verify-kit-links` печатает `SKIP FOREIGN-NS` вместо ложного `FAIL missing`;
 - `kit-agent check-command` даёт WARN на `sandbox/run.sh … kit_layout.py|bootstrap-kit`.
 
 Запускать раскладку/verify только на хосте, который её создал (Git Bash /
@@ -97,6 +166,13 @@ no-op и зелёный verify опаснее явной ошибки.
 написанием корня не отвергается. Регресс-тесты: `tools/kit-layout/test_kit_layout.py`
 (engine + scan/compare), `tools/kit-agent/test_kit_agent.py` (namespace-хинт
 без git).
+
+**Кросс-слойные ссылки** — `tools/kit-lint/check_cross_layer_links.py`:
+резолвит каждую relative-ссылку в `core/**` и `stacks/**` по
+смонтированному у потребителя пути; FAIL, если из `core/` резолв попадает
+в `stacks/` или цель не существует. Рядом —
+`check_core_purity.py` (бан 1С-лексики в `core/cursor/{skills,rules}` вне
+секций `#### stack:`).
 
 ### kit-agent: хуки и guard-правила для агентов
 
@@ -146,13 +222,16 @@ powershell -NoProfile -File harness/scripts/fix-harness-gitdir.ps1 `
   -CopyFrom D:\dev\proj\main\.git\worktrees\wt-a\modules\harness
 ```
 
-`bootstrap-kit` вызывает link cc-1c → overlay → tools → editor roots
-(`.agents/skills`, `.claude/skills|commands`) → pi roots (`.pi/*`), при
-необходимости пишет thin `load-changed-files.sh`, затем `verify-kit-links`.
+`bootstrap-kit` через движок раскладывает effective-ресурсы `.kit.json`
+(стеки → фильтр) → alias editor roots (`.agents/skills`,
+`.claude/skills|commands`) → pi roots (`.pi/*`), при необходимости пишет
+thin `load-changed-files.sh` (только при выбранном стеке `1c`), затем
+`kit_layout.py verify`. Legacy-режим (`LEGACY_LINKS=1`): link cc-1c →
+overlay → tools → editor roots → pi roots.
 
 Link-скрипты заодно делают **prune** (tombstones): kit-ссылка, чей
 skill/tool/rule удалён или переименован upstream, снимается (`PRUNE:`).
-Локальные копии и чужие ссылки не трогаются; имена из `local-*.txt`
+Локальные копии и чужие ссылки не трогаются; имена из `.kit/local-*.txt`
 пропускаются. Dry-run: `DRY_RUN=1` / `-DryRun` → `WOULD PRUNE:`.
 
 `bootstrap-kit` также патчит **managed-секции** `AGENTS.md` (idea: teamai
@@ -171,14 +250,14 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
 - Linux: нативные `link-*.sh` (`ln -sfn`).
 - Windows: `link-*.ps1` (`mklink /J`; file `mklink`, при отсутствии прав —
   **hardlink**, в крайнем случае copy). File-fallback'и пишутся в
-  `tools/cc-1c-skills-sync/kit-fallback.txt`, поэтому prune и `kit-doctor`
+  `.kit/fallback.txt`, поэтому prune и `kit-doctor`
   их видят (см. § Pitfalls «File symlink без прав»).
 - Git Bash на Windows: `link-*.sh` делегируют в `.ps1`.
 
 ### Pitfalls
 
 - **Skill «есть», но не из kit** — Win: `ReparsePoint` / `dir /AL`;
-  Linux: `readlink` / `verify-kit-links`.
+  Linux: `readlink` / `kit_layout.py verify`.
 - **Сотни `D` в git после link** — сначала merge ветки, где skills
   **untrack**; потом bootstrap (иначе REPLACE COPY).
   - Linux: kit-ссылка — symlink (mode `120000`), старые трекнутые копии
@@ -188,9 +267,6 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
     приходят в основном от потребительских файлов внутри kit-каталогов
     (vendored BSLLS, примеры `mcp-call`). До `UNTRACK` (см. kit-layout)
     `git add -A` затянет содержимое kit как blob'ы потребителя.
-- **`verify-kit-links` — spot-check**, а не полный обход: несколько
-  репрезентативных ссылок + алиасы. Полная проверка — `kit_layout.py
-  verify` и `kit-doctor` (в т.ч. пункт «kit links tracked in index»).
 - **`Remove-Item` / NullRef на junction** — канон `cmd /c rmdir` (уже в `.ps1`).
 - **`git status` ломается на harness в worktree** — `harness/.git` →
   `<main>/.git/worktrees/<name>/modules/harness` (не относительный
@@ -243,7 +319,7 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
 - **`bootstrap-kit`/`kit_layout.py` через `tools/sandbox/run.sh` над
   Windows-деревом** — target ссылок читается как `/mnt/host/...`
   (FOREIGN-NS): engine теперь `ERROR` exit 2, а не тихий no-op/зелёный
-  verify. См. § kit-layout и [docs/ai/sandbox.md](docs/ai/sandbox.md).
+  verify. См. § kit-layout и [core/docs/ai/sandbox.md](core/docs/ai/sandbox.md).
 - **`.ps1` только ASCII** — PS 5.1 читает BOM-less файл как ANSI
   (CP1251): байты `—`/кириллицы дают `”`, парсер рвёт строку →
   `ParserError TerminatorExpectedAtEndOfString`. Guard:
@@ -255,7 +331,7 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   (или читать лог через `iconv -f cp866`).
 - **`Invoke-WebRequest` в PS 5.1 виснет на неотвечающем SSE-эндпоинте** —
   `-TimeoutSec` не срабатывает, вызов блокируется. Готовность HTTP-сервиса
-  проверять TCP-чеком или через [tools/mcp-call](tools/mcp-call/README.md),
+  проверять TCP-чеком или через [stacks/1c/tools/mcp-call](stacks/1c/tools/mcp-call/README.md),
   а не `Invoke-WebRequest`.
 - **Downgrade сабмодуля + bootstrap = PRUNE более новых ссылок** —
   tombstones честно снимет ссылки на skills/tools, которых нет в старом
@@ -264,14 +340,14 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
 - **File symlink без прав** — Developer Mode / `SeCreateSymbolicLinkPrivilege`
   нужны только для symlink. Порядок fallback: symlink → **hardlink**
   (`mklink /H`, без прав, на том же томе) → copy (cross-volume). Каждый
-  fallback фиксируется в `tools/cc-1c-skills-sync/kit-fallback.txt`
+  fallback фиксируется в `.kit/fallback.txt`
   (rel path, source, sha256), поэтому:
   - prune (tombstones) снимает и fallback-копии по манифесту, а не только
     reparse (старый «prune blind» для copy закрыт);
   - `kit-doctor` различает «in sync» и «stale / content differs»
     (раньше умел только сказать «есть копии»);
   - правка потребителя в fallback **не затирается** молча — `KEEP LOCAL
-    EDITS` (перенеси файл в `local-overlay.txt`/`local-tools.txt`, если он
+    EDITS` (перенеси файл в `.kit/local-overlay.txt`/`.kit/local-tools.txt`, если он
     должен быть своим);
   - managed-блок `.gitignore` перегенерируется bootstrap, поэтому ссылки и
     fallback не висят `??` в `git status`
@@ -287,29 +363,30 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   `setup-project-symlinks.sh` целиком (`src/cf` — layout потребителя).
 - **Нет node / openspec / rtk на голом Windows-worktree** — слот Docker
   уже содержит их в образе; 42/`features` — нет. Скрипт
-  `init-kit-deps` (`-Install`). **Не** `openspec init` (свои
+  `init-kit-deps` (`-Install`) ставит core-зависимости (`core/deps.json`)
+  + зависимости выбранных стеков (`stacks/<id>/stack.json`). **Не** `openspec init` (свои
   `openspec/` + kit skills). **Не** `rtk init` (CLAUDE.md). Канон:
-  [docs/ai/kit-host-deps.md](docs/ai/kit-host-deps.md).
+  [core/docs/ai/kit-host-deps.md](core/docs/ai/kit-host-deps.md).
 - **Пути в разном регистре (Win/macOS)** — NTFS не видит
   `Foo`/`foo`, индекс Git видит два пути. Merge:
   `untracked would be overwritten`. Канон:
-  [docs/ai/git-workflow.md](docs/ai/git-workflow.md) § «Регистр путей».
+  [core/docs/ai/git-workflow.md](core/docs/ai/git-workflow.md) § «Регистр путей».
   `git mv` по регистру — **два** шага через `_case.tmp`.
 
 ## cc-1c-skills (vendor + junction)
 
 Upstream [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) vendored
-в `skills/cc-1c/`. Promote = sync в **этом** репо → commit → bump gitlink у
+в `stacks/1c/skills/`. Promote = sync в **этом** репо → commit → bump gitlink у
 потребителей.
 
 **Потребитель** после bump (или весь стек через `bootstrap-kit`):
 
 ```bash
-DRY_RUN=1 bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills.txt
-bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills.txt
+DRY_RUN=1 bash harness/scripts/link-cc-1c-skills.sh . .kit/local-skills.txt
+bash harness/scripts/link-cc-1c-skills.sh . .kit/local-skills.txt
 ```
 
-- LOCAL manifest: `tools/cc-1c-skills-sync/local-skills.txt` (шаблон
+- LOCAL manifest: `.kit/local-skills.txt` (шаблон
   [templates/local-skills.txt](templates/local-skills.txt)).
 - Windows: только `mklink /J`, не Git Bash `ln -s`.
 - Срез 1: без `web-test` в kit (форк потребителя остаётся LOCAL).
@@ -317,22 +394,28 @@ bash harness/scripts/link-cc-1c-skills.sh . tools/cc-1c-skills-sync/local-skills
 
 ## Cursor overlay (срез A + B)
 
-Универсальные rules/commands/skills (не cc-1c) — [cursor/](cursor/).
-Канон `harness-promote`: [cursor/skills/harness-promote/](cursor/skills/harness-promote/).
+Универсальные rules/commands/skills (не cc-1c) — [core/cursor/](core/cursor/);
+1С-специфика и компаньоны `<name>-1c` — [stacks/1c/cursor/](stacks/1c/cursor/).
+Канон `harness-promote`: [core/cursor/skills/harness-promote/](core/cursor/skills/harness-promote/).
 
 **Срез A:** caveman, openspec-*, explore, …  
 **Срез B (workflow):** handoff, close-chat, load-changed-files, bsl-check,
 architect-apply, review, review-request, retro.
 
+Mid-pipeline core-скиллы (handoff, close-chat, architect-apply,
+orchestrated-child, orchestrator) переписаны линейно без 1С; 1С-шаги — в
+компаньонах `stacks/1c/cursor/skills/<name>-1c`, которые core-версия
+вызывает по инструкции в начале пайплайна (секция `#### stack: 1c`).
+
 **Потребитель** после cc-1c link:
 
 ```bash
-DRY_RUN=1 bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-overlay.txt
-bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-overlay.txt
+DRY_RUN=1 bash harness/scripts/link-cursor-overlay.sh . .kit/local-overlay.txt
+bash harness/scripts/link-cursor-overlay.sh . .kit/local-overlay.txt
 ```
 
 - Skills: `mklink /J`. Rules/commands: **file** `mklink` (Windows Developer
-  Mode); без прав — hardlink, затем copy (см. `kit-fallback.txt`).
+  Mode); без прав — hardlink, затем copy (см. `.kit/fallback.txt`).
 - `sandbox` skill, `web-test` — LOCAL у потребителя.
 
 ## Pi harness (опционально)
@@ -347,38 +430,41 @@ bash harness/scripts/link-cursor-overlay.sh . tools/cc-1c-skills-sync/local-over
 Вручную: `bash harness/scripts/link-pi-roots.sh .` (Win — `.ps1`).
 Расширение `auto-session-title` — [pi/extensions/](pi/extensions/);
 Zed/ACP — `node harness/pi/scripts/patch-pi-acp-session-title.mjs`.
-Канон: [docs/ai/pi-harness.md](docs/ai/pi-harness.md).
+Канон: [core/docs/ai/pi-harness.md](core/docs/ai/pi-harness.md).
 
 ## Workflow tools (срез B)
 
-`tools/bsl-check`, `tools/sandbox`, `tools/load-changed-files`,
-`tools/mcp-call` (JSON-RPC к MCP-серверам 1С, в т.ч. streamable HTTP),
-`tools/answer42` (UI 1С через клиент тестирования: [README](tools/answer42/README.md),
-[канон](docs/ai/answer42.md)), `tools/docs-links` (граф ссылок документации:
-битые ссылки и достижимость от `AGENTS.md`: [README](tools/docs-links/README.md)),
-`tools/git-partial-stage.py` — в [tools/](tools/).
+Core: `core/tools/sandbox`, `core/tools/docs-links` (граф ссылок
+документации: битые ссылки и достижимость от `AGENTS.md`,
+[README](core/tools/docs-links/README.md)), `core/tools/git-partial-stage.py`.
+Стек `1c`: `stacks/1c/tools/bsl-check`, `stacks/1c/tools/load-changed-files`,
+`stacks/1c/tools/mcp-call` (JSON-RPC к MCP-серверам 1С, в т.ч. streamable HTTP),
+`stacks/1c/tools/answer42` (UI 1С через клиент тестирования:
+[README](stacks/1c/tools/answer42/README.md),
+[канон](stacks/1c/docs/ai/answer42.md)), `stacks/1c/tools/rights-xml-lint`.
+Kit-internal: `tools/kit-layout`, `tools/kit-agent`, `tools/kit-lint`.
 Load engine:
-`tools/load-changed-files/load-changed-files.sh`; корень потребителя — wrapper.
+`stacks/1c/tools/load-changed-files/load-changed-files.sh`; корень потребителя — wrapper
+(пишется bootstrap только при выбранном стеке `1c`).
 
 **Потребитель** после overlay link:
 
 ```bash
-DRY_RUN=1 bash harness/scripts/link-kit-tools.sh . tools/cc-1c-skills-sync/local-tools.txt
-bash harness/scripts/link-kit-tools.sh . tools/cc-1c-skills-sync/local-tools.txt
+DRY_RUN=1 bash harness/scripts/link-kit-tools.sh . .kit/local-tools.txt
+bash harness/scripts/link-kit-tools.sh . .kit/local-tools.txt
 ```
 
 - BSLLS binary не в git: один раз на хост
-  `bash harness/tools/bsl-check/update-bsl-language-server.sh` (**без**
+  `bash harness/stacks/1c/tools/bsl-check/update-bsl-language-server.sh` (**без**
   `--latest` = пин `BSLLS_VERSION`) пишет в **кэш**, не в worktree. Канон:
-  [tools/bsl-check/README.md](tools/bsl-check/README.md). `bootstrap-kit` не
+  [stacks/1c/tools/bsl-check/README.md](stacks/1c/tools/bsl-check/README.md). `bootstrap-kit` не
   качает. На 42: User env `KIT_BSLLS_ROOT=D:\tools\bslls`.
 - Env-шаблон: [templates/env.example](templates/env.example).
 - `-U`, если `/UpdateDBCfg` упал на HTTP-клиентах второй публикации ИБ: авто-retry
   `-Dynamic- -SessionTerminate force` — гейт `UPDATE_DB_FORCE_SESSIONS` (default
   `true`) / `--force-sessions` / `--no-force-sessions`. На prod выключайте гейт
   (`false`), если нельзя рвать сеансы пользователей.
-- Доки: [docs/ai/agent-task-bus.md](docs/ai/agent-task-bus.md),
-  [docs/ai/load-config-to-dev.md](docs/ai/load-config-to-dev.md).
+- Доки: [stacks/1c/docs/ai/load-config-to-dev.md](stacks/1c/docs/ai/load-config-to-dev.md).
 
 Порядок bootstrap второго ПК: `git submodule update --init` →
 `bootstrap-kit` (или три link-скрипта) → BSLLS в кэш хоста (не worktree) →
@@ -389,6 +475,7 @@ Reload Window.
 ```bash
 git submodule add <url-этого-репо> harness
 git submodule update --init
+# .kit.json со stacks проекта, затем:
 bash harness/scripts/bootstrap-kit.sh .
 ```
 
@@ -409,4 +496,4 @@ bash harness/scripts/bootstrap-kit.sh .
 ## Promote
 
 Правка общего → commit **в этом** репо → в потребителе только bump SHA.
-Skill: [skills/harness-promote/SKILL.md](skills/harness-promote/SKILL.md).
+Skill: [core/cursor/skills/harness-promote/SKILL.md](core/cursor/skills/harness-promote/SKILL.md).

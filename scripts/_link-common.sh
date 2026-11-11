@@ -183,6 +183,79 @@ kit_foreign_links() {
   return 0
 }
 
+# ── .kit.json / стеки ─────────────────────────────────────────────────
+# Единственный парсер .kit.json — kit_layout.py print-config --json.
+# Скрипты НЕ читают .kit.json сами.
+
+# kit_layout.py print-config --json → stdout. Единственная точка вызова.
+# Коды: 0 ok; 4 — нет python; прочие — код движка.
+kit_print_config_json() {
+  local root="$1" harness_rel="${2:-${HARNESS_REL:-harness}}" py
+  py="$(command -v python || command -v python3 || true)"
+  if [[ -z "$py" ]]; then
+    echo "ERROR: python нет в PATH — print-config невозможен" >&2
+    return 4
+  fi
+  "$py" "$root/$harness_rel/tools/kit-layout/kit_layout.py" \
+      print-config "$root" --harness-rel "$harness_rel" --json
+}
+
+# Печатает effective-стеки через пробел ("*" = все). Коды:
+#   0 — ok (стеки в stdout, может быть пусто)
+#   3 — .kit.json нет (legacy-режим для link-*)
+#   4 — .kit.json есть, но python не найден (явный отказ)
+#   1 — print-config упал (текст ошибки уже в stderr движка)
+kit_effective_stacks() {
+  local root="$1" harness_rel="${2:-${HARNESS_REL:-harness}}" py cfg
+  if [[ "${KIT_LEGACY:-0}" == "1" ]]; then
+    echo "WARN: KIT_LEGACY=1 — effective stacks = все (env > .kit.json)" >&2
+    echo "*"
+    return 0
+  fi
+  [[ -f "$root/.kit.json" ]] || return 3
+  py="$(command -v python || command -v python3 || true)"
+  if [[ -z "$py" ]]; then
+    echo "ERROR: найден $root/.kit.json, но python нет в PATH —" >&2
+    echo "  стеки прочитать нельзя. Поставь python или удали .kit.json." >&2
+    return 4
+  fi
+  cfg="$(kit_print_config_json "$root" "$harness_rel")" || {
+    echo "ERROR: kit_layout.py print-config failed ($root)" >&2
+    return 1
+  }
+  "$py" -c 'import json,sys
+c=json.loads(sys.argv[1])
+s=c.get("stacks")
+if s is None: s=c.get("effective_stacks") or []
+print("*" if s=="*" else " ".join(s))' "$cfg" | tr -d '\r'
+}
+
+# 0 — стек $2 выбран у потребителя $1 (или legacy-режим без .kit.json);
+# 1 — не выбран; 2 — конфиг не читается (fatal, ошибка уже в stderr).
+kit_stack_selected() {
+  local stacks rc
+  stacks="$(kit_effective_stacks "$1")"; rc=$?
+  case "$rc" in
+    0) ;;
+    3) return 0 ;;
+    *) return 2 ;;
+  esac
+  [[ "$stacks" == "*" || " $stacks " == *" $2 "* ]]
+}
+
+# Consumer-relative путь local-манифеста (.kit/local-<name>.txt приоритетно,
+# legacy tools/cc-1c-skills-sync/local-<name>.txt — при миграции).
+kit_local_manifest_rel() {
+  local root="$1" name="$2"
+  if [[ -f "$root/.kit/local-$name.txt" ]]; then
+    echo ".kit/local-$name.txt"
+  elif [[ -f "$root/tools/cc-1c-skills-sync/local-$name.txt" ]]; then
+    echo "tools/cc-1c-skills-sync/local-$name.txt"
+  else
+    echo ".kit/local-$name.txt"
+  fi
+}
+
 kit_load_manifest() {
   # $1=file $2=nameref assoc array
   local manifest_file="$1"
@@ -278,7 +351,8 @@ kit_update_gitignore() {
     if grep -q '[^[:space:]]' "$kept" 2>/dev/null; then echo; fi
     echo "$begin"
     printf '%s\n' "$@" | sed 's#\\#/#g' | sed 's#^#/#' | LC_ALL=C sort -u
-    echo "/tools/cc-1c-skills-sync/kit-fallback.txt"
+    echo "/.kit/fallback.txt"
+    echo "/.kit/lock"
     echo "$end"
   } > "$gi"
   rm -f "$kept"

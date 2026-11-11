@@ -26,7 +26,6 @@ fi
 
 CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
 HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
-SYNC_DIR="$CONSUMER_ROOT/tools/cc-1c-skills-sync"
 
 FAIL=0
 ok()   { echo "[OK]   $*"; }
@@ -34,7 +33,27 @@ warn() { echo "[WARN] $*"; }
 bad()  { echo "[FAIL] $*"; FAIL=1; }
 info() { echo "[INFO] $*"; }
 
+PY="$(command -v python || command -v python3 || true)"
+KIT_LAYOUT="$HARNESS_ROOT/tools/kit-layout/kit_layout.py"
+KIT_STACKS=""
+
 echo "=== kit-doctor: $CONSUMER_ROOT ==="
+
+# Конфиг потребителя — только через движок (единственный парсер .kit.json).
+if [[ -n "$PY" && -f "$KIT_LAYOUT" ]]; then
+  if cfg="$(kit_print_config_json "$CONSUMER_ROOT" "$HARNESS_REL" 2>/dev/null)"; then
+    printf '%s\n' "$cfg" | "$PY" -m json.tool | sed 's/^/  /'
+    KIT_STACKS="$("$PY" -c 'import json,sys
+c=json.loads(sys.stdin.read())
+s=c.get("stacks")
+if s is None: s=c.get("effective_stacks") or []
+print("*" if s=="*" else " ".join(str(x) for x in s))' <<<"$cfg")"
+  else
+    warn "print-config failed"
+  fi
+else
+  info "no python / kit_layout.py — print-config skipped"
+fi
 
 # 0. namespace: links created in another OS/namespace (Windows checkout seen
 #    from a Linux sandbox/WSL, or a moved consumer tree) cannot be diagnosed
@@ -110,47 +129,59 @@ else
 fi
 
 if [[ -e "$HARNESS_ROOT" ]]; then
-  # 4. verify links
+  # 4. verify links (engine, отфильтрованный по effective stacks plan)
   vlog="$(mktemp)"
   if [[ "$FOREIGN_NS" == "1" ]]; then
-    info "verify-kit-links skipped (foreign namespace; see check 0)"
-  elif bash "$SCRIPT_DIR/verify-kit-links.sh" "$CONSUMER_ROOT" >"$vlog" 2>&1; then
-    ok "verify-kit-links"
+    info "kit_layout verify skipped (foreign namespace; see check 0)"
+  elif [[ -z "$PY" || ! -f "$KIT_LAYOUT" ]]; then
+    info "verify skipped (no python / kit_layout.py)"
+  elif "$PY" "$KIT_LAYOUT" verify "$CONSUMER_ROOT" --harness-rel "$HARNESS_REL" >"$vlog" 2>&1; then
+    ok "kit_layout verify"
   else
-    bad "verify-kit-links:"
+    bad "kit_layout verify:"
     sed 's/^/       /' "$vlog"
   fi
   rm -f "$vlog"
 
-  # 5. stale kit links (DRY_RUN prune detection; read-only)
-  stale=""
-  if [[ -d "$HARNESS_ROOT/skills/cc-1c" ]]; then
-    stale+="$(DRY_RUN=1 bash "$SCRIPT_DIR/link-cc-1c-skills.sh" "$CONSUMER_ROOT" \
-      "tools/cc-1c-skills-sync/local-skills.txt" 2>/dev/null | grep 'WOULD PRUNE:' || true)"$'\n'
-  fi
-  if [[ -d "$HARNESS_ROOT/cursor" ]]; then
-    stale+="$(DRY_RUN=1 bash "$SCRIPT_DIR/link-cursor-overlay.sh" "$CONSUMER_ROOT" \
-      "tools/cc-1c-skills-sync/local-overlay.txt" 2>/dev/null | grep 'WOULD PRUNE:' || true)"$'\n'
-  fi
-  if [[ -d "$HARNESS_ROOT/tools" ]]; then
-    stale+="$(DRY_RUN=1 bash "$SCRIPT_DIR/link-kit-tools.sh" "$CONSUMER_ROOT" \
-      "tools/cc-1c-skills-sync/local-tools.txt" 2>/dev/null | grep 'WOULD PRUNE:' || true)"$'\n'
-  fi
-  stale="$(grep 'WOULD PRUNE:' <<<"$stale" || true)"
-  if [[ -n "$stale" ]]; then
-    warn "stale kit links - run bootstrap-kit to prune:"
-    sed 's/^/       /' <<<"$stale"
-  else
-    ok "no stale kit links"
+  # 5+8. stale kit links и drift фолбэков — engine plan (pending actions).
+  #      Заменяет DRY_RUN link-* и чтение старых манифестов SYNC_DIR.
+  if [[ "$FOREIGN_NS" == "1" ]]; then
+    info "kit_layout plan skipped (foreign namespace; see check 0)"
+  elif [[ -n "$PY" && -f "$KIT_LAYOUT" ]]; then
+    plog="$(mktemp)"
+    if "$PY" "$KIT_LAYOUT" plan "$CONSUMER_ROOT" --harness-rel "$HARNESS_REL" >"$plog" 2>&1; then
+      pending="$(grep -cE 'WOULD|PENDING|PRUNE|REMOVE|REPLACE|stale|drift|orphan|fallback' "$plog" || true)"
+      if [[ "$pending" -gt 0 ]]; then
+        warn "layout pending actions ($pending) — run bootstrap-kit:"
+        grep -E 'WOULD|PENDING|PRUNE|REMOVE|REPLACE|stale|drift|orphan|fallback' "$plog" | head -15 | sed 's/^/       /'
+      else
+        ok "layout in sync (plan: no pending actions)"
+      fi
+    else
+      bad "kit_layout plan failed:"
+      sed 's/^/       /' "$plog" | head -20
+    fi
+    rm -f "$plog"
   fi
 
-  # 6. host deps (check mode; WARN only - links already work without them)
+  # 6. host deps (check mode; WARN only - links already work without them).
+  #    Секциями: core всегда, выбранные стеки — через init-kit-deps.
   if [[ "${SKIP_DEPS:-0}" != "1" ]]; then
     if bash "$SCRIPT_DIR/init-kit-deps.sh" "$CONSUMER_ROOT" >/dev/null 2>&1; then
-      ok "host deps (node / openspec / rtk)"
+      ok "host deps"
     else
-      warn "host deps incomplete - docs/ai/kit-host-deps.md (INSTALL=1 to install)"
+      warn "host deps incomplete - core/docs/ai/kit-host-deps.md (INSTALL=1 to install)"
     fi
+    all_stacks=""
+    for sj in "$HARNESS_ROOT"/stacks/*/stack.json; do
+      [[ -f "$sj" ]] || continue
+      all_stacks+="$(basename "$(dirname "$sj")") "
+    done
+    skipped=""
+    for s in $all_stacks; do
+      [[ "$KIT_STACKS" == "*" || " $KIT_STACKS " == *" $s "* ]] || skipped+="$s "
+    done
+    [[ -n "$skipped" ]] && info "host deps SKIP stack(s): ${skipped% } (не выбраны в .kit.json)"
   fi
 
   # 7. ps1 encoding hygiene (BOM-less ps1 must be ASCII: PS 5.1 ParserError guard)
@@ -160,107 +191,22 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     bad "non-ASCII in BOM-less *.ps1 under $HARNESS_REL - PS 5.1 ParserError risk (check-ps1-ascii)"
   fi
 
-  # 8. file fallbacks (hardlink then copy when no symlink privilege). In sync is
-  #    fine; drift/orphans are visible via manifest + hash (no longer prune blind).
-  #    If symlink privilege has appeared (Developer Mode), hint the upgrade.
-  kit_symlink_possible() {
-    local d t l
-    d="$(mktemp -d)"
-    t="$d/t"; l="$d/l"
-    printf 'probe' > "$t"
-    if ln -s "$t" "$l" 2>/dev/null; then rm -rf "$d"; return 0; fi
-    rm -rf "$d"
-    return 1
-  }
-  _sha256() {
-    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-    else shasum -a 256 "$1" | awk '{print $1}'; fi
-  }
-  declare -A recorded=() pair_rels=()
-  manifest="$SYNC_DIR/kit-fallback.txt"
-  if [[ -f "$manifest" ]]; then
-    while IFS=$'\t' read -r r s h || [[ -n "$r" ]]; do
-      [[ -z "$r" || "$r" == \#* ]] && continue
-      [[ -n "$h" ]] && recorded["$r"]="$s|$h"
-    done < "$manifest"
-  fi
-  declare -A overlay_local=() tools_local=()
-  kit_load_manifest "$SYNC_DIR/local-overlay.txt" overlay_local
-  kit_load_manifest "$SYNC_DIR/local-tools.txt" tools_local
-  stale=""
-  in_sync=0
-  links=0
-  hardlinks=0
-  copies=0
-  file_link_kind() { # echo symlink|hardlink|copy
-    local f="$1" n
-    if [[ -L "$f" ]]; then echo symlink; return; fi
-    n="$(stat -c %h "$f" 2>/dev/null || echo 1)"
-    if [[ "$n" =~ ^[0-9]+$ && "$n" -gt 1 ]]; then echo hardlink; else echo copy; fi
-  }
-  check_fallback() { # $1=rel $2=src
-    local rel="$1" src="$2" dst="$CONSUMER_ROOT/$1" kind
-    pair_rels["$rel"]=1
-    if [[ ! -e "$dst" ]]; then
-      stale+="$rel (fallback missing - run bootstrap-kit)"$'\n'; return
-    fi
-    kind="$(file_link_kind "$dst")"
-    if [[ "$kind" == "symlink" ]]; then
-      links=$((links + 1)); return
-    fi
-    if [[ -f "$src" ]] && cmp -s "$dst" "$src"; then
-      in_sync=$((in_sync + 1))
-      case "$kind" in
-        hardlink) hardlinks=$((hardlinks + 1)) ;;
-        *) copies=$((copies + 1)) ;;
-      esac
-      return
-    fi
-    stale+="$rel (content differs from kit - run bootstrap-kit)"$'\n'
-  }
-  for sub in rules commands; do
-    src="$HARNESS_ROOT/cursor/$sub"
-    [[ -d "$src" ]] || continue
-    for f in "$src"/*; do
-      [[ -f "$f" ]] || continue
-      name="$(basename "$f")"
-      [[ -n "${overlay_local[$name]:-}" ]] && continue
-      check_fallback ".cursor/$sub/$name" "$f"
-    done
-  done
-  if [[ -z "${tools_local[git-partial-stage.py]:-}" && -f "$HARNESS_ROOT/tools/git-partial-stage.py" ]]; then
-    check_fallback "tools/git-partial-stage.py" "$HARNESS_ROOT/tools/git-partial-stage.py"
-  fi
-  for rel in "${!recorded[@]}"; do
-    [[ -n "${pair_rels[$rel]:-}" ]] && continue
-    dst="$CONSUMER_ROOT/$rel"
-    [[ -e "$dst" && ! -L "$dst" ]] || continue
-    src="$CONSUMER_ROOT/${recorded[$rel]%%|*}"
-    [[ -e "$src" ]] && continue
-    if [[ "$(_sha256 "$dst")" == "${recorded[$rel]##*|}" ]]; then
-      stale+="$rel (orphan: source removed upstream - bootstrap-kit will prune)"$'\n'
-    else
-      stale+="$rel (orphan with local edits - kept)"$'\n'
-    fi
-  done
-  if [[ -n "$stale" ]]; then
-    n="$(grep -c . <<<"$stale")"
-    warn "$n file fallback(s) out of sync:"
-    grep . <<<"$stale" | sed 's/^/       /'
-  elif [[ "$links" -eq 0 && "$in_sync" -eq 0 ]]; then
-    ok "no file fallback kit paths"
-  elif [[ "$in_sync" -gt 0 ]] && kit_symlink_possible; then
-    warn "$in_sync in-sync file fallback(s) are not links ($hardlinks hardlink(s), $copies copy(ies); $links link(s)) - run bootstrap-kit to upgrade"
-  else
-    ok "$links link(s), $hardlinks hardlink(s), $copies copy(ies) in sync"
-  fi
+  # 8. (удалён) — drift фолбэков теперь показывает engine plan (check 5+8)
+  #    и verify (check 4); orphan'ы отвечает orphan-sweep в apply.
 
-  # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only)
-  PY="$(command -v python || command -v python3 || true)"
+  # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only).
+  #    Пути: core/cursor/skills + stacks/*/cursor/skills + stacks/*/skills.
   if [[ -n "$PY" && -f "$HARNESS_ROOT/tools/skill-frontmatter/skill-frontmatter.py" ]]; then
     sflog="$(mktemp)"
-    if "$PY" "$HARNESS_ROOT/tools/skill-frontmatter/skill-frontmatter.py" lint \
-         "$HARNESS_ROOT/skills" "$HARNESS_ROOT/cursor/skills" >"$sflog" 2>&1; then
+    sf_dirs=()
+    [[ -d "$HARNESS_ROOT/core/cursor/skills" ]] && sf_dirs+=("$HARNESS_ROOT/core/cursor/skills")
+    for d in "$HARNESS_ROOT"/stacks/*/cursor/skills "$HARNESS_ROOT"/stacks/*/skills; do
+      [[ -d "$d" ]] && sf_dirs+=("$d")
+    done
+    if [[ ${#sf_dirs[@]} -eq 0 ]]; then
+      info "skill frontmatter: no skill dirs found"
+    elif "$PY" "$HARNESS_ROOT/tools/skill-frontmatter/skill-frontmatter.py" lint \
+         "${sf_dirs[@]}" >"$sflog" 2>&1; then
       ok "skill frontmatter"
     else
       warn "skill frontmatter issues (fix: python harness/tools/skill-frontmatter/skill-frontmatter.py fix ...):"

@@ -8,7 +8,7 @@
 # Первый раз — в корне kit-репо
 git clone https://github.com/Nikolay-Shirokov/cc-1c-skills.git tools/cc-1c-skills
 
-# Sync upstream → skills/cc-1c/
+# Sync upstream → stacks/1c/skills/
 python tools/cc-1c-skills-sync/sync.py
 
 # План без записи
@@ -16,17 +16,17 @@ python tools/cc-1c-skills-sync/sync.py --dry-run
 ```
 
 После sync: commit kit → push → bump gitlink `harness/` у потребителей →
-`scripts/link-cc-1c-skills` у потребителя.
+`scripts/bootstrap-kit` (engine) или legacy `link-cc-1c-skills` у потребителя.
 
 ## Политика
 
 | Тема | Решение |
 | --- | --- |
-| Target | `skills/cc-1c/` (в git kit) |
+| Target | `stacks/1c/skills/` (в git kit) |
 | Исключены | `db-load-*`, `db-update`, `db-dump-dt`, `web-test` (срез 1) |
 | meta-* | После sync — `apply-meta-xml-patches.py` (overlay в `overlays/`) |
 | Sandbox в SKILL.md | `bash tools/sandbox/run.sh python` (потребительский sandbox) |
-| Потребитель | junction `.cursor/skills/<name>` → `harness/skills/cc-1c/<name>` |
+| Потребитель | junction `.cursor/skills/<name>` → `harness/stacks/1c/skills/<name>` |
 
 ## meta-* overlay
 

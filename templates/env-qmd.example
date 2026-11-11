@@ -1,5 +1,5 @@
 # QMD client (kit). Скопировать в .env.example / .env потребителя.
-# Канон агента: harness/docs/ai/qmd-search.md
+# Канон агента: harness/core/docs/ai/qmd-search.md
 #
 # off  — не звать qmd CLI, не ждать MCP; только rg/Grep
 # cli  — локальный бинарник `qmd` в PATH

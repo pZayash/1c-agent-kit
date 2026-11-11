@@ -1,7 +1,9 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Link harness/cursor overlay into consumer .cursor/ (skills = /J, rules/commands = file mklink).
+  Link harness/{core,stacks/<s>}/cursor overlay into consumer .cursor/
+  (skills = /J, rules/commands = file mklink). Stack sources only when the
+  stack is selected (.kit.json); without it - legacy (everything).
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -91,55 +93,69 @@ function New-FileLink([string]$link, [string]$target, [string]$name, [string]$re
 }
 
 $root = (Resolve-Path $ConsumerRoot).Path
-$overlay = Join-Path (Join-Path $root $HarnessRel) "cursor"
-if (-not (Test-Path $overlay)) { throw "overlay not found: $overlay" }
+if (-not $LocalManifest) { $LocalManifest = Get-KitLocalManifest $root "overlay" }
+
+# Sources: core always; stacks by selection (config via print-config only).
+$overlays = @(@{ path = (Join-Path $root "$HarnessRel\core\cursor"); rel = "$HarnessRel/core/cursor" })
+if (Test-KitStackSelected $root "1c" $HarnessRel) {
+    $overlays += @{ path = (Join-Path $root "$HarnessRel\stacks\1c\cursor"); rel = "$HarnessRel/stacks/1c/cursor" }
+}
+$found = $false
+foreach ($ov in $overlays) { if (Test-Path $ov.path) { $found = $true; break } }
+if (-not $found) { throw "overlay not found: $($overlays.path -join ', ')" }
 
 $local = Read-LocalNames $LocalManifest
 $cursor = Join-Path $root ".cursor"
 $script:FallbackMap = Read-KitFallbackManifest $root
 $script:ManagedPaths = New-Object System.Collections.Generic.List[string]
 
-$skillsSrc = Join-Path $overlay "skills"
-if (Test-Path $skillsSrc) {
-    $skillsDst = Join-Path $cursor "skills"
-    if (-not (Test-Path $skillsDst)) { New-Item -ItemType Directory -Path $skillsDst -Force | Out-Null }
-    Get-ChildItem -LiteralPath $skillsSrc -Directory | ForEach-Object {
-        if ($local.ContainsKey($_.Name)) {
-            Write-Host "SKIP LOCAL: $($_.Name)"
-            return
-        }
-        New-DirJunction (Join-Path $skillsDst $_.Name) $_.FullName $_.Name
-        [void]$script:ManagedPaths.Add(".cursor/skills/$($_.Name)")
-    }
-    Remove-KitStaleLinks -LinkRoot $skillsDst -KitSource $skillsSrc -Local $local -DryRun:$DryRun
-}
+foreach ($ov in $overlays) {
+    $overlay = $ov.path
+    $ovRel = $ov.rel
+    if (-not (Test-Path $overlay)) { continue }
 
-$rulesSrc = Join-Path $overlay "rules"
-if (Test-Path $rulesSrc) {
-    $rulesDst = Join-Path $cursor "rules"
-    Get-ChildItem -LiteralPath $rulesSrc -File | ForEach-Object {
-        if ($local.ContainsKey($_.Name)) {
-            Write-Host "SKIP LOCAL: $($_.Name)"
-            return
+    $skillsSrc = Join-Path $overlay "skills"
+    if (Test-Path $skillsSrc) {
+        $skillsDst = Join-Path $cursor "skills"
+        if (-not (Test-Path $skillsDst)) { New-Item -ItemType Directory -Path $skillsDst -Force | Out-Null }
+        Get-ChildItem -LiteralPath $skillsSrc -Directory | ForEach-Object {
+            if ($local.ContainsKey($_.Name)) {
+                Write-Host "SKIP LOCAL: $($_.Name)"
+                return
+            }
+            New-DirJunction (Join-Path $skillsDst $_.Name) $_.FullName $_.Name
+            [void]$script:ManagedPaths.Add(".cursor/skills/$($_.Name)")
         }
-        New-FileLink (Join-Path $rulesDst $_.Name) $_.FullName $_.Name ".cursor/rules/$($_.Name)" "$HarnessRel/cursor/rules/$($_.Name)"
-        [void]$script:ManagedPaths.Add(".cursor/rules/$($_.Name)")
+        Remove-KitStaleLinks -LinkRoot $skillsDst -KitSource $skillsSrc -Local $local -DryRun:$DryRun
     }
-    Remove-KitStaleLinks -LinkRoot $rulesDst -KitSource $rulesSrc -Local $local -DryRun:$DryRun
-}
 
-$cmdSrc = Join-Path $overlay "commands"
-if (Test-Path $cmdSrc) {
-    $cmdDst = Join-Path $cursor "commands"
-    Get-ChildItem -LiteralPath $cmdSrc -File | ForEach-Object {
-        if ($local.ContainsKey($_.Name)) {
-            Write-Host "SKIP LOCAL: $($_.Name)"
-            return
+    $rulesSrc = Join-Path $overlay "rules"
+    if (Test-Path $rulesSrc) {
+        $rulesDst = Join-Path $cursor "rules"
+        Get-ChildItem -LiteralPath $rulesSrc -File | ForEach-Object {
+            if ($local.ContainsKey($_.Name)) {
+                Write-Host "SKIP LOCAL: $($_.Name)"
+                return
+            }
+            New-FileLink (Join-Path $rulesDst $_.Name) $_.FullName $_.Name ".cursor/rules/$($_.Name)" "$ovRel/rules/$($_.Name)"
+            [void]$script:ManagedPaths.Add(".cursor/rules/$($_.Name)")
         }
-        New-FileLink (Join-Path $cmdDst $_.Name) $_.FullName $_.Name ".cursor/commands/$($_.Name)" "$HarnessRel/cursor/commands/$($_.Name)"
-        [void]$script:ManagedPaths.Add(".cursor/commands/$($_.Name)")
+        Remove-KitStaleLinks -LinkRoot $rulesDst -KitSource $rulesSrc -Local $local -DryRun:$DryRun
     }
-    Remove-KitStaleLinks -LinkRoot $cmdDst -KitSource $cmdSrc -Local $local -DryRun:$DryRun
+
+    $cmdSrc = Join-Path $overlay "commands"
+    if (Test-Path $cmdSrc) {
+        $cmdDst = Join-Path $cursor "commands"
+        Get-ChildItem -LiteralPath $cmdSrc -File | ForEach-Object {
+            if ($local.ContainsKey($_.Name)) {
+                Write-Host "SKIP LOCAL: $($_.Name)"
+                return
+            }
+            New-FileLink (Join-Path $cmdDst $_.Name) $_.FullName $_.Name ".cursor/commands/$($_.Name)" "$ovRel/commands/$($_.Name)"
+            [void]$script:ManagedPaths.Add(".cursor/commands/$($_.Name)")
+        }
+        Remove-KitStaleLinks -LinkRoot $cmdDst -KitSource $cmdSrc -Local $local -DryRun:$DryRun
+    }
 }
 
 Remove-KitStaleFallback -Root $root -Map $script:FallbackMap -Prefix ".cursor/" -DryRun:$DryRun

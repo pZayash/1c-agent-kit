@@ -1,8 +1,9 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Junction consumer tools/<name> -> harness/tools/<name> (Windows mklink /J).
-  File link for git-partial-stage.py.
+  Junction consumer tools/<name> -> harness/{core,stacks/<s>}/tools/<name>
+  (Windows mklink /J). File link for git-partial-stage.py.
+  Stack sources only when the stack is selected (.kit.json); without it - legacy.
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -10,8 +11,7 @@ param(
 
     [string]$HarnessRel = "harness",
 
-    [Parameter(Mandatory = $true)]
-    [string]$LocalManifest,
+    [string]$LocalManifest = "",
 
     [switch]$DryRun,
 
@@ -93,27 +93,40 @@ function New-FileLink([string]$link, [string]$target, [string]$name, [string]$re
 }
 
 $root = (Resolve-Path $ConsumerRoot).Path
-$kitTools = Join-Path (Join-Path $root $HarnessRel) "tools"
+if (-not $LocalManifest) { $LocalManifest = Get-KitLocalManifest $root "tools" }
 $consumerTools = Join-Path $root "tools"
-
-if (-not (Test-Path $kitTools)) {
-    throw "Kit tools not found: $kitTools (init submodule?)"
-}
 if (-not (Test-Path $consumerTools)) {
     New-Item -ItemType Directory -Path $consumerTools -Force | Out-Null
+}
+
+# name@srcdir pairs: core for everyone; stacks by selection (config via
+# print-config only); docs-links is a legacy kit-internal extra.
+$coreTools = Join-Path $root "$HarnessRel\core\tools"
+$tools1c = Join-Path $root "$HarnessRel\stacks\1c\tools"
+$kitTools = Join-Path $root "$HarnessRel\tools"
+$linkable = @(
+    @{ name = "sandbox"; src = $coreTools },
+    @{ name = "docs-links"; src = $kitTools }
+)
+if (Test-KitStackSelected $root "1c" $HarnessRel) {
+    foreach ($n in @("bsl-check", "load-changed-files", "mcp-call", "answer42", "rights-xml-lint")) {
+        $linkable += @{ name = $n; src = $tools1c }
+    }
 }
 
 $local = Read-LocalNames $LocalManifest
 $script:FallbackMap = Read-KitFallbackManifest $root
 $script:ManagedPaths = New-Object System.Collections.Generic.List[string]
-$dirNames = @("bsl-check", "sandbox", "load-changed-files", "mcp-call", "answer42", "rights-xml-lint", "docs-links")
+$srcDirs = @{}
 
-foreach ($name in $dirNames) {
+foreach ($e in $linkable) {
+    $name = $e.name
+    $srcDirs[$e.src] = $true
     if ($local.ContainsKey($name)) {
         Write-Host "SKIP LOCAL: $name"
         continue
     }
-    $target = Join-Path $kitTools $name
+    $target = Join-Path $e.src $name
     if (-not (Test-Path $target)) {
         Write-Host "SKIP missing in kit: $name"
         continue
@@ -123,15 +136,17 @@ foreach ($name in $dirNames) {
 }
 
 if (-not $local.ContainsKey("git-partial-stage.py")) {
-    $pyTarget = Join-Path $kitTools "git-partial-stage.py"
+    $pyTarget = Join-Path $coreTools "git-partial-stage.py"
     if (Test-Path $pyTarget) {
-        New-FileLink (Join-Path $consumerTools "git-partial-stage.py") $pyTarget "git-partial-stage.py" "tools/git-partial-stage.py" "$HarnessRel/tools/git-partial-stage.py"
+        New-FileLink (Join-Path $consumerTools "git-partial-stage.py") $pyTarget "git-partial-stage.py" "tools/git-partial-stage.py" "$HarnessRel/core/tools/git-partial-stage.py"
         [void]$script:ManagedPaths.Add("tools/git-partial-stage.py")
     }
 }
 
-# Prune kit-owned links whose tool vanished upstream (tombstones).
-Remove-KitStaleLinks -LinkRoot $consumerTools -KitSource $kitTools -Local $local -DryRun:$DryRun
+# Prune kit-owned links whose tool vanished upstream (tombstones), per source.
+foreach ($src in $srcDirs.Keys) {
+    Remove-KitStaleLinks -LinkRoot $consumerTools -KitSource $src -Local $local -DryRun:$DryRun
+}
 
 Remove-KitStaleFallback -Root $root -Map $script:FallbackMap -Prefix "tools/" -DryRun:$DryRun
 if (-not $DryRun) {

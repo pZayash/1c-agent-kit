@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for kit-layout namespace guards.
+"""Regression tests for kit-layout namespace guards and stack filtering.
 
 Run:  python tools/kit-layout/test_kit_layout.py
 
@@ -7,9 +7,12 @@ Covers the FOREIGN-NS trap: links created in one namespace (or before the
 consumer tree was moved) must make plan/apply fail loudly (exit 2) and verify
 FAIL, instead of a silent no-op plus a green verify. Also exercises the
 _link-common.sh scan/compare helpers (no status leak under `set -euo
-pipefail`, symlinked consumer root is one namespace).
+pipefail`, symlinked consumer root is one namespace), .kit.json validation,
+stack filtering and the stateless orphan-sweep.
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -18,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent
@@ -250,6 +254,406 @@ def build_consumer(root):
     src.mkdir(parents=True)
     (src / 'a.mdc').write_text('rule-a\n', encoding='utf-8')
     (src / 'b.mdc').write_text('rule-b\n', encoding='utf-8')
+
+
+# ── .kit.json / stacks / orphan-sweep ─────────────────────────────
+
+STACKED_LAYOUT = {
+    'gitignore': False,
+    'fallback_manifest': '.kit/fallback.txt',
+    'resources': [
+        {'id': 'core-skills', 'kind': 'child-dirs',
+         'source': 'harness/core/cursor/skills', 'target': '.cursor/skills',
+         'local_manifest': '.kit/local-skills.txt'},
+        {'id': 'skills-1c', 'kind': 'child-dirs',
+         'source': 'harness/stacks/1c/cursor/skills',
+         'target': '.cursor/skills',
+         'local_manifest': '.kit/local-skills.txt', 'stacks': ['1c']},
+    ],
+}
+
+
+def build_stacked_consumer(root):
+    """Fake kit: two core skills, two 1c skills, stack registry."""
+    for name in ('explore', 'handoff'):
+        d = root / 'harness' / 'core' / 'cursor' / 'skills' / name
+        d.mkdir(parents=True)
+        (d / 'SKILL.md').write_text(f'core {name}\n', encoding='utf-8')
+    for name in ('bsl-check', 'query-rule'):
+        d = root / 'harness' / 'stacks' / '1c' / 'cursor' / 'skills' / name
+        d.mkdir(parents=True)
+        (d / 'SKILL.md').write_text(f'1c {name}\n', encoding='utf-8')
+    (root / 'harness' / 'stacks' / '1c' / 'stack.json').write_text(
+        '{"id": "1c"}', encoding='utf-8')
+
+
+def write_kit_json(root, obj):
+    (root / '.kit.json').write_text(
+        json.dumps(obj) if not isinstance(obj, str) else obj,
+        encoding='utf-8')
+
+
+def dir_link(case, target, link):
+    """Junction/symlink via the engine's own primitive (dangling targets
+    are allowed - a link may outlive its source)."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        kl.make_dir_link(Path(target), Path(link))
+    except OSError as e:
+        case.skipTest(f'dir links not available: {e}')
+
+
+class StackConfigTest(unittest.TestCase):
+    """kit-stacks-layout 2.x: .kit.json load/validate + resource filter."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-stacks-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build_stacked_consumer(self.tmp)
+        (self.tmp / 'layout.json').write_text(
+            json.dumps(STACKED_LAYOUT), encoding='utf-8')
+        self._env = mock.patch.dict(os.environ)
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        os.environ.pop('KIT_LEGACY', None)
+
+    def args(self, command, *extra):
+        return [command, str(self.tmp), '--layout',
+                str(self.tmp / 'layout.json'), '--no-gitignore',
+                '--no-untrack', *extra]
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = kl.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def linked(self, name):
+        return kl.is_link(self.tmp / '.cursor' / 'skills' / name)
+
+    def test_stacks_1c_links_everything(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        for name in ('explore', 'handoff', 'bsl-check', 'query-rule'):
+            self.assertTrue(self.linked(name), name)
+
+    def test_stacks_empty_filters_1c(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.linked('explore'))
+        self.assertFalse(self.linked('bsl-check'))
+        self.assertFalse(self.linked('query-rule'))
+
+    def test_missing_kit_json_is_core_only(self):
+        rc, out, err = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('.kit.json', err)
+        self.assertTrue(self.linked('explore'))
+        self.assertFalse(self.linked('bsl-check'))
+
+    def test_kit_legacy_overrides_file(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        os.environ['KIT_LEGACY'] = '1'
+        rc, out, err = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('KIT_LEGACY', err)
+        self.assertTrue(self.linked('bsl-check'))
+
+    def test_star_in_file_is_rejected(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['*']})
+        rc, _, err = self.call(*self.args('apply'))
+        self.assertEqual(rc, 2)
+        self.assertIn('"*"', err)
+
+    def test_unknown_stack_fails_without_mutations(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['9x']})
+        rc, _, err = self.call(*self.args('apply'))
+        self.assertEqual(rc, 2)
+        self.assertIn('unknown stack', err)
+        self.assertFalse((self.tmp / '.cursor' / 'skills').exists())
+
+    def test_broken_json_fails_without_mutations(self):
+        write_kit_json(self.tmp, '{broken')
+        rc, _, err = self.call(*self.args('apply'))
+        self.assertEqual(rc, 2)
+        self.assertIn('JSON', err)
+        self.assertFalse((self.tmp / '.cursor' / 'skills').exists())
+
+    def test_bad_types_fail_without_mutations(self):
+        for cfg in ({'version': '1', 'stacks': []},
+                    {'version': 1, 'stacks': 'all'},
+                    {'version': 1},
+                    {'version': 1, 'stacks': ['1c', '1c']},
+                    {'version': 1, 'stacks': [''], 'sparse': 'yes'},
+                    {'version': 2, 'stacks': []}):
+            write_kit_json(self.tmp, cfg)
+            rc, _, err = self.call(*self.args('apply'))
+            self.assertEqual(rc, 2, cfg)
+            self.assertIn('ERROR', err)
+            self.assertFalse((self.tmp / '.cursor' / 'skills').exists(), cfg)
+
+    def test_all_stacks_bypasses_filter(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        rc, out, _ = self.call(*self.args('plan', '--all-stacks'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('bsl-check', out)
+
+
+class OrphanSweepTest(unittest.TestCase):
+    """Stateless orphan-sweep: dropped stacks/paths are cleaned up."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-sweep-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build_stacked_consumer(self.tmp)
+        (self.tmp / 'layout.json').write_text(
+            json.dumps(STACKED_LAYOUT), encoding='utf-8')
+        self._env = mock.patch.dict(os.environ)
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        os.environ.pop('KIT_LEGACY', None)
+
+    def args(self, command, *extra):
+        return [command, str(self.tmp), '--layout',
+                str(self.tmp / 'layout.json'), '--no-gitignore',
+                '--no-untrack', *extra]
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = kl.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def linked(self, name):
+        return kl.is_link(self.tmp / '.cursor' / 'skills' / name)
+
+    def test_stack_removed_sweeps_links_keeps_core(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        rc, _, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.linked('bsl-check'))
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        rc, out, _ = self.call(*self.args('plan'))
+        self.assertIn('WOULD REMOVE', out)
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('removed 2 link(s)', out)
+        self.assertFalse(self.linked('bsl-check'))
+        self.assertFalse(self.linked('query-rule'))
+        self.assertTrue(self.linked('explore'))
+        self.assertTrue(self.linked('handoff'))
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertEqual(rc, 0, out)
+
+    def test_first_apply_removes_legacy_links(self):
+        # Old layout linked into harness/cursor/skills/<x>; the path is
+        # gone after git mv but the raw readlink string still points into
+        # the kit -> orphan even without any .kit/ state.
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        dead = self.tmp / '.cursor' / 'skills' / 'gone-skill'
+        dir_link(self, self.tmp / 'harness' / 'cursor' / 'skills' / 'gone-skill',
+                 dead)
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(kl.is_link(dead))
+        self.assertIn('removed 1 link(s)', out)
+
+    def test_local_manifest_name_survives_sweep(self):
+        (self.tmp / '.kit').mkdir()
+        (self.tmp / '.kit' / 'local-skills.txt').write_text(
+            'my-skill\n', encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        mine = self.tmp / '.cursor' / 'skills' / 'my-skill'
+        dir_link(self, self.tmp / 'harness' / 'legacy' / 'my-skill', mine)
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.linked('my-skill'))
+
+    def test_legacy_local_manifest_is_read(self):
+        # Old location still protects consumer overrides on first apply.
+        legacy = self.tmp / 'tools' / 'cc-1c-skills-sync'
+        legacy.mkdir(parents=True)
+        (legacy / 'local-skills.txt').write_text('explore\n',
+                                                encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        own = self.tmp / '.cursor' / 'skills' / 'explore'
+        own.mkdir(parents=True)
+        (own / 'SKILL.md').write_text('consumer override\n',
+                                     encoding='utf-8')
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('SKIP LOCAL: explore', out)
+        self.assertTrue(own.is_dir() and not kl.is_link(own))
+
+    def test_foreign_ns_orphan_warned_not_removed(self):
+        # Target outside the consumer root = foreign namespace (another
+        # checkout's layout seen from here): WARN, never deleted.
+        outside = Path(tempfile.mkdtemp(prefix='kit-outside-')) / 'target'
+        self.addCleanup(shutil.rmtree, outside.parent, ignore_errors=True)
+        outside.mkdir()
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        link = self.tmp / '.cursor' / 'skills' / 'ext-skill'
+        dir_link(self, outside, link)
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('unmanaged orphan', out)
+        self.assertTrue(kl.is_link(link))
+
+    def test_pristine_orphan_fallback_removed(self):
+        fb = self.tmp / 'tools' / 'copy.txt'
+        fb.parent.mkdir(parents=True)
+        fb.write_text('kit copy\n', encoding='utf-8')
+        sha = kl.hash_file(fb)
+        (self.tmp / '.kit').mkdir()
+        (self.tmp / '.kit' / 'fallback.txt').write_text(
+            f'tools/copy.txt\tharness/tools/copy.txt\t{sha}\n',
+            encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('REMOVE orphan fallback', out)
+        self.assertFalse(fb.exists())
+        manifest = (self.tmp / '.kit' / 'fallback.txt').read_text(
+            encoding='utf-8')
+        self.assertNotIn('copy.txt', manifest)
+
+    def test_edited_orphan_fallback_warned_and_kept(self):
+        fb = self.tmp / 'tools' / 'copy.txt'
+        fb.parent.mkdir(parents=True)
+        fb.write_text('original\n', encoding='utf-8')
+        sha = kl.hash_file(fb)
+        fb.write_text('consumer edited\n', encoding='utf-8')
+        (self.tmp / '.kit').mkdir()
+        (self.tmp / '.kit' / 'fallback.txt').write_text(
+            f'tools/copy.txt\tharness/tools/copy.txt\t{sha}\n',
+            encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('local edits, kept', out)
+        self.assertEqual(fb.read_text(encoding='utf-8'), 'consumer edited\n')
+        manifest = (self.tmp / '.kit' / 'fallback.txt').read_text(
+            encoding='utf-8')
+        self.assertIn('tools/copy.txt', manifest)
+
+    def test_legacy_fallback_manifest_is_read(self):
+        fb = self.tmp / 'tools' / 'copy.txt'
+        fb.parent.mkdir(parents=True)
+        fb.write_text('kit copy\n', encoding='utf-8')
+        sha = kl.hash_file(fb)
+        legacy = self.tmp / 'tools' / 'cc-1c-skills-sync'
+        legacy.mkdir(parents=True)
+        (legacy / 'kit-fallback.txt').write_text(
+            f'tools/copy.txt\tharness/tools/copy.txt\t{sha}\n',
+            encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(fb.exists())
+        self.assertTrue((self.tmp / '.kit' / 'fallback.txt').is_file())
+
+    def test_verify_warns_about_orphans(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        link = self.tmp / '.cursor' / 'skills' / 'stale'
+        dir_link(self, self.tmp / 'harness' / 'stacks' / '1c' / 'cursor'
+                 / 'skills' / 'bsl-check', link)
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        dir_link(self, self.tmp / 'harness' / 'stacks' / '1c' / 'cursor'
+                 / 'skills' / 'bsl-check', link)
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertIn('orphan kit link', out)
+
+
+class PrintConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-pconf-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build_stacked_consumer(self.tmp)
+        (self.tmp / 'layout.json').write_text(
+            json.dumps(STACKED_LAYOUT), encoding='utf-8')
+        self._env = mock.patch.dict(os.environ)
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        os.environ.pop('KIT_LEGACY', None)
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = kl.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def args(self, *extra):
+        return ['print-config', str(self.tmp), '--layout',
+                str(self.tmp / 'layout.json'), *extra]
+
+    def test_print_config_json(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c'],
+                                  'source_root': 'src/', 'sparse': True})
+        rc, out, _ = self.call(*self.args('--json'))
+        self.assertEqual(rc, 0)
+        cfg = json.loads(out)
+        self.assertEqual(cfg['stacks'], ['1c'])
+        self.assertEqual(cfg['stacks_source'], 'file')
+        self.assertEqual(cfg['source_root'], 'src/')
+        self.assertEqual(cfg['source_root_source'], 'file')
+        self.assertTrue(cfg['sparse'])
+
+    def test_source_root_env_fallback(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        (self.tmp / '.env').write_text('CONFIG_PATH=cfg-src\n',
+                                       encoding='utf-8')
+        rc, out, _ = self.call(*self.args('--json'))
+        cfg = json.loads(out)
+        self.assertEqual(cfg['source_root'], 'cfg-src')
+        self.assertEqual(cfg['source_root_source'], 'env')
+
+    def test_source_root_default(self):
+        rc, out, _ = self.call(*self.args('--json'))
+        cfg = json.loads(out)
+        self.assertEqual(cfg['source_root'], 'conf/')
+        self.assertEqual(cfg['source_root_source'], 'default')
+
+
+class ResolveSourceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-resolve-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build_stacked_consumer(self.tmp)
+        (self.tmp / 'layout.json').write_text(
+            json.dumps(STACKED_LAYOUT), encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': ['1c']})
+        self._env = mock.patch.dict(os.environ)
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        os.environ.pop('KIT_LEGACY', None)
+
+    def call(self, rel):
+        out, err = io.StringIO(), io.StringIO()
+        argv = ['resolve-source', rel, '--root', str(self.tmp),
+                '--layout', str(self.tmp / 'layout.json')]
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = kl.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_core_skill(self):
+        rc, out, _ = self.call('.cursor/skills/explore/SKILL.md')
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(),
+                         'harness/core/cursor/skills/explore/SKILL.md')
+
+    def test_stack_skill(self):
+        rc, out, _ = self.call('.cursor/skills/bsl-check')
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(),
+                         'harness/stacks/1c/cursor/skills/bsl-check')
+
+    def test_unmanaged_path_fails(self):
+        rc, _, err = self.call('docs/readme.md')
+        self.assertEqual(rc, 2)
+        self.assertIn('no kit source', err)
 
 
 if __name__ == '__main__':

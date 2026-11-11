@@ -1,15 +1,15 @@
 # Документация проекта
 
 Правила папок, оглавлений и куда писать:
-[harness/docs/ai/docs-layout.md](../harness/docs/ai/docs-layout.md).
+[harness/core/docs/ai/docs-layout.md](../harness/core/docs/ai/docs-layout.md).
 
 Проект использует progressive disclosure: `AGENTS.md` — минимум,
 детали — по ссылкам.
 
 ## docs/ai — агенты
 
-Общее — в kit (`harness/docs/ai/`). Здесь — addenda потребителя и заглушки
-на старые пути. Срез kit: [harness/docs/ai/README.md](../harness/docs/ai/README.md).
+Общее — в kit (`harness/core/docs/ai/` + `harness/stacks/*/docs/ai/`). Здесь — addenda потребителя и заглушки
+на старые пути. Срез kit: [harness/core/docs/ai/README.md](../harness/core/docs/ai/README.md).
 
 Дополнить список своих файлов (печать, MCP, …):
 
@@ -21,12 +21,12 @@
 
 ## docs/adr
 
-Лениво. Формат: [ADR-FORMAT.md](../harness/docs/ai/ADR-FORMAT.md).
+Лениво. Формат: [ADR-FORMAT.md](../harness/core/docs/ai/ADR-FORMAT.md).
 Индекс: [adr/README.md](adr/README.md).
 
 ## docs/analytics
 
-Лениво. Формат: [ANALYTICS-FORMAT.md](../harness/docs/ai/ANALYTICS-FORMAT.md).
+Лениво. Формат: [ANALYTICS-FORMAT.md](../harness/core/docs/ai/ANALYTICS-FORMAT.md).
 
 ## Корень
 

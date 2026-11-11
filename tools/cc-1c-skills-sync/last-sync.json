@@ -4,7 +4,7 @@
   "upstream_commit": "6169a7ff939aa3c73f7d9799acf693fa3bfd33ed",
   "runtime": "python",
   "sandbox_wrapper": "bash tools/sandbox/run.sh python",
-  "target": "skills/cc-1c",
+  "target": "stacks/1c/skills",
   "skills_synced": [
     "cf-edit",
     "cf-info",

@@ -96,25 +96,92 @@ $common = @{
 }
 if ($DryRun) { $common["DryRun"] = $true }
 
+$py = Get-Command python -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+$kitLayout = Join-Path $harness "tools\kit-layout\kit_layout.py"
+$stack1c = $false
+
 if (-not $LegacyLinks) {
     Write-Host "=== kit-layout (engine) ==="
-    $py = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
     if (-not $py) { throw "kit-layout needs python on PATH (or -LegacyLinks)" }
+    $env:HARNESS_REL = $HarnessRel
+
+    function Test-SparseActive {
+        # PS7 + EAP=Stop: non-zero exit throws before 2>$null applies.
+        try { & git -C $harness sparse-checkout list 2>$null | Out-Null }
+        catch { }
+        return ($LASTEXITCODE -eq 0)
+    }
+
+    # 1) Config: the only .kit.json parser is print-config --json (validates
+    #    before any mutation). A stale sparse pattern may hide the selected
+    #    stack's stack.json -> widen the checkout and retry once.
+    $cfgText = & $py.Source $kitLayout print-config $root --harness-rel $HarnessRel --json
+    if ($LASTEXITCODE -ne 0) {
+        if ((Test-Path (Join-Path $root ".kit.json")) -and (Test-SparseActive)) {
+            Write-Host "WARN: print-config failed under sparse-checkout - widening to /* and retrying"
+            if (-not $DryRun) { & git -C $harness sparse-checkout set --no-cone '/*' }
+            $cfgText = & $py.Source $kitLayout print-config $root --harness-rel $HarnessRel --json
+        }
+        if ($LASTEXITCODE -ne 0) { throw "print-config failed (.kit.json invalid)" }
+    }
+
+    if (-not (Test-Path (Join-Path $root ".kit.json"))) {
+        Write-Host "HINT: no .kit.json - core-only mode (stacks: [])."
+        Write-Host 'HINT: to enable a stack create e.g.:'
+        Write-Host 'HINT:   {"version": 1, "stacks": ["1c"], "source_root": "conf/", "sparse": false}'
+    }
+
+    $cfg = ($cfgText | Out-String) | ConvertFrom-Json
+    $kitStacks = @()
+    if ($null -ne $cfg.stacks) { $kitStacks = @($cfg.stacks) }
+    elseif ($null -ne $cfg.effective_stacks) { $kitStacks = @($cfg.effective_stacks) }
+    $kitSparse = [bool]$cfg.sparse
+
+    # 2) Sparse: positive pattern (works when stacks/* are already hidden;
+    #    stack.json ALWAYS stays in checkout for name validation). "*" under
+    #    KIT_LEGACY needs all files -> disable sparse.
+    if ($kitStacks -contains "*") {
+        if (Test-SparseActive) {
+            Write-Host "WARN: effective stacks = * (KIT_LEGACY) - sparse-checkout disable"
+            if ($DryRun) { Write-Host "WOULD: git -C $HarnessRel sparse-checkout disable" }
+            else { & git -C $harness sparse-checkout disable }
+        }
+    } elseif (Test-Path (Join-Path $root ".kit.json")) {
+        if ($kitSparse) {
+            $pats = @('/*', '!/stacks/*', '/stacks/*/stack.json')
+            foreach ($s in $kitStacks) { $pats += "/stacks/$s/" }
+            if ($DryRun) {
+                Write-Host "WOULD: git -C $HarnessRel sparse-checkout set --no-cone $($pats -join ' ')"
+            } else {
+                & git -C $harness sparse-checkout set --no-cone @pats
+            }
+        } elseif (Test-SparseActive) {
+            if ($DryRun) { Write-Host "WOULD: git -C $HarnessRel sparse-checkout disable" }
+            else { & git -C $harness sparse-checkout disable }
+        }
+    }
+    if ($env:KIT_LEGACY -eq "1" -and $kitSparse) {
+        Write-Host 'WARN: KIT_LEGACY=1 under sparse - mode ["*"] needs all files;'
+        Write-Host "      set `"sparse`": false or run git -C $HarnessRel sparse-checkout disable"
+    }
+
+    # 3) apply
     $lcmd = "apply"
     if ($DryRun) { $lcmd = "plan" }
-    $env:HARNESS_REL = $HarnessRel
-    & $py.Source (Join-Path $harness "tools\kit-layout\kit_layout.py") $lcmd $root
+    & $py.Source $kitLayout $lcmd $root
     if ($LASTEXITCODE -ne 0) { throw "kit-layout $lcmd failed" }
+
+    $stack1c = (($kitStacks -contains "*") -or ($kitStacks -contains "1c"))
 } else {
     Write-Host "=== link-cc-1c-skills ==="
-    & (Join-Path $scripts "link-cc-1c-skills.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-skills.txt")
+    & (Join-Path $scripts "link-cc-1c-skills.ps1") @common -LocalManifest (Get-KitLocalManifest $root "skills")
 
     Write-Host "=== link-cursor-overlay ==="
-    & (Join-Path $scripts "link-cursor-overlay.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-overlay.txt")
+    & (Join-Path $scripts "link-cursor-overlay.ps1") @common -LocalManifest (Get-KitLocalManifest $root "overlay")
 
     Write-Host "=== link-kit-tools ==="
-    & (Join-Path $scripts "link-kit-tools.ps1") @common -LocalManifest (Join-Path $root "tools\cc-1c-skills-sync\local-tools.txt")
+    & (Join-Path $scripts "link-kit-tools.ps1") @common -LocalManifest (Get-KitLocalManifest $root "tools")
 
     Write-Host "=== link-editor-roots ==="
     $editor = @{ ConsumerRoot = $root }
@@ -125,6 +192,8 @@ if (-not $LegacyLinks) {
     $pi = @{ ConsumerRoot = $root; HarnessRel = $HarnessRel }
     if ($DryRun) { $pi["DryRun"] = $true }
     & (Join-Path $scripts "link-pi-roots.ps1") @pi
+
+    $stack1c = $true
 }
 
 $sectionsDir = Join-Path $harness "templates\sections"
@@ -145,28 +214,34 @@ if (-not $SkipSections -and (Test-Path $sectionsDir) -and (Test-Path $agentsMd))
 }
 
 $wrapper = Join-Path $root "load-changed-files.sh"
-$engine = Join-Path $harness "tools\load-changed-files\load-changed-files.sh"
-$thinMarker = "harness/tools/load-changed-files/load-changed-files.sh"
+$engine = Join-Path $harness "stacks\1c\tools\load-changed-files\load-changed-files.sh"
+$thinMarker = "harness/stacks/1c/tools/load-changed-files/load-changed-files.sh"
+$oldThinMarker = "harness/tools/load-changed-files/load-changed-files.sh"
 $thinLines = @(
     '#!/bin/bash',
     '_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
     '# $BASH, not PATH bash: bare bash may resolve to the WSL launcher',
     '# (C:\Windows\system32\bash) - paths and localhost differ in WSL.',
-    'exec "$BASH" "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"'
+    'exec "$BASH" "${_ROOT}/harness/stacks/1c/tools/load-changed-files/load-changed-files.sh" "$@"'
 )
 
-if (Test-Path $engine) {
+# Generate the wrapper only when stack 1c is selected - otherwise core-only
+# consumers would get a 1C script they never asked for.
+if ($stack1c -and (Test-Path $engine)) {
     $writeThin = $false
     if (-not (Test-Path $wrapper)) {
         $writeThin = $true
     } else {
         $text = Get-Content -LiteralPath $wrapper -Raw -ErrorAction SilentlyContinue
-        if ($text -notmatch [regex]::Escape($thinMarker)) {
-            if ($ForceWrapper) {
-                $writeThin = $true
-            } else {
-                Write-Host "WARN: load-changed-files.sh looks fat/legacy; pass -ForceWrapper to replace"
-            }
+        if ($text -match [regex]::Escape($thinMarker)) {
+            $writeThin = $false
+        } elseif ($text -match [regex]::Escape($oldThinMarker)) {
+            Write-Host "upgrade thin load-changed-files.sh wrapper (stacks/1c path)"
+            $writeThin = $true
+        } elseif ($ForceWrapper) {
+            $writeThin = $true
+        } else {
+            Write-Host "WARN: load-changed-files.sh looks fat/legacy; pass -ForceWrapper to replace"
         }
     }
     if ($writeThin) {
@@ -184,8 +259,14 @@ if (Test-Path $engine) {
 }
 
 if (-not $SkipVerify) {
-    Write-Host "=== verify-kit-links ==="
-    & (Join-Path $scripts "verify-kit-links.ps1") -ConsumerRoot $root
+    if ($py -and (Test-Path $kitLayout)) {
+        Write-Host "=== kit_layout verify ==="
+        $env:HARNESS_REL = $HarnessRel
+        & $py.Source $kitLayout verify $root
+        if ($LASTEXITCODE -ne 0) { throw "kit-layout verify failed" }
+    } else {
+        Write-Host "WARN: no python on PATH - verify (kit_layout) skipped"
+    }
 }
 
 if (-not $SkipDeps) {
@@ -193,7 +274,7 @@ if (-not $SkipDeps) {
     $dep = Join-Path $scripts "init-kit-deps.ps1"
     & $psExe -NoProfile -ExecutionPolicy Bypass -File $dep -ConsumerRoot $root
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARN host deps incomplete - harness/docs/ai/kit-host-deps.md (-Install). Links still done."
+        Write-Host "WARN host deps incomplete - harness/core/docs/ai/kit-host-deps.md (-Install). Links still done."
     }
 }
 

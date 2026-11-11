@@ -13,6 +13,31 @@ Resource kinds:
 Resource fields:
   include         allow-list of child names (absent = all children)
   local_manifest  consumer file with names to skip (consumer-owned)
+  stacks          list of stack ids; resource is effective only when the
+                  consumer selected one of them in .kit.json (absent = core)
+
+Consumer config .kit.json (repo root):
+  {"version": 1, "stacks": ["1c"], "source_root": "conf/",
+   "paths": {...}, "sparse": false}
+  Missing file  -> stacks [] (core-only) + WARN.
+  KIT_LEGACY=1  -> stacks ["*"] (all stacks) + WARN; env beats file.
+  print-config --json is the ONLY parser scripts may use.
+
+State files live in .kit/ (tracked dir): fallback.txt + lock are
+engine-owned (gitignored via the managed block); local-*.txt exclusion
+lists are consumer-owned (tracked). Legacy locations
+tools/cc-1c-skills-sync/{kit-fallback,local-*}.txt are still read when
+the new files are absent.
+
+Orphan-sweep (stateless, no applied.txt): apply order is
+  read old fallback manifest -> lay out effective resources -> link ->
+  sweep -> atomic manifest write (tmp + os.replace) -> managed .gitignore.
+A reparse point in a managed target whose readlink string points inside
+ctx.resolve('harness') but whose name is neither expected by the
+effective resources nor listed in local-*.txt is an orphan and is
+removed; foreign-ns targets get WARN unmanaged and are kept. Old-manifest
+fallbacks the run did not re-record: byte-identical (sha match) ->
+removed, locally edited -> WARN + record kept in the new manifest.
 
 Behavior (same vocabulary as the legacy scripts):
   LINK / JUNCTION / FILELINK (symlink) / HARDLINK / COPY fallback when no
@@ -35,12 +60,15 @@ Fallback lifecycle (consumer consequences of "no symlink privilege"):
     index (`git rm --cached`, worktree untouched), verify warns about them.
 
 Commands:
-  plan    [consumer-root]   dry-run of apply, exit 0
-  apply   [consumer-root]
+  plan    [consumer-root]   dry-run of apply, exit 0 (--all-stacks: no filter)
+  apply   [consumer-root]   takes .kit/lock for the mutation window
   verify  [consumer-root]   all expected links exist and are links; exit 1 on FAIL
                             (file copy-fallback = WARN, dir copies = FAIL)
   tracked [consumer-root]   list kit link paths tracked in the consumer index;
                             exit 1 if any (junction traversal on Windows)
+  print-config [consumer-root]  resolved .kit.json view (--json for scripts)
+  resolve-source <consumer-rel-path> [--root .]
+                            reverse layout lookup for promote (kit source path)
 
 Namespace safety:
   A link whose target is outside the consumer root belongs to another
@@ -67,7 +95,13 @@ from pathlib import Path
 
 WIN = sys.platform == 'win32'
 REPARSE_ATTR = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
-FALLBACK_MANIFEST_REL = 'tools/cc-1c-skills-sync/kit-fallback.txt'
+KIT_CONFIG_NAME = '.kit.json'
+KIT_STATE_DIR = '.kit'
+FALLBACK_MANIFEST_REL = KIT_STATE_DIR + '/fallback.txt'
+LOCK_REL = KIT_STATE_DIR + '/lock'
+LEGACY_STATE_DIR = 'tools/cc-1c-skills-sync'
+LEGACY_MANIFEST_REL = LEGACY_STATE_DIR + '/kit-fallback.txt'
+DEFAULT_SOURCE_ROOT = 'conf/'
 GITIGNORE_BEGIN = '# >>> kit-managed: begin (bootstrap-kit) >>>'
 GITIGNORE_END = '# <<< kit-managed: end <<<'
 _FILE_SYMLINK_OK = None  # cached result of file_symlink_available()
@@ -130,10 +164,15 @@ def read_link(path):
         raw = os.readlink(path)
     except OSError:
         return None
-    # Windows returns junction targets with a \\?\ prefix - strip it so
-    # comparisons with normally-resolved paths work.
-    if WIN and raw.startswith('\\\\?\\'):
-        raw = raw[4:]
+    # Junction targets come back with a namespace prefix - \\?\ for
+    # mklink-created ones, Global\ (NT object manager) or \??\ for those
+    # written by MSYS/cygwin tooling. Strip all spellings so comparisons
+    # with normally-resolved paths work.
+    if WIN:
+        for prefix in ('\\\\?\\Global\\', '\\\\?\\', '\\??\\', 'Global\\'):
+            if raw.startswith(prefix):
+                raw = raw[len(prefix):]
+                break
     return raw
 
 
@@ -321,6 +360,7 @@ class Ctx:
         self._inside_seen = set()
         self.manifest_rel = manifest_rel
         self.manifest_path = self.root / manifest_rel
+        self.missing_source = False  # effective resource with absent source
 
     def classify_link(self, link):
         """('inside'|'foreign'|None, raw_target) for a reparse point."""
@@ -352,7 +392,9 @@ class Ctx:
             print(msg)
 
     def resolve(self, rel):
-        if rel.startswith('harness/'):
+        if rel == 'harness':
+            rel = self.harness_rel
+        elif rel.startswith('harness/'):
             rel = self.harness_rel + '/' + rel[len('harness/'):]
         return self.root / rel
 
@@ -377,11 +419,223 @@ class Ctx:
         return result
 
 
+# ── consumer config (.kit.json) ───────────────────────────────────
+
+KNOWN_KIT_KEYS = {'version', 'stacks', 'source_root', 'paths', 'sparse',
+                  'options'}
+
+
+def load_kit_config(root):
+    """Read <root>/.kit.json. Never raises; returns a dict:
+    {version, stacks, source_root, paths, sparse, file, warn, raw}.
+    raw is the parsed JSON (None when the file is absent/broken) -
+    validate_kit_config() decides whether raw is usable.
+    """
+    cfg = {'version': 1, 'stacks': [], 'source_root': None, 'paths': {},
+           'sparse': False, 'file': None, 'warn': [], 'raw': None,
+           'broken': False}
+    p = Path(root) / KIT_CONFIG_NAME
+    if p.is_file():
+        cfg['file'] = str(p)
+        try:
+            cfg['raw'] = json.loads(p.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as e:
+            cfg['warn'].append(f'.kit.json is not valid JSON: {e}')
+            cfg['broken'] = True
+    else:
+        cfg['warn'].append(f'no {KIT_CONFIG_NAME}: running core-only '
+                           f'(create it to select stacks)')
+    if os.environ.get('KIT_LEGACY') == '1':
+        cfg['stacks'] = ['*']
+        cfg['stacks_source'] = 'KIT_LEGACY'
+        cfg['warn'].append('KIT_LEGACY=1: all stacks forced (env overrides '
+                           '.kit.json); remove the env var to use the file')
+    return cfg
+
+
+def _kit_cfg_types_ok(raw, errors):
+    """Strict types, no coercion. Returns False on first structural error."""
+    if not isinstance(raw, dict):
+        errors.append('.kit.json root must be an object')
+        return False
+    if 'version' in raw and type(raw['version']) is not int:
+        errors.append('.kit.json "version" must be int')
+        return False
+    if raw.get('version', 1) != 1:
+        errors.append(f'.kit.json "version" must be 1, got {raw.get("version")!r}')
+        return False
+    if 'stacks' not in raw:
+        errors.append('.kit.json: missing required key "stacks"')
+        return False
+    stacks = raw['stacks']
+    if (not isinstance(stacks, list)
+            or any(type(s) is not str for s in stacks)):
+        errors.append('.kit.json "stacks" must be a list of strings')
+        return False
+    if any(not s.strip() for s in stacks):
+        errors.append('.kit.json "stacks" contains an empty name')
+        return False
+    if len(set(stacks)) != len(stacks):
+        errors.append('.kit.json "stacks" contains duplicates')
+        return False
+    if '*' in stacks:
+        errors.append('.kit.json: "*" is not allowed in "stacks" '
+                      '(use KIT_LEGACY=1 to force all stacks)')
+        return False
+    if any('/' in s or '\\' in s or s in ('.', '..') for s in stacks):
+        errors.append('.kit.json "stacks" contains a path-like name')
+        return False
+    if 'sparse' in raw and type(raw['sparse']) is not bool:
+        errors.append('.kit.json "sparse" must be bool')
+        return False
+    if 'paths' in raw:
+        if (not isinstance(raw['paths'], dict)
+                or any(type(k) is not str or type(v) is not str
+                       for k, v in raw['paths'].items())):
+            errors.append('.kit.json "paths" must be an object of strings')
+            return False
+    if 'source_root' in raw and type(raw['source_root']) is not str:
+        errors.append('.kit.json "source_root" must be a string')
+        return False
+    return True
+
+
+def known_stack_ids(ctx):
+    """Stack registry: harness/stacks/*/stack.json on disk, plus git
+    ls-tree fallback so sparse checkouts (stack dirs hidden, stack.json
+    files always in the checkout) still validate."""
+    ids = set()
+    stacks_dir = ctx.resolve('harness') / 'stacks'
+    if stacks_dir.is_dir():
+        for f in stacks_dir.glob('*/stack.json'):
+            ids.add(f.parent.name)
+    rc, out, _ = git_run(ctx.resolve('harness'), 'ls-tree', '--name-only',
+                         'HEAD', 'stacks/')
+    if rc == 0:
+        ids.update(s.strip('/') for s in out.splitlines() if s.strip())
+    return ids
+
+
+def stack_known(ctx, name, registry):
+    if name in registry:
+        return True
+    # Sparse fallback: stack.json is always in the checkout, but when the
+    # whole stacks/ dir was ls-tree'd the name may still be resolvable in HEAD.
+    rc, _, _ = git_run(ctx.resolve('harness'), 'cat-file', '-e',
+                       f'HEAD:stacks/{name}/stack.json')
+    return rc == 0
+
+
+def validate_kit_config(ctx, cfg):
+    """Validate .kit.json BEFORE any mutation. Returns error strings
+    (empty = ok). Unknown keys are WARN, not ERROR."""
+    errors = []
+    if cfg['broken']:
+        return ['.kit.json is not valid JSON']
+    raw = cfg['raw']
+    if raw is None:
+        cfg['stacks_source'] = ('KIT_LEGACY'
+                                if os.environ.get('KIT_LEGACY') == '1'
+                                else 'default')
+        return errors
+    if not _kit_cfg_types_ok(raw, errors):
+        return errors
+    for key in sorted(set(raw) - KNOWN_KIT_KEYS):
+        cfg['warn'].append(f'.kit.json: unknown key "{key}" (ignored)')
+    cfg['version'] = raw['version']
+    cfg['source_root'] = raw.get('source_root')
+    cfg['paths'] = raw.get('paths', {})
+    cfg['sparse'] = raw.get('sparse', False)
+    if os.environ.get('KIT_LEGACY') != '1':
+        cfg['stacks'] = list(raw['stacks'])
+        cfg['stacks_source'] = 'file'
+    registry = known_stack_ids(ctx)
+    for name in cfg['stacks']:
+        if name == '*':
+            continue
+        if not stack_known(ctx, name, registry):
+            errors.append(f'.kit.json: unknown stack "{name}" '
+                          f'(no stacks/{name}/stack.json in kit)')
+    return errors
+
+
+def validate_layout_stacks(ctx, layout):
+    """Kit-side: resource "stacks" values must exist in the stack registry
+    (an unknown id = dead resource that never lays out)."""
+    registry = known_stack_ids(ctx)
+    return [f'layout.json resource "{res.get("id")}": unknown stack "{s}"'
+            for res in layout['resources']
+            for s in res.get('stacks') or [] if s != '*'
+            and not stack_known(ctx, s, registry)]
+
+
+def effective_resources(resources, stacks):
+    """Resources active for this consumer: no "stacks" field = core (always);
+    otherwise the intersection with the selected stacks (or "*" on either
+    side) decides."""
+    if '*' in stacks:
+        return list(resources)
+    sel = set(stacks)
+    return [r for r in resources
+            if not r.get('stacks') or '*' in r['stacks']
+            or sel & set(r['stacks'])]
+
+
+def env_source_root(root):
+    """CONFIG_PATH from the consumer's .env (fallback for source_root)."""
+    p = Path(root) / '.env'
+    if not p.is_file():
+        return None
+    try:
+        for line in p.read_text(encoding='utf-8').splitlines():
+            m = re.match(r'\s*CONFIG_PATH\s*=\s*(.*)$', line)
+            if m:
+                return m.group(1).strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return None
+
+
+def print_config(ctx, cfg, as_json):
+    """Resolved view of the consumer config - the ONLY .kit.json parser
+    scripts (bootstrap/doctor/init-deps/link-*) are allowed to call."""
+    if cfg['source_root'] is not None:
+        src_root, src_origin = cfg['source_root'], 'file'
+    else:
+        env = env_source_root(ctx.root)
+        if env:
+            src_root, src_origin = env, 'env'
+        else:
+            src_root, src_origin = DEFAULT_SOURCE_ROOT, 'default'
+    info = {
+        'config': cfg['file'],
+        'version': cfg['version'],
+        'stacks': cfg['stacks'],
+        'stacks_source': cfg.get('stacks_source', 'default'),
+        'source_root': src_root,
+        'source_root_source': src_origin,
+        'sparse': cfg['sparse'],
+        'paths': cfg['paths'],
+        'harness_rel': ctx.harness_rel,
+        'manifests': {'fallback': ctx.manifest_rel, 'lock': LOCK_REL},
+        'warnings': cfg['warn'],
+    }
+    if as_json:
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+    else:
+        for k, v in info.items():
+            print(f'{k}: {v}')
+
+
 def load_local(ctx, rel):
     names = set()
     if not rel:
         return names
     p = ctx.resolve(rel)
+    if not p.is_file() and rel.startswith(KIT_STATE_DIR + '/'):
+        legacy = ctx.resolve(LEGACY_STATE_DIR + '/' + rel.rsplit('/', 1)[-1])
+        if legacy.is_file():
+            p = legacy
     if p.is_file():
         for line in p.read_text(encoding='utf-8').splitlines():
             line = line.split('#', 1)[0].strip()
@@ -474,36 +728,14 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
     return True
 
 
-def prune_stale(ctx, source, target, local, kind):
-    """Tombstones: remove links in target pointing into source whose child
-    name no longer exists upstream. Only links are touched."""
-    if not target.is_dir():
-        return
-    want_dir = kind == 'child-dirs'
-    for entry in sorted(target.iterdir()):
-        if entry.name in local:
-            continue
-        if not is_link(entry):
-            continue
-        raw = read_link(entry)
-        if raw is None:
-            continue
-        try:
-            resolved = Path(raw).resolve()
-        except OSError:
-            resolved = Path(raw)
-        src_resolved = source.resolve()
-        if resolved != src_resolved and src_resolved not in resolved.parents:
-            continue
-        if not (source / entry.name).exists():
-            ctx.act(f'PRUNE: {entry.name}', lambda e=entry: remove_link_or_tree(e))
-
-
 def run_child(ctx, res):
     source = ctx.resolve(res['source'])
     target = ctx.resolve(res['target'])
     if not source.is_dir():
-        ctx.say('FAIL', f'FAIL missing kit source: {res["source"]}')
+        ctx.missing_source = True
+        ctx.say('FAIL', f'FAIL missing kit source: {res["source"]} '
+                       f'(selected stack hidden by sparse-checkout? '
+                       f're-run bootstrap-kit to re-fetch)')
         return False
     local = load_local(ctx, res.get('local_manifest'))
     include = set(res.get('include') or [])
@@ -520,7 +752,6 @@ def run_child(ctx, res):
         rel = rel_posix(link, ctx.root)
         ctx.note_managed(rel)
         link_one(ctx, child, link, want_dir, rel, rel_posix(child, ctx.root))
-    prune_stale(ctx, source, target, local, res['kind'])
     return True
 
 
@@ -528,8 +759,16 @@ def run_alias(ctx, res):
     source = ctx.resolve(res['source'])
     target = ctx.resolve(res['target'])
     if not source.is_dir():
-        ctx.say('OK', f'SKIP {res["id"]} (no {res["source"]})')
-        return True
+        # A missing consumer-side source dir (e.g. no .cursor/skills yet)
+        # is a plain skip; a missing kit source is a real FAIL.
+        if not res['source'].startswith('harness/'):
+            ctx.say('OK', f'SKIP {res["id"]} (no {res["source"]})')
+            return True
+        ctx.missing_source = True
+        ctx.say('FAIL', f'FAIL missing kit source: {res["source"]} '
+                       f'(selected stack hidden by sparse-checkout? '
+                       f're-run bootstrap-kit to re-fetch)')
+        return False
     rel = rel_posix(target, ctx.root)
     ctx.note_managed(rel)
     link_one(ctx, source, target, True, rel, rel_posix(source, ctx.root))
@@ -599,9 +838,184 @@ def verify_resource(ctx, res):
     return ok
 
 
-def iter_expected_links(ctx, layout):
-    """Yield consumer paths the layout manages (independent of existence)."""
+# ── orphan-sweep (stateless) ──────────────────────────────────────
+
+def expected_names(ctx, resources):
+    """target-rel -> set of child names the effective resources will link;
+    alias resource target rels are collected under the resource id itself."""
+    by_target = {}
+    for res in resources:
+        if res['kind'] == 'alias':
+            by_target.setdefault('\0alias', set()).add(res['target'])
+            continue
+        names = by_target.setdefault(res['target'], set())
+        source = ctx.resolve(res['source'])
+        if not source.is_dir():
+            continue
+        local = load_local(ctx, res.get('local_manifest'))
+        include = set(res.get('include') or [])
+        want_dir = res['kind'] == 'child-dirs'
+        for child in source.iterdir():
+            if child.is_dir() != want_dir:
+                continue
+            if include and child.name not in include:
+                continue
+            if child.name in local:
+                continue
+            names.add(child.name)
+    return by_target
+
+
+def local_names_map(ctx, resources):
+    """target-rel -> set of names declared consumer-owned by local-*.txt
+    (union over ALL layout resources sharing the target, effective or not:
+    the lists are consumer state, independent of the stack filter)."""
+    by_target = {}
+    for res in resources:
+        if res['kind'] == 'alias':
+            continue
+        names = load_local(ctx, res.get('local_manifest'))
+        if names:
+            by_target.setdefault(res['target'], set()).update(names)
+    return by_target
+
+
+def _link_points_into(ctx, entry):
+    """('harness'|'inside'|'foreign', raw) - where a reparse point leads.
+    The raw readlink STRING is compared (no resolve): the target may be
+    gone after a git mv or hidden by sparse-checkout."""
+    raw = read_link(entry)
+    if raw is None:
+        return None, None
+    tpath = Path(raw)
+    if not tpath.is_absolute():
+        tpath = entry.parent / tpath
+    tpath = os.path.normpath(str(tpath))
+    harness_abs = os.path.normpath(str(ctx.resolve('harness')))
+    if is_within(tpath, harness_abs):
+        return 'harness', raw
+    if is_within_resolved(tpath, ctx.root):
+        return 'inside', raw
+    return 'foreign', raw
+
+
+def find_orphans(ctx, layout, eff_resources):
+    """Read-only orphan scan over the managed targets of ALL layout
+    resources. Returns (orphans, foreign) where orphans are (path, rel)
+    kit links safe to remove and foreign are (rel, raw) kept unmanaged."""
+    expected = expected_names(ctx, eff_resources)
+    locals_ = local_names_map(ctx, layout['resources'])
+    keep_alias = expected.get('\0alias', set())
+    orphans, foreign = [], []
+    targets = sorted({res['target'] for res in layout['resources']
+                      if res['kind'] != 'alias'})
+    for t in targets:
+        tdir = ctx.resolve(t)
+        if not tdir.is_dir() or is_link(tdir):
+            continue
+        keep = expected.get(t, set()) | locals_.get(t, set())
+        for entry in sorted(tdir.iterdir()):
+            if entry.name in keep or not is_link(entry):
+                continue
+            kind, raw = _link_points_into(ctx, entry)
+            rel = rel_posix(entry, ctx.root)
+            if kind == 'harness':
+                orphans.append((entry, rel))
+            elif kind == 'foreign':
+                foreign.append((rel, raw))
     for res in layout['resources']:
+        if res['kind'] != 'alias' or res['target'] in keep_alias:
+            continue
+        target = ctx.resolve(res['target'])
+        if not is_link(target):
+            continue
+        kind, raw = _link_points_into(ctx, target)
+        rel = rel_posix(target, ctx.root)
+        if kind == 'harness':
+            orphans.append((target, rel))
+        elif kind == 'foreign':
+            foreign.append((rel, raw))
+    return orphans, foreign
+
+
+def sweep_orphans(ctx, layout, eff_resources):
+    """Remove kit-owned links dropped from the effective set. Returns the
+    number removed (would-be removed in dry-run)."""
+    orphans, foreign = find_orphans(ctx, layout, eff_resources)
+    for path, rel in orphans:
+        ctx.act(f'REMOVE orphan link: {rel}',
+                lambda p=path: remove_link_or_tree(p))
+    for rel, raw in foreign:
+        ctx.say('WARN', f'WARN unmanaged orphan (foreign-ns), kept: {rel} -> {raw}')
+    if not ctx.dry_run:
+        ctx.say('ACT', f'removed {len(orphans)} link(s)')
+    return len(orphans)
+
+
+def find_fallback_orphans(ctx):
+    """Old-manifest entries the effective run did not re-record.
+    Returns (pristine, edited): rel lists."""
+    pristine, edited = [], []
+    for rel in sorted(ctx.old_fallback):
+        if rel in ctx.fallback:
+            continue
+        path = ctx.root / rel
+        if is_link(path) or not path.is_file():
+            continue  # no longer a fallback file - drop the record
+        rec = ctx.old_fallback[rel]
+        try:
+            same = hash_file(path) == rec['sha']
+        except OSError:
+            same = False
+        (pristine if same else edited).append(rel)
+    return pristine, edited
+
+
+def sweep_fallback_orphans(ctx):
+    """Fallback orphan-sweep: pristine copy -> remove; locally edited ->
+    WARN and KEEP the record in the new manifest + managed .gitignore
+    (a forgotten record would be pruned blind on the next apply)."""
+    pristine, edited = find_fallback_orphans(ctx)
+    removed = 0
+    for rel in pristine:
+        ctx.act(f'REMOVE orphan fallback: {rel}',
+                lambda r=rel: (ctx.root / r).unlink())
+        removed += 1
+    for rel in edited:
+        rec = ctx.old_fallback[rel]
+        ctx.say('WARN', f'WARN orphan fallback has local edits, kept: {rel} '
+                       f'(add to a local manifest to own it)')
+        ctx.note_fallback(rel, rec['source'], rec['sha'])
+        ctx.note_managed(rel)
+    if removed and not ctx.dry_run:
+        ctx.say('ACT', f'removed {removed} fallback(s)')
+    return removed
+
+
+def acquire_lock(ctx):
+    """.kit/lock around the mutation window of apply. Returns the Path or
+    None on failure (message printed)."""
+    if ctx.dry_run:
+        return None
+    p = ctx.root / LOCK_REL
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, f'pid {os.getpid()}\n'.encode('ascii'))
+        os.close(fd)
+        return p
+    except FileExistsError:
+        print(f'ERROR: {LOCK_REL} exists - another apply running? '
+              f'(remove a stale lock to continue)', file=sys.stderr)
+        return None
+    except OSError as e:
+        print(f'WARN: cannot create {LOCK_REL}: {e}', file=sys.stderr)
+        return 'no-lock'
+
+
+def iter_expected_links(ctx, resources):
+    """Yield consumer paths the layout manages (independent of existence)."""
+    for res in resources:
         source = ctx.resolve(res['source'])
         if not source.is_dir():
             continue
@@ -622,13 +1036,13 @@ def iter_expected_links(ctx, layout):
             yield target / child.name
 
 
-def scan_namespace(ctx, layout):
+def scan_namespace(ctx, resources):
     """Classify existing managed links as inside/foreign before any action.
 
     Filesystem-only and side-effect free: lets apply/plan refuse a foreign
     namespace before the first link is touched (not after 100+ silent skips).
     """
-    for link in iter_expected_links(ctx, layout):
+    for link in iter_expected_links(ctx, resources):
         if is_link(link):
             ctx.note_ns(rel_posix(link, ctx.root), link)
 
@@ -698,10 +1112,16 @@ def warn_gitignore_overlap(ctx):
 
 
 def load_fallback_manifest(ctx):
-    """Read previous HARDLINK/COPY entries (tombstones + drift detection)."""
+    """Read previous HARDLINK/COPY entries (tombstones + drift detection).
+    Legacy location tools/cc-1c-skills-sync/kit-fallback.txt is read when
+    .kit/fallback.txt does not exist yet (first apply after the move)."""
     p = ctx.manifest_path
     if not p.is_file():
-        return
+        legacy = ctx.root / LEGACY_MANIFEST_REL
+        if legacy.is_file():
+            p = legacy
+        else:
+            return
     for line in p.read_text(encoding='utf-8').splitlines():
         line = line.strip()
         if not line or line.startswith('#'):
@@ -716,25 +1136,60 @@ def load_fallback_manifest(ctx):
         }
 
 
-def prune_stale_fallbacks(ctx):
-    """Tombstones for non-reparse fallbacks: remove a pristine fallback whose
-    source vanished upstream or that the layout no longer manages. A fallback
-    with consumer edits is kept (never silently delete local work)."""
-    if ctx.dry_run:
-        return
-    for rel in sorted(ctx.old_fallback):
-        if rel in ctx.fallback:
+def resolve_source(ctx, eff_resources, consumer_rel):
+    """Reverse layout lookup for promote: which kit source produced this
+    consumer path? Candidate generation walks core resources first, then
+    the selected stacks; a candidate counts only if the child name exists
+    in that source tree. Exactly one hit prints the kit path."""
+    rel = re.sub(r'^\./+', '', consumer_rel.replace('\\', '/')).rstrip('/')
+    harness_abs = os.path.normpath(str(ctx.resolve('harness')))
+    hits = []
+    for res in eff_resources:
+        target = res['target'].rstrip('/')
+        if rel != target and not rel.startswith(target + '/'):
             continue
-        path = ctx.root / rel
-        if is_link(path) or not path.is_file():
-            continue
-        rec = ctx.old_fallback[rel]
-        if not (ctx.root / rec['source']).exists():
-            if hash_file(path) == rec['sha']:
-                ctx.say('ACT', f'PRUNE (fallback): {rel}')
-                path.unlink()
-            else:
-                ctx.say('WARN', f'stale fallback has local edits, kept: {rel}')
+        rest = rel[len(target):].lstrip('/')
+        source = ctx.resolve(res['source'])
+        if res['kind'] == 'alias':
+            cand = source / rest if rest else source
+            if not cand.exists() and not is_link(cand):
+                continue
+        else:
+            if not rest:
+                continue  # the target dir itself is consumer-owned
+            child, _, tail = rest.partition('/')
+            cand = source / child
+            if not cand.exists():
+                continue
+            if tail:
+                cand = cand / tail
+        # Alias hits land on consumer paths that are themselves kit links
+        # (.agents/skills/x -> .cursor/skills/x -> harness/...): follow them
+        # so the reported path is the real kit source.
+        if is_link(cand):
+            raw = read_link(cand)
+            if raw is not None:
+                t = Path(raw)
+                if not t.is_absolute():
+                    t = cand.parent / t
+                t = os.path.normpath(str(t))
+                if is_within(t, harness_abs):
+                    cand = Path(t)
+                else:
+                    continue  # consumer-owned alias, not a kit path
+        hits.append(rel_posix(cand, ctx.root))
+    hits = sorted(set(hits))
+    if len(hits) == 1:
+        print(hits[0])
+        return 0
+    if not hits:
+        print(f'ERROR: no kit source maps {consumer_rel} '
+              f'(not under a managed target, or child absent in kit)',
+              file=sys.stderr)
+    else:
+        print(f'ERROR: ambiguous {consumer_rel}: {", ".join(hits)}',
+              file=sys.stderr)
+    return 2
 
 
 def untrack_links(ctx):
@@ -770,6 +1225,8 @@ def verify_tracked(ctx):
 
 
 def write_fallback_manifest(ctx):
+    """Atomic write (tmp + os.replace): a half-written manifest would make
+    the next apply forget which fallbacks are kit-owned."""
     if ctx.dry_run:
         return
     p = ctx.manifest_path
@@ -781,7 +1238,9 @@ def write_fallback_manifest(ctx):
     for rel in sorted(ctx.fallback):
         e = ctx.fallback[rel]
         lines.append(f"{rel}\t{e['source']}\t{e['sha']}")
-    p.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    tmp = p.with_name(p.name + '.tmp')
+    tmp.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    os.replace(tmp, p)
 
 
 def write_managed_gitignore(ctx):
@@ -807,6 +1266,7 @@ def write_managed_gitignore(ctx):
         kept.pop()
     entries = sorted('/' + r for r in ctx.managed)
     entries.append('/' + ctx.manifest_rel)
+    entries.append('/' + LOCK_REL)
     prefix = kept + ([''] if kept else [])
     text = '\n'.join(prefix + [GITIGNORE_BEGIN] + entries + [GITIGNORE_END]) + '\n'
     p.write_text(text, encoding='utf-8')
@@ -814,10 +1274,18 @@ def write_managed_gitignore(ctx):
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog='kit-layout', description=__doc__.split('\n')[0])
-    p.add_argument('command', choices=['plan', 'apply', 'verify', 'tracked'])
-    p.add_argument('consumer_root', nargs='?', default='.')
+    p.add_argument('command', choices=['plan', 'apply', 'verify', 'tracked',
+                                       'print-config', 'resolve-source'])
+    p.add_argument('consumer_root', nargs='?', default='.',
+                   help='consumer repo root (resolve-source: consumer-rel path)')
+    p.add_argument('--root', default='.',
+                   help='resolve-source: consumer repo root')
     p.add_argument('--harness-rel', default=os.environ.get('HARNESS_REL', 'harness'))
     p.add_argument('--layout', default=str(Path(__file__).with_name('layout.json')))
+    p.add_argument('--all-stacks', action='store_true',
+                   help='plan: ignore the stack filter (full layout)')
+    p.add_argument('--json', action='store_true',
+                   help='print-config: machine-readable output')
     p.add_argument('--strict', action='store_true',
                    help='plan: exit 1 if any pending action or foreign-ns link')
     p.add_argument('--no-gitignore', action='store_true',
@@ -829,10 +1297,11 @@ def main(argv=None):
     a = p.parse_intermixed_args(argv)
 
     layout = json.loads(Path(a.layout).read_text(encoding='utf-8'))
+    consumer_root = a.root if a.command == 'resolve-source' else a.consumer_root
     gitignore = (not a.no_gitignore
                  and os.environ.get('KIT_NO_GITIGNORE') != '1'
                  and bool(layout.get('gitignore', True)))
-    ctx = Ctx(a.consumer_root, a.harness_rel,
+    ctx = Ctx(consumer_root, a.harness_rel,
               dry_run=(a.command in ('plan', 'tracked')),
               gitignore=gitignore, quiet=(a.command == 'tracked'),
               untrack=(not a.no_untrack),
@@ -851,9 +1320,29 @@ def main(argv=None):
               file=sys.stderr)
         return 2
 
+    # Consumer config: validate BEFORE any mutation. A broken .kit.json
+    # exits non-zero with nothing touched; print-config is the only
+    # parser scripts may use for it.
+    cfg = load_kit_config(ctx.root)
+    errors = validate_kit_config(ctx, cfg)
+    errors += validate_layout_stacks(ctx, layout)
+    for w in cfg['warn']:
+        print(f'WARN {w}', file=sys.stderr)
+    if errors:
+        for e in errors:
+            print(f'ERROR {e}', file=sys.stderr)
+        return 2
+    if a.command == 'print-config':
+        print_config(ctx, cfg, a.json)
+        return 0
+    eff = (layout['resources'] if a.all_stacks or '*' in cfg['stacks']
+           else effective_resources(layout['resources'], cfg['stacks']))
+    if a.command == 'resolve-source':
+        return resolve_source(ctx, eff, a.consumer_root)
+
     # Namespace pre-scan: never start link work in a tree owned by another
     # OS/namespace (silent no-op + green verify is worse than a hard error).
-    scan_namespace(ctx, layout)
+    scan_namespace(ctx, layout['resources'])
     where = 'sandbox' if is_sandbox_namespace(ctx.root) else 'foreign'
     if ctx.foreign and a.command in ('plan', 'apply'):
         print(f'ERROR: kit-layout {where} namespace: {len(ctx.foreign)} kit link(s) '
@@ -867,8 +1356,17 @@ def main(argv=None):
 
     failed = False
     if a.command == 'verify':
-        for res in layout['resources']:
+        for res in eff:
             failed |= not verify_resource(ctx, res)
+        orphans, for_orph = find_orphans(ctx, layout, eff)
+        for _, rel in orphans:
+            ctx.say('WARN', f'WARN orphan kit link (not in effective set): {rel}')
+        for rel, raw in for_orph:
+            ctx.say('WARN', f'WARN unmanaged orphan (foreign-ns): {rel} -> {raw}')
+        load_fallback_manifest(ctx)
+        fb_pristine, fb_edited = find_fallback_orphans(ctx)
+        for rel in fb_pristine + fb_edited:
+            ctx.say('WARN', f'WARN orphan fallback entry: {rel}')
         verify_tracked(ctx)
         warn_gitignore_overlap(ctx)
         # verify never reports OK on a tree it cannot inspect.
@@ -881,7 +1379,7 @@ def main(argv=None):
             ctx.say('WARN', f'WARN {len(ctx.foreign)} FOREIGN-NS link(s) ignored, '
                             f'{ctx.inside} local link(s) checked')
     elif a.command == 'tracked':
-        for res in layout['resources']:
+        for res in eff:
             runner = run_alias if res['kind'] == 'alias' else run_child
             runner(ctx, res)
         tracked = tracked_under(ctx.root, sorted(ctx.managed))
@@ -889,16 +1387,32 @@ def main(argv=None):
             print(rel)
         return 1 if tracked else 0
     else:
-        load_fallback_manifest(ctx)
-        warn_gitignore_overlap(ctx)
-        for res in layout['resources']:
-            runner = run_alias if res['kind'] == 'alias' else run_child
-            failed |= not runner(ctx, res)
-        prune_stale_fallbacks(ctx)
-        upgrade_fallbacks(ctx)
-        write_fallback_manifest(ctx)
-        write_managed_gitignore(ctx)
-        untrack_links(ctx)
+        lock = acquire_lock(ctx) if a.command == 'apply' else None
+        if a.command == 'apply' and lock is None:
+            return 2
+        try:
+            load_fallback_manifest(ctx)
+            warn_gitignore_overlap(ctx)
+            for res in eff:
+                runner = run_alias if res['kind'] == 'alias' else run_child
+                failed |= not runner(ctx, res)
+            if ctx.missing_source:
+                # A selected stack hidden by sparse-checkout: sweeping now
+                # would mass-delete its links. Refuse to clean up; linking
+                # done so far stays.
+                ctx.say('FAIL', 'FAIL aborting sweep: missing kit source(s) '
+                               '(re-run bootstrap-kit to fix sparse-checkout)')
+                failed = True
+            else:
+                sweep_orphans(ctx, layout, eff)
+                sweep_fallback_orphans(ctx)
+            upgrade_fallbacks(ctx)
+            write_fallback_manifest(ctx)
+            write_managed_gitignore(ctx)
+            untrack_links(ctx)
+        finally:
+            if isinstance(lock, Path):
+                lock.unlink(missing_ok=True)
 
     fails = sum(1 for lvl, _ in ctx.actions if lvl == 'FAIL')
     if a.command == 'plan':

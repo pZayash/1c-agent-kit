@@ -146,13 +146,17 @@ function Write-KitTextFile([string]$path, [string]$text) {
 }
 
 function Get-KitFallbackManifestPath([string]$Root) {
-    return (Join-Path $Root "tools\cc-1c-skills-sync\kit-fallback.txt")
+    return (Join-Path $Root ".kit\fallback.txt")
 }
 
 function Read-KitFallbackManifest([string]$Root) {
     $map = @{}
     $p = Get-KitFallbackManifestPath $Root
-    if (-not (Test-Path -LiteralPath $p)) { return $map }
+    if (-not (Test-Path -LiteralPath $p)) {
+        # Legacy location (pre-.kit layout); read-only migration fallback.
+        $p = Join-Path $Root "tools\cc-1c-skills-sync\kit-fallback.txt"
+        if (-not (Test-Path -LiteralPath $p)) { return $map }
+    }
     Get-Content -LiteralPath $p -Encoding UTF8 | ForEach-Object {
         $line = $_.Trim()
         if (-not $line -or $line.StartsWith("#")) { return }
@@ -232,7 +236,8 @@ function Update-KitGitignore {
     }
     while ($kept.Count -gt 0 -and -not "$($kept[$kept.Count - 1])".Trim()) { $kept.RemoveAt($kept.Count - 1) }
     $entries = @($Paths | ForEach-Object { '/' + $_.Replace('\', '/') } | Sort-Object -Unique)
-    $entries += '/tools/cc-1c-skills-sync/kit-fallback.txt'
+    $entries += '/.kit/fallback.txt'
+    $entries += '/.kit/lock'
     $out = New-Object System.Collections.Generic.List[string]
     foreach ($l in $kept) { [void]$out.Add($l) }
     if ($kept.Count -gt 0) { [void]$out.Add("") }
@@ -240,4 +245,52 @@ function Update-KitGitignore {
     foreach ($e in $entries) { [void]$out.Add($e) }
     [void]$out.Add($end)
     Write-KitTextFile $p (($out -join "`n") + "`n")
+}
+
+# -- .kit.json / stacks --------------------------------------------------
+# The single .kit.json parser is kit_layout.py print-config --json.
+# Scripts never read .kit.json themselves.
+
+# Returns effective stacks as a string array ("*" = all), or $null when no
+# .kit.json exists (legacy mode for link-*). Throws when .kit.json exists
+# but cannot be read (no python / print-config failure) - explicit refusal.
+function Get-KitEffectiveStacks([string]$Root, [string]$HarnessRel = "harness") {
+    if ($env:KIT_LEGACY -eq "1") {
+        Write-Host "WARN: KIT_LEGACY=1 - effective stacks = all (env beats .kit.json)"
+        return @("*")
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root ".kit.json"))) { return }
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $py) {
+        throw ".kit.json found but python not on PATH - cannot read stacks (install python or remove .kit.json)"
+    }
+    $kl = Join-Path $Root "$HarnessRel\tools\kit-layout\kit_layout.py"
+    $cfgText = & $py.Source $kl print-config $Root --harness-rel $HarnessRel --json
+    if ($LASTEXITCODE -ne 0) { throw "kit_layout.py print-config failed ($Root)" }
+    $cfg = ($cfgText | Out-String) | ConvertFrom-Json
+    $s = $cfg.stacks
+    if ($null -eq $s) { $s = $cfg.effective_stacks }
+    # enumerated output: caller's @() collects flat list or empty -
+    # ,@($s) would nest and yield phantom "stacks\\stack.json" entries.
+    return @($s)
+}
+
+# $true when the stack is selected for the consumer (or legacy mode with no
+# .kit.json). Throws on unreadable config (explicit refusal).
+function Test-KitStackSelected([string]$Root, [string]$Stack, [string]$HarnessRel = "harness") {
+    if ($env:KIT_LEGACY -eq "1") { return $true }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root ".kit.json"))) { return $true }
+    $s = @(Get-KitEffectiveStacks $Root $HarnessRel)
+    return (($s -contains "*") -or ($s -contains $Stack))
+}
+
+# Absolute path of the local manifest (.kit/local-<name>.txt preferred,
+# legacy tools/cc-1c-skills-sync/local-<name>.txt on migration).
+function Get-KitLocalManifest([string]$Root, [string]$Name) {
+    $p = Join-Path $Root ".kit\local-$Name.txt"
+    if (Test-Path -LiteralPath $p) { return $p }
+    $legacy = Join-Path $Root "tools\cc-1c-skills-sync\local-$Name.txt"
+    if (Test-Path -LiteralPath $legacy) { return $legacy }
+    return $p
 }

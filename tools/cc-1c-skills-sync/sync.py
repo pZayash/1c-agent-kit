@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync upstream cc-1c-skills into kit skills/cc-1c/ (1c-agent-kit).
+"""Sync upstream cc-1c-skills into kit stacks/1c/skills/ (1c-agent-kit).
 
 Upstream clone: tools/cc-1c-skills (gitignore).
 Consumer projects link via harness/scripts/link-cc-1c-skills.
@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 UPSTREAM = ROOT / "tools" / "cc-1c-skills"
 SWITCH = UPSTREAM / "scripts" / "switch.py"
-TARGET = ROOT / "skills" / "cc-1c"
+TARGET = ROOT / "stacks" / "1c" / "skills"
 MANIFEST = Path(__file__).resolve().parent / "last-sync.json"
 APPLY_META = Path(__file__).resolve().parent / "apply-meta-xml-patches.py"
 META_SKILLS = frozenset({"meta-edit", "meta-compile", "meta-validate"})
@@ -212,7 +212,7 @@ def sync(dry_run: bool, skip_pull: bool) -> int:
         "upstream_commit": commit,
         "runtime": "python",
         "sandbox_wrapper": "bash tools/sandbox/run.sh python",
-        "target": "skills/cc-1c",
+        "target": "stacks/1c/skills",
         "skills_synced": to_sync,
         "skipped_skills": sorted(SKIP_SKILLS),
     }

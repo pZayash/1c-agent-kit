@@ -1,2 +1,2 @@
-# LOCAL tools — имена из harness/tools, которые потребитель НЕ линкует.
-# Пилот: пусто (весь workflow kit линкуем). Форки tools сюда.
+# LOCAL tools — имена из harness/{core,stacks/*}/tools, которые потребитель
+# НЕ линкует. Форки tools сюда. Скопируйте в .kit/local-tools.txt.

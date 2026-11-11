@@ -1,7 +1,8 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Junction .cursor/skills/<name> -> harness/skills/cc-1c/<name> (Windows mklink /J).
+  Junction .cursor/skills/<name> -> harness/stacks/1c/skills/<name> (Windows mklink /J).
+  1C part links only when stack "1c" is selected (.kit.json); without it - legacy.
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -9,8 +10,7 @@ param(
 
     [string]$HarnessRel = "harness",
 
-    [Parameter(Mandatory = $true)]
-    [string]$LocalManifest,
+    [string]$LocalManifest = "",
 
     [switch]$DryRun,
 
@@ -22,8 +22,15 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "_win-reparse.ps1")
 
 $root = (Resolve-Path $ConsumerRoot).Path
-$kitSkills = Join-Path (Join-Path (Join-Path $root $HarnessRel) "skills") "cc-1c"
+if (-not $LocalManifest) { $LocalManifest = Get-KitLocalManifest $root "skills" }
+$kitSkills = Join-Path $root "$HarnessRel\stacks\1c\skills"
 $cursorSkills = Join-Path $root ".cursor\skills"
+
+# Stack gate: config only via print-config (Get-KitEffectiveStacks).
+if (-not (Test-KitStackSelected $root "1c" $HarnessRel)) {
+    Write-Host "SKIP: stack 1c not selected in .kit.json"
+    exit 0
+}
 
 if (-not (Test-Path $kitSkills)) {
     throw "Kit skills not found: $kitSkills (init submodule?)"

@@ -15,7 +15,7 @@ projects retain the copyright notice.
 
 ## Vendored / adapted content
 
-### 1. `skills/cc-1c/` — cc-1c-skills
+### 1. `stacks/1c/skills/` — cc-1c-skills
 
 - Source: <https://github.com/Nikolay-Shirokov/cc-1c-skills>
 - License: MIT

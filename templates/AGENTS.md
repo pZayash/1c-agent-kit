@@ -1,13 +1,13 @@
 # Агенты
 
 Общие правила и tools — submodule [harness/](harness/README.md).
-Документация: [docs-layout.md](harness/docs/ai/docs-layout.md).
+Документация: [docs-layout.md](harness/core/docs/ai/docs-layout.md).
 
 Специфика этого проекта (префикс, ИБ, платформа) — ниже.
 
 ## Поиск (qmd)
 
-Канон kit: [qmd-search.md](harness/docs/ai/qmd-search.md).
+Канон kit: [qmd-search.md](harness/core/docs/ai/qmd-search.md).
 Ключи `.env`: `QMD_CLIENT` (`off`/`cli`/`mcp`), `QMD_MCP_URL`.
 Шаблон: [env-qmd.example](harness/templates/env-qmd.example).
 

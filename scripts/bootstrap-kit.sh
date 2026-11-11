@@ -92,28 +92,101 @@ if kit_sandbox_namespace "$CONSUMER_ROOT"; then
   echo "WARN: sandbox namespace (/.dockerenv + /workspace), существующие ссылки внутри root — продолжаю" >&2
 fi
 
+PY="$(command -v python || command -v python3 || true)"
+KIT_LAYOUT="$HARNESS_ROOT/tools/kit-layout/kit_layout.py"
+KIT_STACKS=""
+KIT_SPARSE=0
+STACK_1C=0
+
 if [[ "${LEGACY_LINKS:-0}" != "1" ]]; then
   echo "=== kit-layout (engine) ==="
-  PY="$(command -v python || command -v python3 || true)"
   [[ -n "$PY" ]] || { echo "kit-layout needs python on PATH (or LEGACY_LINKS=1)" >&2; exit 1; }
+
+  # 1) Конфиг: единственный парсер .kit.json — print-config --json (он же
+  #    валидирует до любых мутаций). Под устаревшим sparse-паттерном
+  #    stack.json выбранного стека может быть скрыт → расширяем checkout
+  #    и повторяем (иначе ложный unknown-stack).
+  if ! cfg="$(kit_print_config_json "$CONSUMER_ROOT" "$HARNESS_REL")"; then
+    if [[ -f "$CONSUMER_ROOT/.kit.json" ]] \
+        && git -C "$HARNESS_ROOT" sparse-checkout list >/dev/null 2>&1; then
+      echo "WARN: print-config failed under sparse-checkout — widening to /* and retrying" >&2
+      if [[ "$DRY_RUN" != "1" ]]; then
+        git -C "$HARNESS_ROOT" sparse-checkout set --no-cone '/*'
+      fi
+      cfg="$(kit_print_config_json "$CONSUMER_ROOT" "$HARNESS_REL")" || {
+        echo "ERROR: .kit.json не проходит валидацию" >&2; exit 1; }
+    else
+      echo "ERROR: print-config failed" >&2; exit 1
+    fi
+  fi
+
+  if [[ ! -f "$CONSUMER_ROOT/.kit.json" ]]; then
+    cat >&2 <<'EOS'
+HINT: .kit.json отсутствует — режим core-only (stacks: []).
+Чтобы включить стек, создайте в корне потребителя, напр.:
+  {"version": 1, "stacks": ["1c"], "source_root": "conf/", "sparse": false}
+EOS
+  fi
+
+  eval "$("$PY" -c 'import json,sys
+c=json.loads(sys.stdin.read())
+s=c.get("stacks")
+if s is None: s=c.get("effective_stacks") or []
+print("KIT_STACKS=" + ("*" if s=="*" else " ".join(str(x) for x in s)))
+print("KIT_SPARSE=" + ("1" if c.get("sparse") else "0"))' <<<"$cfg")"
+
+  # 2) Sparse: позитивный паттерн (работает и когда stacks/* уже скрыты;
+  #    stack.json ВСЕГДА в checkout — валидация имён). "*" под KIT_LEGACY
+  #    требует всех файлов → снимаем sparse.
+  sparse_active() { git -C "$HARNESS_ROOT" sparse-checkout list >/dev/null 2>&1; }
+  if [[ "$KIT_STACKS" == "*" ]]; then
+    if sparse_active; then
+      echo "WARN: effective stacks = * (KIT_LEGACY) — sparse-checkout disable (все файлы нужны)" >&2
+      if [[ "$DRY_RUN" == "1" ]]; then echo "WOULD: git -C $HARNESS_REL sparse-checkout disable"
+      else git -C "$HARNESS_ROOT" sparse-checkout disable; fi
+    fi
+  elif [[ -f "$CONSUMER_ROOT/.kit.json" ]]; then
+    if [[ "$KIT_SPARSE" == "1" ]]; then
+      pats=('/*' '!/stacks/*' '/stacks/*/stack.json')
+      for s in $KIT_STACKS; do pats+=("/stacks/$s/"); done
+      if [[ "$DRY_RUN" == "1" ]]; then
+        echo "WOULD: git -C $HARNESS_REL sparse-checkout set --no-cone ${pats[*]}"
+      else
+        git -C "$HARNESS_ROOT" sparse-checkout set --no-cone "${pats[@]}"
+      fi
+    elif sparse_active; then
+      if [[ "$DRY_RUN" == "1" ]]; then echo "WOULD: git -C $HARNESS_REL sparse-checkout disable"
+      else git -C "$HARNESS_ROOT" sparse-checkout disable; fi
+    fi
+  fi
+  if [[ "${KIT_LEGACY:-0}" == "1" && "$KIT_SPARSE" == "1" ]]; then
+    echo "WARN: KIT_LEGACY=1 под sparse — режим ['*'] требует всех файлов;" >&2
+    echo "      задайте \"sparse\": false или git -C $HARNESS_REL sparse-checkout disable" >&2
+  fi
+
+  # 3) apply
   lcmd=apply
   [[ "$DRY_RUN" == "1" ]] && lcmd=plan
-  HARNESS_REL="$HARNESS_REL" "$PY" "$HARNESS_ROOT/tools/kit-layout/kit_layout.py" "$lcmd" "$CONSUMER_ROOT"
+  HARNESS_REL="$HARNESS_REL" "$PY" "$KIT_LAYOUT" "$lcmd" "$CONSUMER_ROOT"
+
+  if [[ "$KIT_STACKS" == "*" || " $KIT_STACKS " == *" 1c "* ]]; then STACK_1C=1; fi
 else
   echo "=== link-cc-1c-skills ==="
-  bash "$SCRIPT_DIR/link-cc-1c-skills.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-skills.txt"
+  bash "$SCRIPT_DIR/link-cc-1c-skills.sh" "$CONSUMER_ROOT" "$(kit_local_manifest_rel "$CONSUMER_ROOT" skills)"
 
   echo "=== link-cursor-overlay ==="
-  bash "$SCRIPT_DIR/link-cursor-overlay.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-overlay.txt"
+  bash "$SCRIPT_DIR/link-cursor-overlay.sh" "$CONSUMER_ROOT" "$(kit_local_manifest_rel "$CONSUMER_ROOT" overlay)"
 
   echo "=== link-kit-tools ==="
-  bash "$SCRIPT_DIR/link-kit-tools.sh" "$CONSUMER_ROOT" "tools/cc-1c-skills-sync/local-tools.txt"
+  bash "$SCRIPT_DIR/link-kit-tools.sh" "$CONSUMER_ROOT" "$(kit_local_manifest_rel "$CONSUMER_ROOT" tools)"
 
   echo "=== link-editor-roots ==="
   bash "$SCRIPT_DIR/link-editor-roots.sh" "$CONSUMER_ROOT"
 
   echo "=== link-pi-roots ==="
   HARNESS_REL="$HARNESS_REL" bash "$SCRIPT_DIR/link-pi-roots.sh" "$CONSUMER_ROOT"
+
+  STACK_1C=1
 fi
 
 if [[ "${SKIP_SECTIONS:-0}" != "1" && -d "$HARNESS_ROOT/templates/sections" && -f "$CONSUMER_ROOT/AGENTS.md" ]]; then
@@ -132,50 +205,55 @@ if [[ "${SKIP_SECTIONS:-0}" != "1" && -d "$HARNESS_ROOT/templates/sections" && -
 fi
 
 WRAPPER="$CONSUMER_ROOT/load-changed-files.sh"
-ENGINE="$HARNESS_ROOT/tools/load-changed-files/load-changed-files.sh"
-THIN_MARKER='harness/tools/load-changed-files/load-changed-files.sh'
+ENGINE="$HARNESS_ROOT/stacks/1c/tools/load-changed-files/load-changed-files.sh"
+THIN_MARKER='harness/stacks/1c/tools/load-changed-files/load-changed-files.sh'
+OLD_THIN_MARKER='harness/tools/load-changed-files/load-changed-files.sh'
 
-if [[ -f "$ENGINE" ]]; then
-  if [[ -f "$WRAPPER" ]] && ! grep -qF "$THIN_MARKER" "$WRAPPER" 2>/dev/null; then
+# Wrapper генерируем только при выбранном стеке 1c — иначе core-only потребители и другие
+# стеки получили бы 1С-скрипт.
+if [[ "$STACK_1C" == "1" && -f "$ENGINE" ]]; then
+  needs_write=0
+  if [[ -f "$WRAPPER" ]] && grep -qF "$THIN_MARKER" "$WRAPPER" 2>/dev/null; then
+    : # уже thin и на новый путь
+  elif [[ -f "$WRAPPER" ]] && grep -qF "$OLD_THIN_MARKER" "$WRAPPER" 2>/dev/null; then
+    echo "upgrade thin load-changed-files.sh wrapper (stacks/1c path)"
+    needs_write=1
+  elif [[ -f "$WRAPPER" ]]; then
     if [[ "$FORCE_WRAPPER" == "1" ]]; then
       echo "FORCE thin load-changed-files.sh wrapper"
-      if [[ "$DRY_RUN" != "1" ]]; then
-        cat >"$WRAPPER" <<'EOF'
-#!/bin/bash
-_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# $BASH, не bash из PATH: голый `bash` может резолвиться в WSL-лаунчер
-# (C:\Windows\system32\bash) — пути и localhost в WSL другие.
-exec "$BASH" "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"
-EOF
-        chmod +x "$WRAPPER"
-      fi
+      needs_write=1
     else
       echo "WARN: load-changed-files.sh looks fat/legacy; pass FORCE_WRAPPER=1 to replace" >&2
     fi
-  elif [[ ! -e "$WRAPPER" ]]; then
+  else
     echo "create thin load-changed-files.sh"
-    if [[ "$DRY_RUN" != "1" ]]; then
-      cat >"$WRAPPER" <<'EOF'
+    needs_write=1
+  fi
+  if [[ "$needs_write" == "1" && "$DRY_RUN" != "1" ]]; then
+    cat >"$WRAPPER" <<'EOF'
 #!/bin/bash
 _ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # $BASH, не bash из PATH: голый `bash` может резолвиться в WSL-лаунчер
 # (C:\Windows\system32\bash) — пути и localhost в WSL другие.
-exec "$BASH" "${_ROOT}/harness/tools/load-changed-files/load-changed-files.sh" "$@"
+exec "$BASH" "${_ROOT}/harness/stacks/1c/tools/load-changed-files/load-changed-files.sh" "$@"
 EOF
-      chmod +x "$WRAPPER"
-    fi
+    chmod +x "$WRAPPER"
   fi
 fi
 
 if [[ "$SKIP_VERIFY" != "1" ]]; then
-  echo "=== verify-kit-links ==="
-  bash "$SCRIPT_DIR/verify-kit-links.sh" "$CONSUMER_ROOT"
+  if [[ -n "$PY" && -f "$KIT_LAYOUT" ]]; then
+    echo "=== kit_layout verify ==="
+    HARNESS_REL="$HARNESS_REL" "$PY" "$KIT_LAYOUT" verify "$CONSUMER_ROOT"
+  else
+    echo "WARN: no python on PATH — verify (kit_layout) пропущен" >&2
+  fi
 fi
 
 if [[ "${SKIP_DEPS:-0}" != "1" ]]; then
   echo "=== init-kit-deps (check) ==="
   if ! bash "$SCRIPT_DIR/init-kit-deps.sh" "$CONSUMER_ROOT"; then
-    echo "WARN host deps incomplete — harness/docs/ai/kit-host-deps.md (INSTALL=1). Links still done." >&2
+    echo "WARN host deps incomplete — harness/core/docs/ai/kit-host-deps.md (INSTALL=1). Links still done." >&2
   fi
 fi
 

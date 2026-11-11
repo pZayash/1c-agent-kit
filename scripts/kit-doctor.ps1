@@ -27,18 +27,6 @@ function Write-Info([string]$m) { Write-Host "[INFO] $m" }
 $root = (Resolve-Path $ConsumerRoot).Path
 $harness = Join-Path $root $HarnessRel
 $scriptsDir = Join-Path $harness "scripts"
-$syncDir = Join-Path $root "tools\cc-1c-skills-sync"
-
-$emptyManifest = $null
-function Get-Manifest([string]$name) {
-    $p = Join-Path $syncDir $name
-    if (Test-Path -LiteralPath $p) { return $p }
-    if (-not $script:emptyManifest) {
-        $script:emptyManifest = Join-Path $env:TEMP "kit-doctor-empty-manifest.txt"
-        Set-Content -LiteralPath $script:emptyManifest -Value "" -Encoding ASCII
-    }
-    return $script:emptyManifest
-}
 
 # Run a kit ps1 as a child process; returns output lines.
 # Bare `powershell.exe` is absent from the PATH in trimmed environments
@@ -52,7 +40,29 @@ function Invoke-KitScript([string]$file, [string[]]$scriptArgs) {
     return @($out), $LASTEXITCODE
 }
 
+$py = Get-Command python -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+$kitLayout = Join-Path $harness "tools\kit-layout\kit_layout.py"
+$kitStacks = @()
+
 Write-Host "=== kit-doctor: $root ==="
+
+# Consumer config - only via the engine (the single .kit.json parser).
+if ($py -and (Test-Path -LiteralPath $kitLayout)) {
+    $cfgText = & $py.Source $kitLayout print-config $root --harness-rel $HarnessRel --json 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        ($cfgText | Out-String).Trim() -split "`n" | ForEach-Object { Write-Host "  $_" }
+        try {
+            $cfg = ($cfgText | Out-String) | ConvertFrom-Json
+            if ($null -ne $cfg.stacks) { $kitStacks = @($cfg.stacks) }
+            elseif ($null -ne $cfg.effective_stacks) { $kitStacks = @($cfg.effective_stacks) }
+        } catch { }
+    } else {
+        Write-WarnX "print-config failed"
+    }
+} else {
+    Write-Info "no python / kit_layout.py - print-config skipped"
+}
 
 # 0. namespace: links created in another namespace (moved tree / another OS)
 #    cannot be diagnosed here - verify/fallback checks would be meaningless.
@@ -156,47 +166,57 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 if (Test-Path -LiteralPath $harness) {
-    # 4. verify links
+    # 4. verify links (engine, plan filtered by effective stacks)
     if ($foreignNs -eq 1) {
-        Write-Info "verify-kit-links skipped (foreign namespace; see check 0)"
+        Write-Info "kit_layout verify skipped (foreign namespace; see check 0)"
+    } elseif (-not $py -or -not (Test-Path -LiteralPath $kitLayout)) {
+        Write-Info "verify skipped (no python / kit_layout.py)"
     } else {
-        $r = Invoke-KitScript "verify-kit-links.ps1" @("-ConsumerRoot", $root)
-        if ($r[1] -eq 0) {
-            Write-Ok "verify-kit-links"
+        $vOut = & $py.Source $kitLayout verify $root --harness-rel $HarnessRel 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "kit_layout verify"
         } else {
-            Write-Bad "verify-kit-links:"
-            $r[0] | ForEach-Object { Write-Host "       $_" }
+            Write-Bad "kit_layout verify:"
+            $vOut | ForEach-Object { Write-Host "       $_" }
         }
     }
 
-    # 5. stale kit links (-DryRun prune detection; read-only)
-    $stale = @()
-    if (Test-Path -LiteralPath (Join-Path $harness "skills\cc-1c")) {
-        $r = Invoke-KitScript "link-cc-1c-skills.ps1" @("-ConsumerRoot", $root, "-HarnessRel", $HarnessRel, "-LocalManifest", (Get-Manifest "local-skills.txt"), "-DryRun")
-        $stale += $r[0] | Select-String "WOULD PRUNE:"
-    }
-    if (Test-Path -LiteralPath (Join-Path $harness "cursor")) {
-        $r = Invoke-KitScript "link-cursor-overlay.ps1" @("-ConsumerRoot", $root, "-HarnessRel", $HarnessRel, "-LocalManifest", (Get-Manifest "local-overlay.txt"), "-DryRun")
-        $stale += $r[0] | Select-String "WOULD PRUNE:"
-    }
-    if (Test-Path -LiteralPath (Join-Path $harness "tools")) {
-        $r = Invoke-KitScript "link-kit-tools.ps1" @("-ConsumerRoot", $root, "-HarnessRel", $HarnessRel, "-LocalManifest", (Get-Manifest "local-tools.txt"), "-DryRun")
-        $stale += $r[0] | Select-String "WOULD PRUNE:"
-    }
-    if ($stale.Count -gt 0) {
-        Write-WarnX "stale kit links - run bootstrap-kit to prune:"
-        $stale | ForEach-Object { Write-Host "       $($_.Line)" }
-    } else {
-        Write-Ok "no stale kit links"
+    # 5+8. stale kit links and fallback drift - engine plan (pending actions).
+    #      Replaces -DryRun link-* and the old SYNC_DIR manifest reads.
+    if ($foreignNs -eq 1) {
+        Write-Info "kit_layout plan skipped (foreign namespace; see check 0)"
+    } elseif ($py -and (Test-Path -LiteralPath $kitLayout)) {
+        $pOut = & $py.Source $kitLayout plan $root --harness-rel $HarnessRel 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $pending = @($pOut | Select-String -CaseSensitive 'WOULD|PENDING|PRUNE|REMOVE|REPLACE|stale|drift|orphan|fallback')
+            if ($pending.Count -gt 0) {
+                Write-WarnX "layout pending actions ($($pending.Count)) - run bootstrap-kit:"
+                $pending | Select-Object -First 15 | ForEach-Object { Write-Host "       $($_.Line)" }
+            } else {
+                Write-Ok "layout in sync (plan: no pending actions)"
+            }
+        } else {
+            Write-Bad "kit_layout plan failed:"
+            $pOut | Select-Object -First 20 | ForEach-Object { Write-Host "       $_" }
+        }
     }
 
-    # 6. host deps (check mode; WARN only - links already work without them)
+    # 6. host deps (check mode; WARN only - links already work without them).
+    #    Sectioned: core always, selected stacks via init-kit-deps.
     if (-not $SkipDeps) {
         $r = Invoke-KitScript "init-kit-deps.ps1" @("-ConsumerRoot", $root)
         if ($r[1] -eq 0) {
-            Write-Ok "host deps (node / openspec / rtk)"
+            Write-Ok "host deps"
         } else {
-            Write-WarnX "host deps incomplete - docs/ai/kit-host-deps.md (-Install to install)"
+            Write-WarnX "host deps incomplete - core/docs/ai/kit-host-deps.md (-Install to install)"
+        }
+        $allStacks = @()
+        Get-ChildItem -LiteralPath (Join-Path $harness "stacks") -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            if (Test-Path -LiteralPath (Join-Path $_.FullName "stack.json")) { $allStacks += $_.Name }
+        }
+        $skipped = @($allStacks | Where-Object { ($kitStacks -notcontains "*") -and ($kitStacks -notcontains $_) })
+        if ($skipped.Count -gt 0) {
+            Write-Info "host deps SKIP stack(s): $($skipped -join ', ') (not selected in .kit.json)"
         }
     }
 
@@ -213,123 +233,40 @@ if (Test-Path -LiteralPath $harness) {
         Write-Bad "non-ASCII in BOM-less *.ps1 - PS 5.1 ParserError risk: $($rel -join ', ')"
     }
 
-    # 8. file fallbacks (hardlink then copy when no symlink privilege). A fallback
-    #    in sync is fine; a stale/drifted one is visible now (manifest + hash) and
-    #    prune can clean orphans, unlike the old "prune blind" copy-fallback.
-    . (Join-Path $scriptsDir "_win-reparse.ps1")
-    $manifestPath = Join-Path $syncDir "kit-fallback.txt"
-    $recorded = @{}
-    if (Test-Path -LiteralPath $manifestPath) {
-        Get-Content -LiteralPath $manifestPath -Encoding UTF8 | ForEach-Object {
-            $line = $_.Trim()
-            if (-not $line -or $line.StartsWith("#")) { return }
-            $parts = $line -split "`t"
-            if ($parts.Count -ge 3) {
-                $recorded[$parts[0].Replace('\', '/')] = @{ source = $parts[1]; sha = $parts[2] }
-            }
-        }
-    }
-    $overlayLocal = @{}
-    $mp = Join-Path $syncDir "local-overlay.txt"
-    if (Test-Path -LiteralPath $mp) {
-        Get-Content -LiteralPath $mp -Encoding UTF8 | ForEach-Object {
-            $line = $_.Trim()
-            if ($line -and -not $line.StartsWith("#")) { $overlayLocal[$line] = $true }
-        }
-    }
-    $toolsLocal = @{}
-    $mp = Join-Path $syncDir "local-tools.txt"
-    if (Test-Path -LiteralPath $mp) {
-        Get-Content -LiteralPath $mp -Encoding UTF8 | ForEach-Object {
-            $line = $_.Trim()
-            if ($line -and -not $line.StartsWith("#")) { $toolsLocal[$line] = $true }
-        }
-    }
-    $pairs = New-Object System.Collections.Generic.List[object]
-    foreach ($sub in @("rules", "commands")) {
-        $srcDir = Join-Path $harness "cursor\$sub"
-        if (-not (Test-Path -LiteralPath $srcDir)) { continue }
-        Get-ChildItem -LiteralPath $srcDir -File | ForEach-Object {
-            if ($overlayLocal.ContainsKey($_.Name)) { return }
-            $pairs.Add([pscustomobject]@{ rel = ".cursor/$sub/$($_.Name)"; src = $_.FullName })
-        }
-    }
-    $pySrc = Join-Path $harness "tools\git-partial-stage.py"
-    if (-not $toolsLocal.ContainsKey("git-partial-stage.py") -and (Test-Path -LiteralPath $pySrc)) {
-        $pairs.Add([pscustomobject]@{ rel = "tools/git-partial-stage.py"; src = $pySrc })
-    }
-    $staleFallback = @()
-    $inSync = 0
-    $links = 0
-    $hardlinks = 0
-    $copies = 0
-    $pairRels = @{}
-    foreach ($p in $pairs) {
-        $pairRels[$p.rel] = $true
-        $dst = Join-Path $root ($p.rel -replace '/', '\')
-        if (-not (Test-Path -LiteralPath $dst)) {
-            $staleFallback += "$($p.rel) (fallback missing - run bootstrap-kit)"
-            continue
-        }
-        if (Test-KitReparse $dst) { $links++; continue }
-        $srcHash = Get-KitFileHash $p.src
-        $dstHash = Get-KitFileHash $dst
-        if ($srcHash -eq $dstHash) {
-            $inSync++
-            $lt = (Get-Item -LiteralPath $dst -Force).LinkType
-            if ($lt -eq 'HardLink') { $hardlinks++ } else { $copies++ }
-        } else {
-            $staleFallback += "$($p.rel) (content differs from kit - run bootstrap-kit)"
-        }
-    }
-    foreach ($rel in $recorded.Keys) {
-        if ($pairRels.ContainsKey($rel)) { continue }
-        $dst = Join-Path $root ($rel -replace '/', '\')
-        if (-not (Test-Path -LiteralPath $dst)) { continue }
-        if (Test-KitReparse $dst) { continue }
-        $info = $recorded[$rel]
-        $srcPath = Join-Path $root ($info.source -replace '/', '\')
-        if (Test-Path -LiteralPath $srcPath) { continue }
-        $dstHash = Get-KitFileHash $dst
-        if ($dstHash -eq $info.sha) {
-            $staleFallback += "$rel (orphan: source removed upstream - bootstrap-kit will prune)"
-        } else {
-            $staleFallback += "$rel (orphan with local edits - kept)"
-        }
-    }
-    if ($staleFallback.Count -gt 0) {
-        Write-WarnX "$($staleFallback.Count) file fallback(s) out of sync:"
-        $staleFallback | ForEach-Object { Write-Host "       $_" }
-    } elseif ($links -eq 0 -and $inSync -eq 0) {
-        Write-Ok "no file fallback kit paths"
-    } elseif ($inSync -gt 0 -and (Test-KitSymlinkPossible)) {
-        Write-WarnX "$inSync in-sync file fallback(s) are not links ($hardlinks hardlink(s), $copies copy(ies); $links link(s)) - run bootstrap-kit to upgrade"
-    } else {
-        Write-Ok "$links link(s), $hardlinks hardlink(s), $copies copy(ies) in sync"
-    }
+    # 8. (removed) - fallback drift is covered by engine plan (check 5+8)
+    #    and verify (check 4); orphans are swept by apply.
 
-    # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only)
+    # 9. SKILL.md frontmatter (idea: teamai ensureSkillFrontmatter; WARN only).
+    #    Paths: core/cursor/skills + stacks/*/cursor/skills + stacks/*/skills.
     $sfTool = Join-Path $harness "tools\skill-frontmatter\skill-frontmatter.py"
-    $py = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
     if ($py -and (Test-Path -LiteralPath $sfTool)) {
-        $sfOut = & $py.Source $sfTool lint (Join-Path $harness "skills") (Join-Path $harness "cursor\skills") 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Ok "skill frontmatter"
+        $sfDirs = @()
+        $coreSkills = Join-Path $harness "core\cursor\skills"
+        if (Test-Path -LiteralPath $coreSkills) { $sfDirs += $coreSkills }
+        Get-ChildItem -LiteralPath (Join-Path $harness "stacks") -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $d1 = Join-Path $_.FullName "cursor\skills"
+            $d2 = Join-Path $_.FullName "skills"
+            if (Test-Path -LiteralPath $d1) { $sfDirs += $d1 }
+            if (Test-Path -LiteralPath $d2) { $sfDirs += $d2 }
+        }
+        if ($sfDirs.Count -eq 0) {
+            Write-Info "skill frontmatter: no skill dirs found"
         } else {
-            Write-WarnX "skill frontmatter issues (fix: python harness/tools/skill-frontmatter/skill-frontmatter.py fix ...):"
-            $sfOut | ForEach-Object { Write-Host "       $_" }
+            $sfOut = & $py.Source $sfTool lint @sfDirs 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "skill frontmatter"
+            } else {
+                Write-WarnX "skill frontmatter issues (fix: python harness/tools/skill-frontmatter/skill-frontmatter.py fix ...):"
+                $sfOut | ForEach-Object { Write-Host "       $_" }
+            }
         }
     }
 
     # 10. kit links tracked in the consumer index (Windows junction traversal:
     #     git follows reparse points with core.symlinks=false and records kit
     #     content as ordinary blobs -> fresh clone gets stale copies, not links).
-    $layoutTool = Join-Path $harness "tools\kit-layout\kit_layout.py"
-    $py = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
-    if ($py -and (Test-Path -LiteralPath $layoutTool)) {
-        $tkOut = & $py.Source $layoutTool tracked $root --harness-rel $HarnessRel 2>&1
+    if ($py -and (Test-Path -LiteralPath $kitLayout)) {
+        $tkOut = & $py.Source $kitLayout tracked $root --harness-rel $HarnessRel 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Ok "no kit links tracked in consumer index"
         } else {

@@ -8,7 +8,7 @@ from pathlib import Path
 
 KIT_ROOT = Path(__file__).resolve().parents[2]
 OVERLAYS = Path(__file__).resolve().parent / "overlays"
-TARGET = KIT_ROOT / "skills" / "cc-1c"
+TARGET = KIT_ROOT / "stacks" / "1c" / "skills"
 META = ("meta-edit", "meta-compile", "meta-validate")
 
 

@@ -1,0 +1,11 @@
+---
+description: Правила markdown в репозитории (lint, ссылки, имена файлов)
+alwaysApply: true
+---
+
+Канон: [markdown-formatting.md](../../harness/core/docs/ai/markdown-formatting.md).
+Раскладка docs: [docs-layout.md](../../harness/core/docs/ai/docs-layout.md).
+
+После правки `.md` — `./node_modules/.bin/markdownlint путь` (без `rtk`;
+нет node_modules → `npx markdownlint-cli`).
+Новые имена файлов — латиница. Ссылки — без percent-encoding кириллицы.
