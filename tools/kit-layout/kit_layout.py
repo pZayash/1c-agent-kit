@@ -560,7 +560,12 @@ def known_stack_ids(ctx):
     rc, out, _ = git_run(ctx.resolve('harness'), 'ls-tree', '--name-only',
                          'HEAD', 'stacks/')
     if rc == 0:
-        ids.update(s.strip('/') for s in out.splitlines() if s.strip())
+        for s in out.splitlines():
+            s = s.strip().strip('/')
+            if s.startswith('stacks/'):
+                s = s[len('stacks/'):]
+            if s and '/' not in s:
+                ids.add(s)
     return ids
 
 
@@ -616,6 +621,51 @@ def head_stack_dirs(harness_abs):
                             'exists; refusing disk-only synthesis '
                             '(would sweep stack links)')
     return {x.strip() for x in out.splitlines() if x.strip()}, None, None
+
+
+def head_stack_paths(harness_abs):
+    """Files under stacks/ present in HEAD (git ls-tree -r --name-only
+    HEAD stacks/). None when the kit is not a git checkout or the
+    listing fails - callers then fall back to disk-only checks (used
+    for WARN heuristics only, unlike head_stack_dirs which guards
+    sweeps)."""
+    harness_abs = Path(harness_abs)
+    if not (harness_abs / '.git').exists():
+        return None
+    rc, out, _ = git_run(harness_abs, 'ls-tree', '-r', '--name-only',
+                         'HEAD', 'stacks/')
+    if rc != 0:
+        return None
+    return {x.strip() for x in out.splitlines() if x.strip()}
+
+
+# Dirs/files under stacks/<s>/ that mean the stack ships content even
+# when they synthesize no publishable resource: docs/ai is a canonical
+# layer (published as consumer stubs, not kit links), skills/ and
+# deps-check.* are declared/validated elsewhere. A stack with only
+# stack.json still warns.
+STACK_CONTENT_MARKERS = (
+    'cursor', 'skills', 'tools', 'docs',
+    'deps-check.sh', 'deps-check.ps1',
+)
+
+
+def stack_has_content(harness_abs, sid, head_paths=None):
+    """stacks/<sid>/ holds at least one canonical content dir/file.
+
+    Checks disk and HEAD (sparse checkouts can hide committed dirs);
+    head_paths=None fetches the HEAD listing lazily."""
+    base = f'stacks/{sid}'
+    for m in STACK_CONTENT_MARKERS:
+        if (Path(harness_abs) / base / m).exists():
+            return True
+    if head_paths is None:
+        head_paths = head_stack_paths(harness_abs)
+    if not head_paths:
+        return False
+    prefixes = tuple(f'{base}/{m}/' for m in STACK_CONTENT_MARKERS)
+    exact = {f'{base}/{m}' for m in STACK_CONTENT_MARKERS}
+    return any(p in exact or p.startswith(prefixes) for p in head_paths)
 
 
 def synthesized_stack_resources(harness_abs):
@@ -1633,15 +1683,23 @@ def main(argv=None):
             return 2
         # A stack in this command's scope without a single publishable
         # resource is suspicious (forgot the canonical dirs?). WARN only.
+        # Stacks shipping canonical content that synthesizes nothing
+        # (e.g. docs/ai) are legitimate and stay quiet.
         if a.command in ('plan', 'apply'):
             scope = (known_stack_ids(ctx)
                      if a.all_stacks or '*' in cfg['stacks']
                      else cfg['stacks'])
             claimed = {s for r in resources for s in (r.get('stacks') or [])}
-            for s in sorted(scope):
-                if s != '*' and s not in claimed and '*' not in claimed:
-                    ctx.say('WARN', f'WARN stack "{s}": no publishable '
-                                    f'resources')
+            quiet = [s for s in sorted(scope)
+                     if s != '*' and s not in claimed and '*' not in claimed]
+            if quiet:
+                harness_abs = ctx.resolve('harness')
+                head_paths = head_stack_paths(harness_abs)
+                quiet = [s for s in quiet
+                         if not stack_has_content(harness_abs, s, head_paths)]
+            for s in quiet:
+                ctx.say('WARN', f'WARN stack "{s}": no publishable '
+                                f'resources')
 
     # Namespace pre-scan: never start link work in a tree owned by another
     # OS/namespace (silent no-op + green verify is worse than a hard error).
