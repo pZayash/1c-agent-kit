@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# Kit load engine — consumer root: harness/stacks/1c/tools/load-changed-files/../../..
+# Kit load engine — consumer root ищется подъёмом от каталога движка до маркера
+# (см. _resolve_consumer_root): после миграции на слои движок лежит в
+# harness/stacks/1c/tools/load-changed-files, до неё — в harness/tools/load-changed-files.
 # Agent-slot CRLF wrapper — в корневом load-changed-files.sh потребителя.
 
 # ==============================================================================
@@ -315,7 +317,28 @@ timing_summary() {
 
 # OS-абстракция (generic: tools/os/ у потребителя)
 _KIT_LOAD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_CONSUMER_ROOT="$(cd "${_KIT_LOAD_DIR}/../../.." && pwd)"
+# Корень потребителя — не арифметикой "../../..", а по маркеру: жёсткая глубина
+# ломается при смене раскладки kit (core/stacks vs legacy), а также когда движок
+# зовут через линк tools/load-changed-files. Маркер корня: tools/load-project-env.sh
+# (его source'ит движок) + load-changed-files.sh или .kit.json рядом — так корень
+# не спутать с harness/ (в нём ни того, ни другого нет).
+_resolve_consumer_root() {
+    local dir="$1"
+    while [[ -n "$dir" && "$dir" != "/" && "$dir" != "." ]]; do
+        if [[ -f "$dir/tools/load-project-env.sh" ]] \
+            && { [[ -f "$dir/load-changed-files.sh" ]] || [[ -f "$dir/.kit.json" ]]; }; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+if ! _CONSUMER_ROOT="$(_resolve_consumer_root "$_KIT_LOAD_DIR")"; then
+    # Последний резерв — историческая глубина legacy-раскладки
+    # (<root>/harness/tools/load-changed-files → ../../..).
+    _CONSUMER_ROOT="$(cd "${_KIT_LOAD_DIR}/../../.." && pwd)"
+fi
 # shellcheck source=tools/load-project-env.sh
 source "${_CONSUMER_ROOT}/tools/load-project-env.sh"
 load_project_env "${_CONSUMER_ROOT}"
