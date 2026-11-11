@@ -1,0 +1,9 @@
+{
+  "id": "node",
+  "description": "JavaScript/TypeScript (Node) stack",
+  "layout_version": 1,
+  "deps": [
+    "node",
+    "npm"
+  ]
+}

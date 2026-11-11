@@ -1,0 +1,8 @@
+{
+  "id": "py",
+  "description": "Python stack",
+  "layout_version": 1,
+  "deps": [
+    "python"
+  ]
+}
