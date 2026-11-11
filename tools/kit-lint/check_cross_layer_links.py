@@ -55,13 +55,26 @@ LINK = re.compile(r"(?<!!)\[[^\]]*\]\(\s*<([^>]+)>\s*(?:\"[^\"]*\"\s*)?\)|"
                   r"(?<!!)\[[^\]]*\]\(\s*([^\s)]+)")
 SKIP_SCHEMES = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
+_HERE = Path(__file__).resolve()
+sys.path.insert(0, str(_HERE.parent.parent / "kit-layout"))
+import kit_layout  # noqa: E402  (pure functions only; stdlib)
+
 
 def load_mounts(kit_root: Path):
-    """(source_prefix, target_prefix, kind) из layout.json."""
+    """(source_prefix, target_prefix, kind) из layout.json + convention-
+    synthesized stack resources (engine, не сырой JSON). Kit без .git —
+    синтез по диску + WARN."""
     layout = kit_root / "tools" / "kit-layout" / "layout.json"
     mounts = []
     if layout.is_file():
-        for res in json.loads(layout.read_text(encoding="utf-8"))["resources"]:
+        if not (kit_root / ".git").exists():
+            print("WARN: kit without .git — synthesized resources resolved "
+                  "from disk only", file=sys.stderr)
+        resources, errors = kit_layout.all_layout_resources(
+            json.loads(layout.read_text(encoding="utf-8")), kit_root)
+        for e in errors:
+            print(f"WARN: {e}", file=sys.stderr)
+        for res in resources:
             src = res["source"].rstrip("/")
             if src.startswith("harness/"):
                 src = src[len("harness/"):]

@@ -262,6 +262,22 @@ if (Test-Path -LiteralPath $harness) {
         }
     }
 
+    # 9b. kit-lint suite (WARN only in doctor; in kit CI these are gates):
+    #     core purity, cross-layer links, stack structural rules.
+    if ($py) {
+        foreach ($chk in @("check_core_purity.py", "check_cross_layer_links.py", "kit_lint.py")) {
+            $script = Join-Path $harness "tools\kit-lint\$chk"
+            if (-not (Test-Path -LiteralPath $script)) { continue }
+            $cOut = & $py.Source $script $harness 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "kit-lint $($chk -replace '\.py$','')"
+            } else {
+                Write-WarnX "kit-lint $($chk -replace '\.py$',''):"
+                $cOut | Select-Object -First 15 | ForEach-Object { Write-Host "       $_" }
+            }
+        }
+    }
+
     # 10. kit links tracked in the consumer index (Windows junction traversal:
     #     git follows reparse points with core.symlinks=false and records kit
     #     content as ordinary blobs -> fresh clone gets stale copies, not links).

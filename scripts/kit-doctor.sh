@@ -215,6 +215,23 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     rm -f "$sflog"
   fi
 
+  # 9b. kit-lint suite (WARN only in doctor; in kit CI these are gates):
+  #     core purity, cross-layer links, stack structural rules.
+  if [[ -n "$PY" ]]; then
+    for chk in check_core_purity.py check_cross_layer_links.py kit_lint.py; do
+      script="$HARNESS_ROOT/tools/kit-lint/$chk"
+      [[ -f "$script" ]] || continue
+      clog="$(mktemp)"
+      if "$PY" "$script" "$HARNESS_ROOT" >"$clog" 2>&1; then
+        ok "kit-lint ${chk%.py}"
+      else
+        warn "kit-lint ${chk%.py}:"
+        sed 's/^/       /' "$clog" | head -15
+      fi
+      rm -f "$clog"
+    done
+  fi
+
   # 10. kit links tracked in the consumer index (Windows junction traversal:
   #     git follows reparse points with core.symlinks=false and records kit
   #     content as ordinary blobs -> fresh clone gets stale copies, not links).
