@@ -70,7 +70,7 @@ def load_mounts(kit_root: Path):
         if not (kit_root / ".git").exists():
             print("WARN: kit without .git — synthesized resources resolved "
                   "from disk only", file=sys.stderr)
-        resources, errors = kit_layout.all_layout_resources(
+        resources, errors, _warns = kit_layout.all_layout_resources(
             json.loads(layout.read_text(encoding="utf-8")), kit_root)
         for e in errors:
             print(f"WARN: {e}", file=sys.stderr)

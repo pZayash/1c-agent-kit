@@ -601,17 +601,21 @@ def discover_stacks(harness_abs):
 
 def head_stack_dirs(harness_abs):
     """Every dir under stacks/ present in HEAD, one ls-tree batch
-    (git ls-tree -r -d HEAD stacks/). None when the kit is not a git
-    checkout - synthesis then falls back to disk-only semantics
-    (on-disk dir = untracked = synthesize)."""
+    (git ls-tree -r -d HEAD stacks/). Returns (dirs, warn, error):
+    dirs None + warn when the kit is not a git checkout (disk-only
+    synthesis); error when .git exists but ls-tree failed - silently
+    falling back to disk-only would orphan-sweep stack links."""
     harness_abs = Path(harness_abs)
     if not (harness_abs / '.git').exists():
-        return None
+        return None, ('kit has no .git; stack dirs checked on disk '
+                      'only (no sparse protection)'), None
     rc, out, _ = git_run(harness_abs, 'ls-tree', '-r', '-d',
                          '--name-only', 'HEAD', 'stacks/')
     if rc != 0:
-        return None
-    return {x.strip() for x in out.splitlines() if x.strip()}
+        return None, None, ('git ls-tree HEAD failed though .git '
+                            'exists; refusing disk-only synthesis '
+                            '(would sweep stack links)')
+    return {x.strip() for x in out.splitlines() if x.strip()}, None, None
 
 
 def synthesized_stack_resources(harness_abs):
@@ -625,8 +629,12 @@ def synthesized_stack_resources(harness_abs):
     protection still applies. Absent in both -> skipped silently: a stack
     need not ship all four canonical dirs."""
     harness_abs = Path(harness_abs)
-    head_dirs = head_stack_dirs(harness_abs)
-    out = []
+    head_dirs, git_warn, git_err = head_stack_dirs(harness_abs)
+    out, errors, warns = [], [], []
+    if git_err:
+        return out, [git_err], warns
+    if git_warn:
+        warns.append(git_warn)
     for s in discover_stacks(harness_abs):
         for prefix, rel, kind, target, manifest in CANON_STACK_RESOURCES:
             p = f'stacks/{s}/{rel}'
@@ -642,7 +650,7 @@ def synthesized_stack_resources(harness_abs):
                 'stacks': [s],
                 'synthesized': True,
             })
-    return out
+    return out, errors, warns
 
 
 def resource_name(res):
@@ -654,12 +662,12 @@ def all_layout_resources(layout, harness_abs):
     """Explicit layout resources + synthesized stack resources inserted
     before the first alias (canonical order core -> stacks -> aliases).
     Returns (resources, errors): an explicit resource with the same
-    kind+source+target as a synthesized one is a hard duplicate ERROR."""
+    kind+source+target as a synthesized one is a hard duplicate ERROR.
+    Returns (resources, errors, warnings)."""
     resources = list(layout['resources'])
     sig = {(r['kind'], r['source'], r['target']): r.get('id')
            for r in resources}
-    synth = synthesized_stack_resources(harness_abs)
-    errors = []
+    synth, errors, warns = synthesized_stack_resources(harness_abs)
     for r in synth:
         key = (r['kind'], r['source'], r['target'])
         if key in sig:
@@ -668,15 +676,15 @@ def all_layout_resources(layout, harness_abs):
     idx = next((i for i, r in enumerate(resources)
                 if r['kind'] == 'alias'), len(resources))
     resources[idx:idx] = synth
-    return resources, errors
+    return resources, errors, warns
 
 
 def load_deps_registry(harness_abs):
     """{'core': [...], 'stacks': {s: [...]}} read from core/core.json
-    (legacy core/deps.json fallback) and stacks/*/stack.json on disk."""
+    and stacks/*/stack.json on disk."""
     harness_abs = Path(harness_abs)
     deps = {'core': [], 'stacks': {}}
-    for name in ('core/core.json', 'core/deps.json'):
+    for name in ('core/core.json',):
         p = harness_abs / name
         if p.is_file():
             try:
@@ -714,14 +722,14 @@ def _layout_version_check(raw, where, ctx, errors):
 
 
 def validate_layout_versions(ctx, cfg, stack_ids):
-    """layout_version in .kit.json (raw), core/core.json (deps.json
-    fallback) and stack.json of effective stacks; kit-lint re-checks
-    stack.json for ALL stacks."""
+    """layout_version in .kit.json (raw), core/core.json and
+    stack.json of effective stacks; kit-lint re-checks stack.json
+    for ALL stacks."""
     errors = []
     if cfg['raw'] is not None:
         _layout_version_check(cfg['raw'], '.kit.json', ctx, errors)
     harness = ctx.resolve('harness')
-    for name in ('core/core.json', 'core/deps.json'):
+    for name in ('core/core.json',):
         p = harness / name
         if p.is_file():
             try:
@@ -814,7 +822,7 @@ def env_source_root(root):
     return None
 
 
-def print_config(ctx, cfg, as_json, resources=None):
+def print_config(ctx, cfg, as_json, resources=None, all_stacks=False):
     """Resolved view of the consumer config - the ONLY .kit.json parser
     scripts (bootstrap/doctor/init-deps/link-*) are allowed to call."""
     if cfg['source_root'] is not None:
@@ -837,7 +845,8 @@ def print_config(ctx, cfg, as_json, resources=None):
         'harness_rel': ctx.harness_rel,
         'manifests': {'fallback': ctx.manifest_rel, 'lock': LOCK_REL},
         'resources': [resource_name(r) for r in
-                      effective_resources(resources or [], cfg['stacks'])],
+                      (resources or [] if all_stacks else
+                       effective_resources(resources or [], cfg['stacks']))],
         'deps': load_deps_registry(ctx.resolve('harness')),
         'warnings': cfg['warn'],
     }
@@ -1293,7 +1302,8 @@ def check_target_collisions(ctx, eff):
                 continue
             if include and child.name not in include:
                 continue
-            claims.append((f'{base}/{child.name}', rid))
+            claims.append((os.path.normcase(
+                f'{base}/{child.name}').replace('\\', '/'), rid))
     hits = set()
     for i, (a, ra) in enumerate(claims):
         for b, rb in claims[i + 1:]:
@@ -1594,20 +1604,20 @@ def main(argv=None):
     # parser scripts may use for it.
     cfg = load_kit_config(ctx.root)
     errors = validate_kit_config(ctx, cfg)
-    resources, res_errors = all_layout_resources(
+    resources, res_errors, res_warns = all_layout_resources(
         layout, ctx.resolve('harness'))
     errors += res_errors
     errors += validate_layout_stacks(ctx, resources)
     errors += validate_layout_versions(
         ctx, cfg, cfg['stacks'] if not errors else [])
-    for w in cfg['warn']:
+    for w in res_warns + cfg['warn']:
         print(f'WARN {w}', file=sys.stderr)
     if errors:
         for e in errors:
             print(f'ERROR {e}', file=sys.stderr)
         return 2
     if a.command == 'print-config':
-        print_config(ctx, cfg, a.json, resources)
+        print_config(ctx, cfg, a.json, resources, a.all_stacks)
         return 0
     eff = (resources if a.all_stacks or '*' in cfg['stacks']
            else effective_resources(resources, cfg['stacks']))

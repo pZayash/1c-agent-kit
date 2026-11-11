@@ -53,14 +53,19 @@ def main() -> int:
         if not (kit_root / ".git").exists():
             print("WARN: kit without .git — synthesized resources resolved "
                   "from disk only", file=sys.stderr)
-        resources, errors = kl.all_layout_resources(
+        resources, errors, warns = kl.all_layout_resources(
             json.loads(layout_path.read_text(encoding="utf-8")), kit_root)
         findings += [("FAIL", e) for e in errors]
+        findings += [("WARN", w) for w in warns]
 
+    stack_ids = [sj.parent.name
+                 for sj in kit_root.glob("stacks/*/stack.json")]
     claimed = {}
     for r in resources:
         for s in r.get("stacks") or []:
-            claimed[s] = claimed.get(s, 0) + 1
+            # '*' resources publish to every stack - count for all ids.
+            for sid in (stack_ids if s == '*' else [s]):
+                claimed[sid] = claimed.get(sid, 0) + 1
     dep_ids = core_dep_ids(kit_root)
 
     for sj in sorted(kit_root.glob("stacks/*/stack.json")):
