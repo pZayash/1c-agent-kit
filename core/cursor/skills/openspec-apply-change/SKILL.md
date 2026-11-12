@@ -153,6 +153,23 @@ from conversation context. If vague or ambiguous you MUST prompt for available c
    REQUIREMENT/MODULE_CONTRACT/VERIFIED-BY (см. `rules.tasks` в `openspec/config.yaml`).
    Если нет — предупредить пользователя (не блокировать, но явно сказать).
 
+   **Владелец кода (OWNER) — режим правки**
+
+   Перед правкой метода/модуля определить владельца. Канон —
+   [tools/spec-lint/README.md](../../../tools/spec-lint/README.md) § Владелец кода.
+
+   - Маркер `OWNER:` (приоритет: метод > регион > модуль) или дефолт по
+     префиксу (`is_ours()`): наш код → `agent`, чужой/вендорский → `vendor`;
+     `human` — только явным маркером.
+   - `agent` — black box: рефактор, консолидация дублей, фикс смежного без
+     спроса; отчёт — по diff.
+   - `human` — копилот: минимальный diff, найденные проблемы сообщать, не
+     чинить без спроса.
+   - `vendor` — read-only: доработка через `PROJECT_PREFIX`-инъекции/CFE.
+   - Если `tasks.md`/`design.md` назначают маркеры `OWNER:` — расставить по
+     решению; спор о владельце — пауза и вопрос оператору, не гадать.
+   - Архитектура и приёмка результата — всегда за человеком.
+
    **Pause if:**
 
 7. **On completion or pause, show status**
