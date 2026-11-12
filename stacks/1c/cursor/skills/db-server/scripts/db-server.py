@@ -7,18 +7,38 @@
 Примеры:
   python db-server.py -Action yaml
   python db-server.py -Action start
+  python db-server.py -Action start --force            # снять чужой hold осознанно
   python db-server.py -Action status
-  python db-server.py -Action stop
+  python db-server.py -Action stop                     # + hold «пауза»
+  python db-server.py -Action stop --offline           # + hold «оффлайн-цикл» (ttl 45 мин)
+  python db-server.py -Action stop --no-hold           # для watchdog
   python db-server.py -Action basic        # Authorization: Basic (UTF-8), скрыт
   python db-server.py -Action basic --show
+
+Коды возврата (важно для скриптов: 127 у ibcmd — общий «не выполнено»):
+
+  0  успех (start: узел наш, порт наш, HTTP отвечает)
+  2  не удалось погасить процесс (права/сессия) — pid-файл сохранён, поставлен .stop
+  3  start не поднял узел: порт не открылся или его держит чужой pid
+  4  отказ из-за чужого hold/лока старта (см. текст) либо ошибка конфигурации
+  5  лок старта занят: параллельный start уже идёт
+
+Грабли, из-за которых это переписано (2026-11-11):
+  * «узел запущен: pid=…» печаталось и при закрытых портах — агент считал базу
+    поднятой и воевал с watchdog'ом;
+  * -Action start снимал .hold любого владельца: чужой оффлайн-цикл ломался;
+  * параллельные старты (агент + watchdog + руками) оставляли два ibsrv и pid-файл
+    на проигравшего, а следующий stop гасил победителя.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -28,6 +48,15 @@ import uuid
 from pathlib import Path
 
 DEFAULT_ACTIONS = ('yaml', 'start', 'stop', 'status', 'basic')
+
+# Сколько живёт hold по умолчанию. Оффлайн-цикл (import+apply) — 20–25 мин,
+# поэтому 45 мин: успевает любой apply, но забытый hold не блокирует базу навсегда.
+TTL_OFFLINE = 45 * 60
+TTL_PAUSE = 4 * 3600
+# Лок старта считается протухшим, если процесс, взявший его, мёртв, или он старше.
+TTL_START_LOCK = 300
+# Сколько ждать готовности узла (1С открывает файловую ИБ 17 ГБ не мгновенно).
+DEFAULT_START_TIMEOUT = 180
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -64,6 +93,15 @@ def yaml_scalar(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def fmt_age(seconds: float) -> str:
+    seconds = int(max(0, seconds))
+    if seconds < 120:
+        return f'{seconds} с'
+    if seconds < 7200:
+        return f'{seconds // 60} мин'
+    return f'{seconds / 3600:.1f} ч'
+
+
 class Node:
     def __init__(self, root: Path, env: dict) -> None:
         self.root = root
@@ -76,9 +114,11 @@ class Node:
         self.work = work
         self.pid_file = work / 'ibsrv.pid'
         self.log_file = work / 'ibsrv.log'
-        # Пауза watchdog'а (\ibsrv\ibsrv-nodes-start): пустой файл .hold — узел не поднимается.
-        # Ставится на время оффлайн-цикла ibcmd (apply метаданных 20-25 мин).
+        # Пауза watchdog'а (\ibsrv\ibsrv-nodes-start): файл .hold — узел не поднимается.
+        # Формат — JSON (owner/reason/since/ttl/kind), пустой файл = «человек, без владельца».
         self.hold_file = work / '.hold'
+        # Мьютекс старта: два start одновременно (агент + watchdog + руками) недопустимы.
+        self.start_lock = work / '.start.lock'
         self.db_path = cfg(env, 'IBSRV_DB_PATH')
         self.name = cfg(env, 'IBSRV_NAME') or (Path(self.db_path).name if self.db_path else 'ib')
         self.config = cfg(env, 'IBSRV_CONFIG') or str(work / 'server.yaml')
@@ -93,6 +133,7 @@ class Node:
         self.extra_args = cfg(env, 'IBSRV_EXTRA_ARGS')
         self.services = [s.strip() for s in cfg(env, 'IBSRV_SERVICES',
                                                 'mcp,mcp-dev').split(',') if s.strip()]
+        self.start_timeout = int(cfg(env, 'IBSRV_START_TIMEOUT', str(DEFAULT_START_TIMEOUT)))
 
     # --- конфигурационный yaml -------------------------------------------
     def read_yaml_id(self) -> str:
@@ -143,21 +184,177 @@ class Node:
 
     @staticmethod
     def _alive(pid: int) -> bool:
+        """Жив ли процесс. Точное сравнение pid, не подстрока (pid 1053 ≠ 10536)."""
+        if not pid:
+            return False
         if os.name == 'nt':
-            out = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'],
-                                 capture_output=True, text=True).stdout
-            return str(pid) in out
+            out = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/NH', '/FO', 'CSV'],
+                                 capture_output=True, text=True, errors='replace').stdout or ''
+            for line in out.splitlines():
+                m = re.match(r'^"([^"]*)"\s*,\s*"(\d+)"', line)
+                if m and int(m.group(2)) == pid:
+                    return True
+            # tasklist на некоторых локалях печатает «нет задач» в stdout — не наш pid
+            return False
         try:
             os.kill(pid, 0)
             return True
         except OSError:
             return False
 
+    def port_owner(self, port: int) -> int:
+        """pid процесса, который слушает TCP-порт (0 — никто)."""
+        if os.name != 'nt':
+            out = subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'],
+                                 capture_output=True, text=True).stdout or ''
+            try:
+                return int(out.split()[0])
+            except Exception:  # noqa: BLE001
+                return 0
+        out = subprocess.run(['netstat', '-ano', '-p', 'tcp'],
+                             capture_output=True, text=True, errors='replace').stdout or ''
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 5 or 'LISTENING' not in parts[-2]:
+                continue
+            if not re.search(rf':{port}$', parts[1]):
+                continue
+            try:
+                return int(parts[-1])
+            except ValueError:
+                continue
+        return 0
+
     def port_open(self, port: int) -> bool:
         with socket.socket() as s:
             s.settimeout(2)
             return s.connect_ex(('127.0.0.1', port)) == 0
 
+    def http_probe(self, timeout: float = 5.0) -> int | None:
+        """Код ответа узла на корень его публикации (любой код = узел отвечает)."""
+        base = self.http_base if self.http_base.startswith('/') else '/' + self.http_base
+        if not base.endswith('/'):
+            base += '/'
+        try:
+            conn = http.client.HTTPConnection('127.0.0.1', self.http_port, timeout=timeout)
+            conn.request('GET', base)
+            resp = conn.getresponse()
+            resp.read(1)
+            conn.close()
+            return resp.status
+        except Exception:  # noqa: BLE001
+            return None
+
+    # --- hold (пауза для watchdog'а) и лок старта -------------------------
+    def caller_thread(self) -> str:
+        return (self.env.get('BB_THREAD_ID') or '').strip()
+
+    def hold_read(self) -> dict:
+        try:
+            raw = self.hold_file.read_text(encoding='utf-8', errors='replace').strip()
+        except FileNotFoundError:
+            return {}
+        if not raw:
+            return {'kind': 'manual', 'owner_thread': '', 'reason': 'пустой файл (поставлен руками)'}
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {'kind': 'manual', 'reason': raw[:200]}
+        except json.JSONDecodeError:
+            return {'kind': 'manual', 'reason': raw[:200]}
+
+    def hold_age(self, hold: dict) -> float:
+        try:
+            return time.time() - float(hold.get('since') or self.hold_file.stat().st_mtime)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def hold_write(self, kind: str, ttl: int, reason: str = '') -> None:
+        hold = {
+            'kind': kind,
+            'ttl': int(ttl),
+            'since': int(time.time()),
+            'owner_user': self.env.get('USERNAME') or self.env.get('USER') or '',
+            'owner_thread': self.caller_thread(),
+            'owner_cwd': str(Path.cwd()),
+            'reason': reason or ('offline ibcmd cycle' if kind == 'offline' else 'pause before offline work'),
+        }
+        self.hold_file.write_text(json.dumps(hold, ensure_ascii=False, indent=2) + '\n',
+                                  encoding='utf-8')
+
+    def hold_blocker(self, force: bool) -> dict | None:
+        """Возвращает hold, который запрещает start (None — можно стартовать)."""
+        if not self.hold_file.exists():
+            return None
+        hold = self.hold_read()
+        if force:
+            print(f"ВНИМАНИЕ: --force — снимаю чужой hold: {self.hold_describe(hold)}")
+            return None
+        age = self.hold_age(hold)
+        try:
+            ttl = float(hold.get('ttl') or TTL_PAUSE)
+        except (TypeError, ValueError):
+            ttl = TTL_PAUSE
+        if age > ttl:
+            print(f"ВНИМАНИЕ: hold протух ({self.hold_describe(hold, age)}) — снимаю и стартую")
+            return None
+        owner = (hold.get('owner_thread') or '').strip()
+        if owner and owner != self.caller_thread():
+            return hold
+        if owner and owner == self.caller_thread():
+            print(f"hold этого же треда ({owner}) — снимаю и стартую")
+            return None
+        # hold без владельца-треда (руками/консоль/watchdog): ведём себя как раньше,
+        # но громко говорим, чей он и сколько ему.
+        print(f"ВНИМАНИЕ: снимаю hold без владельца-треда: {self.hold_describe(hold, age)}")
+        return None
+
+    def hold_describe(self, hold: dict, age: float | None = None) -> str:
+        if age is None:
+            age = self.hold_age(hold)
+        kind = hold.get('kind') or '?'
+        reason = hold.get('reason') or '—'
+        thread = hold.get('owner_thread') or '—'
+        user = hold.get('owner_user') or '—'
+        ttl = hold.get('ttl') or '—'
+        return (f"kind={kind}, возраст {fmt_age(age)}, ttl={ttl} с, "
+                f"тред {thread}, пользователь {user}, причина: {reason}")
+
+    def _lock_alive(self) -> tuple[int, float]:
+        try:
+            data = json.loads(self.start_lock.read_text(encoding='utf-8'))
+            pid = int(data.get('pid') or 0)
+            since = float(data.get('since') or 0)
+        except Exception:  # noqa: BLE001
+            return 0, 0.0
+        if not self._alive(pid):
+            return 0, time.time() - since
+        return pid, time.time() - since
+
+    def start_lock_acquire(self) -> int:
+        """Взять лок старта. Возвращает pid чужого лока (0 — взяли)."""
+        for _ in range(2):
+            try:
+                fd = os.open(self.start_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                pid, age = self._lock_alive()
+                if age > TTL_START_LOCK or (pid and not self._alive(pid)):
+                    self.start_lock.unlink(missing_ok=True)
+                    continue
+                return pid or -1
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                json.dump({'pid': os.getpid(), 'since': time.time()}, fh)
+            return 0
+        return -1
+
+    def start_lock_release(self) -> None:
+        try:
+            data = json.loads(self.start_lock.read_text(encoding='utf-8'))
+            if int(data.get('pid') or 0) == os.getpid():
+                self.start_lock.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- действия --------------------------------------------------------
     def action_yaml(self) -> int:
         path = Path(self.config)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,48 +362,134 @@ class Node:
         print(f'конфигурация записана: {path}')
         return 0
 
-    def action_start(self) -> int:
-        if self.pid():
-            print(f'узел уже запущен, pid={self.pid()}')
-            self.hold_file.unlink(missing_ok=True)
-            self.stop_file.unlink(missing_ok=True)
-            return 0
-        # Явный старт = узел снова под контролем watchdog'а.
-        if self.hold_file.exists():
-            self.hold_file.unlink()
-            print(f'снят hold-файл watchdog\'а: {self.hold_file}')
-        self.stop_file.unlink(missing_ok=True)
-        self.action_yaml()
-        Path(self.data).mkdir(parents=True, exist_ok=True)
-        args = [self.exe, f'--config={self.config}', f'--data={self.data}']
-        if self.debug:
-            args += [f'--debug={self.debug}', f'--debug-port={self.debug_port}']
-        if self.regport:
-            args += [f'--direct-regport={self.regport}']
-        if self.extra_args:
-            args += shlex.split(self.extra_args)
-        log = open(self.log_file, 'wb')
-        kwargs: dict = {'stdout': log, 'stderr': subprocess.STDOUT, 'stdin': subprocess.DEVNULL}
-        if os.name == 'nt':
-            kwargs['creationflags'] = 0x00000008 | 0x08000000  # DETACHED | NEW_GROUP
+    def _log_rotate(self) -> None:
+        """Старый лог сохраняем: «лог пуст» после перезапуска убивал диагностику."""
+        try:
+            if self.log_file.exists() and self.log_file.stat().st_size > 0:
+                prev = self.log_file.with_suffix('.log.prev')
+                prev.unlink(missing_ok=True)
+                self.log_file.replace(prev)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _diagnose_not_ready(self, pid: int, owner: int, code: int | None) -> None:
+        print('ОШИБКА: узел не готов (база не поднята).', file=sys.stderr)
+        print(f'  мой pid: {pid} (жив: {"да" if self._alive(pid) else "нет"})', file=sys.stderr)
+        print(f'  http {self.http_port}: {"слушает, pid " + str(owner) if owner else "закрыт"}'
+              f', ответ узла: {code if code is not None else "нет"}', file=sys.stderr)
+        print(f'  отладка {self.debug_port}: {"слушает" if self.port_open(self.debug_port) else "закрыт"}',
+              file=sys.stderr)
+        print(f'  /S {self.regport}: {"слушает" if self.port_open(self.regport) else "закрыт"}',
+              file=sys.stderr)
+        print(f'  лог: {self.log_file} ({self.log_file.stat().st_size if self.log_file.exists() else 0} байт)',
+              file=sys.stderr)
+        if owner and owner != pid:
+            print(f'  ВНИМАНИЕ: порт держит чужой процесс {owner} — это не наш узел. '
+                  f'Чужой не убиваем: {self._owner_hint(owner)}', file=sys.stderr)
         else:
-            kwargs['start_new_session'] = True
-        proc = subprocess.Popen(args, **kwargs)
-        self.pid_file.write_text(str(proc.pid), encoding='utf-8')
-        for _ in range(30):
-            time.sleep(1)
-            if proc.poll() is not None:
-                print('узел завершился сразу — смотри лог:')
-                print(self.log_file.read_text(encoding='utf-8', errors='replace')[-1500:])
-                return 1
-            if self.port_open(self.http_port):
-                break
-        print(f'узел запущен: pid={proc.pid}')
-        print(f'  веб-клиент/HTTP-сервисы: http://{self.http_address}:{self.http_port}/')
-        print(f'  прямое соединение (/S): {self.http_address}:{self.regport}\\{self.name}')
-        print(f'  отладка ({self.debug}): порт {self.debug_port}')
-        print(f'  лог: {self.log_file}')
-        return 0
+            print('  что делать: подождать 1-2 мин и повторить status; не убивать процесс '
+                  'taskkill /F (это блокировка ИБ/лицензия, а не битая база); '
+                  'журнал 1С: .tmp/ibsrv/data/log-data', file=sys.stderr)
+
+    def _owner_hint(self, owner: int) -> str:
+        out = subprocess.run(['tasklist', '/FI', f'PID eq {owner}', '/NH', '/FO', 'CSV'],
+                             capture_output=True, text=True, errors='replace').stdout or ''
+        line = (out.splitlines() or [''])[0].strip()
+        return f'tasklist: {line}' if line else 'tasklist /FI "PID eq %d"' % owner
+
+    def action_start(self, force: bool = False) -> int:
+        pid = self.pid()
+        owner = self.port_owner(self.http_port)
+        if pid:
+            if owner and owner != pid:
+                print(f'ОШИБКА: pid-файл указывает на {pid}, а порт {self.http_port} держит {owner}.',
+                      file=sys.stderr)
+                print(f'  чужой узел не трогаем: {self._owner_hint(owner)}', file=sys.stderr)
+                return 3
+            if owner == pid and self.http_probe() is not None:
+                print(f'узел уже запущен и отвечает, pid={pid}')
+                self.hold_file.unlink(missing_ok=True)
+                return 0
+            print(f'ОШИБКА: узел pid={pid} жив, но не отвечает на http://127.0.0.1:{self.http_port}'
+                  f'{self.http_base}', file=sys.stderr)
+            print('  повторный запуск не делаю (это не «упал», а завис: база/лицензия/запрос).',
+                  file=sys.stderr)
+            self._diagnose_not_ready(pid, owner, None)
+            return 3
+
+        blocker = self.hold_blocker(force)
+        if blocker is not None:
+            print('ОТКАЗ: база на паузе другого владельца — не снимаю чужой hold.', file=sys.stderr)
+            print(f'  hold: {self.hold_describe(blocker)}', file=sys.stderr)
+            print('  чей hold — тот и возобновляет (его -Action start снимет hold автоматически).',
+                  file=sys.stderr)
+            print(f'  если пауза точно не нужна: {sys.argv[0]} -Action start --force', file=sys.stderr)
+            return 4
+
+        lock_pid = self.start_lock_acquire()
+        if lock_pid:
+            print(f'ОТКАЗ: уже идёт старт (pid {lock_pid if lock_pid > 0 else "?"}, '
+                  f'лок {self.start_lock}). Подождите 1-2 мин и повторите status.', file=sys.stderr)
+            return 5
+        try:
+            if self.hold_file.exists():
+                self.hold_file.unlink(missing_ok=True)
+            self.action_yaml()
+            Path(self.data).mkdir(parents=True, exist_ok=True)
+            args = [self.exe, f'--config={self.config}', f'--data={self.data}']
+            if self.debug:
+                args += [f'--debug={self.debug}', f'--debug-port={self.debug_port}']
+            if self.regport:
+                args += [f'--direct-regport={self.regport}']
+            if self.extra_args:
+                args += shlex.split(self.extra_args)
+            self._log_rotate()
+            log = open(self.log_file, 'wb')
+            kwargs: dict = {'stdout': log, 'stderr': subprocess.STDOUT, 'stdin': subprocess.DEVNULL}
+            if os.name == 'nt':
+                kwargs['creationflags'] = 0x00000008 | 0x08000000  # DETACHED | NEW_GROUP
+            else:
+                kwargs['start_new_session'] = True
+            proc = subprocess.Popen(args, **kwargs)
+            self.pid_file.write_text(str(proc.pid), encoding='utf-8')
+            print(f'старт: pid={proc.pid}, ждём готовности до {self.start_timeout} с '
+                  f'(порт {self.http_port}, база {self.db_path})')
+            deadline = time.time() + self.start_timeout
+            code: int | None = None
+            while time.time() < deadline:
+                time.sleep(1)
+                if proc.poll() is not None:
+                    print('ОШИБКА: узел завершился сразу — лог:', file=sys.stderr)
+                    print(self.log_file.read_text(encoding='utf-8', errors='replace')[-1500:],
+                          file=sys.stderr)
+                    self.pid_file.unlink(missing_ok=True)
+                    return 3
+                owner = self.port_owner(self.http_port)
+                if owner == proc.pid:
+                    code = self.http_probe()
+                    if code is not None:
+                        break
+                elif owner and owner != proc.pid:
+                    print(f'ОШИБКА: порт {self.http_port} занял чужой процесс {owner} '
+                          f'(наш pid {proc.pid} висит без порта).', file=sys.stderr)
+                    print(f'  чужой узел не убиваем: {self._owner_hint(owner)}', file=sys.stderr)
+                    print('  что делать: -Action status на обеих базах, затем освободить порт '
+                          'у владельца (.stop + schtasks /Run или -Action stop в его воркспейсе).',
+                          file=sys.stderr)
+                    return 3
+            owner = self.port_owner(self.http_port)
+            if owner != proc.pid or code is None:
+                self._diagnose_not_ready(proc.pid, owner, code)
+                return 3
+            print(f'узел запущен и отвечает: pid={proc.pid} (владелец порта {self.http_port}: {owner})')
+            print(f'  веб-клиент/HTTP-сервисы: http://{self.http_address}:{self.http_port}/'
+                  f'  (GET {self.http_base} → {code})')
+            print(f'  прямое соединение (/S): {self.http_address}:{self.regport}\\{self.name}')
+            print(f'  отладка ({self.debug}): порт {self.debug_port}')
+            print(f'  лог: {self.log_file}')
+            return 0
+        finally:
+            self.start_lock_release()
 
     @property
     def stop_file(self) -> Path:
@@ -219,7 +502,7 @@ class Node:
         out = ''
         if os.name == 'nt':
             res = subprocess.run(['taskkill', '/PID', str(pid), '/F'],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, errors='replace')
             out = ((res.stdout or '') + (res.stderr or '')).strip()
         else:
             import signal
@@ -233,28 +516,44 @@ class Node:
                 return True, out
         return False, out
 
-    def action_stop(self, hold: bool = True) -> int:
+    def action_stop(self, hold: bool = True, offline: bool = False, ttl: int = 0) -> int:
+        owner = self.port_owner(self.http_port)
         pid = self.pid()
+        if owner and pid and owner != pid:
+            print(f'ВНИМАНИЕ: pid-файл указывает на {pid}, а порт {self.http_port} держит {owner} — '
+                  f'гашу владельца порта (это наш узел, pid-файл протух).')
+            pid = owner
+        elif owner and not pid:
+            print(f'ВНИМАНИЕ: pid-файла нет, но порт {self.http_port} держит {owner} — гашу его.')
+            pid = owner
+        elif owner and pid and owner == pid:
+            pid = owner
         if not pid:
             print('узел не запущен (hold-файл не ставится: базу держать нечего)')
+            self.pid_file.unlink(missing_ok=True)
             return 0
         # hold — до остановки узла, иначе watchdog успеет поднять базу посреди цикла.
         if hold:
-            self.hold_file.parent.mkdir(parents=True, exist_ok=True)
-            self.hold_file.write_text('', encoding='utf-8')
+            kind = 'offline' if offline else 'pause'
+            self.hold_write(kind, ttl or (TTL_OFFLINE if offline else TTL_PAUSE))
             print(f'hold-файл watchdog\'а поставлен: {self.hold_file}')
-            print('  снять: -Action start (или удалить файл, если узел должен подниматься сам)')
+            print(f'  {self.hold_describe(self.hold_read())}')
+            print('  снять: -Action start (этот же тред) или -Action start --force')
         else:
             self.hold_file.unlink(missing_ok=True)
         ok, out = self._kill(pid)
-        if ok:
+        still_owner = self.port_owner(self.http_port)
+        if ok and not still_owner:
             self.pid_file.unlink(missing_ok=True)
             self.stop_file.unlink(missing_ok=True)
-            print(f'узел остановлен (pid={pid})')
+            print(f'узел остановлен (pid={pid}, порты закрыты)')
             return 0
         # НЕ рапортуем успех: база осталась занятой, любая загрузка потом упадёт
         # «Ошибка блокировки информационной базы для конфигурирования».
         print(f'НЕ УДАЛОСЬ остановить узел (pid={pid}) — процесс жив, база заблокирована.')
+        if still_owner and still_owner != pid:
+            print(f'  порт {self.http_port} держит {still_owner} — это другой процесс, '
+                  f'проверьте, что база ваша: {self._owner_hint(still_owner)}')
         first = (out.splitlines() or [''])[0]
         if first:
             print(f'  taskkill: {first}')
@@ -278,17 +577,35 @@ class Node:
             open_ = self.port_open(port)
             listening += 1 if open_ else 0
             print(f'  {label}: {port} — {"слушает" if open_ else "закрыт"}')
-        if not pid and listening:
+        owner = self.port_owner(self.http_port)
+        print(f'  владелец порта {self.http_port}: {owner if owner else "нет"}')
+        code = self.http_probe() if owner else None
+        print(f'  ответ узла: {code if code is not None else "нет"}')
+        if pid and owner and owner != pid:
+            print(f'  ОШИБКА: pid-файл ({pid}) ≠ владелец порта ({owner}) — узел запущен другой сессией, '
+                  f'pid-файл протух')
+        if not pid and listening and not owner:
             print('  ВНИМАНИЕ: порты слушают, а pid-файла нет — узел запущен другой сессией')
-            print('  (pid-файл потерян старым stop/taskkill). Гасить: -Action stop (создаст .stop)')
+            print('  (pid-файл потерян старым stop/taskkill). Гасить: -Action stop')
             print('  или tasklist /FI "IMAGENAME eq ibsrv.exe" + taskkill из elevated-шелла.')
         if self.hold_file.exists():
-            age = int(time.time() - self.hold_file.stat().st_mtime) // 3600
-            print(f'  hold-файл: есть ({self.hold_file}, {age} ч) — watchdog базу не поднимает')
-            if age >= 24:
-                print('  ВНИМАНИЕ: hold старше суток — если оффлайн-цикл закончен, удалите файл')
+            hold = self.hold_read()
+            print(f'  hold-файл: есть — {self.hold_describe(hold)}')
+            try:
+                if self.hold_age(hold) > float(hold.get('ttl') or TTL_PAUSE):
+                    print('  ВНИМАНИЕ: hold протух — -Action start снимет его сам; '
+                          'если цикл ещё идёт, обновите hold (-Action stop)')
+            except (TypeError, ValueError):
+                pass
         else:
             print('  hold-файл: нет — база под контролем watchdog\'а')
+        if self.start_lock.exists():
+            lock_pid, lock_age = self._lock_alive()
+            if lock_pid:
+                print(f'  лок старта: занят pid {lock_pid}, возраст {fmt_age(lock_age)}')
+            else:
+                print(f'  лок старта: протух (pid мёртв, возраст {fmt_age(lock_age)}) — '
+                      f'снимется следующим start')
         return 0
 
     def action_basic(self, show: bool) -> int:
@@ -309,19 +626,31 @@ def main() -> int:
     parser.add_argument('--show', action='store_true', help='показать Basic-заголовок целиком')
     parser.add_argument('--no-hold', action='store_true',
                         help='stop: не ставить hold-файл watchdog-а (для скриптов, напр. start-ibsrv-nodes.ps1)')
+    parser.add_argument('--offline', action='store_true',
+                        help='stop: hold с kind=offline и ttl 45 мин (оффлайн-цикл ibcmd/designer)')
+    parser.add_argument('--ttl', type=int, default=0,
+                        help=f'stop: время жизни hold в секундах (по умолчанию {TTL_OFFLINE} для --offline, '
+                             f'{TTL_PAUSE} для паузы)')
+    parser.add_argument('--force', action='store_true',
+                        help='start: снять чужой hold/лок осознанно (печатает, чей он)')
+    parser.add_argument('--timeout', type=int, default=0,
+                        help=f'start: сколько ждать готовности узла, с (по умолчанию IBSRV_START_TIMEOUT '
+                             f'или {DEFAULT_START_TIMEOUT})')
     parser.add_argument('--root', default='.', help='корень потребителя (где .env)')
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     env = read_env(root)
+    if args.timeout:
+        env['IBSRV_START_TIMEOUT'] = str(args.timeout)
     node = Node(root, env)
 
     if args.Action == 'yaml':
         return node.action_yaml()
     if args.Action == 'start':
-        return node.action_start()
+        return node.action_start(force=args.force)
     if args.Action == 'stop':
-        return node.action_stop(hold=not args.no_hold)
+        return node.action_stop(hold=not args.no_hold, offline=args.offline, ttl=args.ttl)
     if args.Action == 'basic':
         return node.action_basic(args.show)
     return node.action_status()
