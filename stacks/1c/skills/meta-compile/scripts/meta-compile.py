@@ -26,7 +26,13 @@ def _load_loadconfig_module():
         if mod_path.is_file():
             spec = importlib.util.spec_from_file_location("loadconfig_xml", mod_path)
             mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            # loadconfig_xml импортирует соседний модуль longpath — его каталог
+            # должен быть в sys.path, иначе ModuleNotFoundError (2026-11-12).
+            sys.path.insert(0, str(mod_path.parent))
+            try:
+                spec.loader.exec_module(mod)
+            finally:
+                sys.path.pop(0)
             return mod
     return None
 
@@ -43,11 +49,21 @@ def esc_xml(s):
 def new_uuid():
     return str(uuid.uuid4())
 
+def to_dump_eol(content):
+    """EOL файлов дампа — CRLF (так пишет конфигуратор при /DumpConfigToFiles).
+
+    BOM+LF в CRLF-блобе давал whole-file diff в git (и новый чек bom-crlf
+    справедливо ругался ERROR): «изменён весь файл» вместо одной строки.
+    """
+    return content.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '\r\n')
+
 def write_utf8_bom(path, content):
     if _loadconfig is not None:
         content = _loadconfig.normalize_metadata_xml_text(content)
+    # newline='' — писать ровно то, что в строке (иначе Windows-текстовый режим
+    # сам превратит \n в \r\n, а на POSIX CRLF останется как есть).
     with open(path, 'w', encoding='utf-8-sig', newline='') as f:
-        f.write(content)
+        f.write(to_dump_eol(content))
 
 # ---------------------------------------------------------------------------
 # XML builder (lines list)

@@ -22,7 +22,13 @@ def _load_loadconfig_module():
         if mod_path.is_file():
             spec = importlib.util.spec_from_file_location("loadconfig_xml", mod_path)
             mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            # loadconfig_xml импортирует соседний модуль longpath — его каталог
+            # должен быть в sys.path, иначе ModuleNotFoundError (2026-11-12).
+            sys.path.insert(0, str(mod_path.parent))
+            try:
+                spec.loader.exec_module(mod)
+            finally:
+                sys.path.pop(0)
             return mod
     return None
 
@@ -2125,8 +2131,11 @@ def save_xml(tree, path):
     else:
         xml_bytes = xml_bytes.replace(b"&#13;", b"")
         xml_bytes = re.sub(rb"\r\n", b"\n", xml_bytes)
-    if not xml_bytes.endswith(b"\n"):
-        xml_bytes += b"\n"
+    # kit-local: EOL дампа — CRLF (как выгрузка конфигуратора). BOM+LF в CRLF-блобе
+    # давал whole-file diff в git, а чек bom-crlf — ERROR (2026-11-12).
+    xml_bytes = re.sub(rb"\r\n|\r", b"\n", xml_bytes).replace(b"\n", b"\r\n")
+    if not xml_bytes.endswith(b"\r\n"):
+        xml_bytes += b"\r\n"
     with open(path, "wb") as f:
         f.write(b"\xef\xbb\xbf")
         f.write(xml_bytes)
