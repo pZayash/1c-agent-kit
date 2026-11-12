@@ -12,23 +12,31 @@
   python db-server.py -Action stop                     # + hold «пауза»
   python db-server.py -Action stop --offline           # + hold «оффлайн-цикл» (ttl 45 мин)
   python db-server.py -Action stop --no-hold           # для watchdog
+  python db-server.py -Action hold-release              # снять свой hold (движок: конец цикла)
   python db-server.py -Action basic        # Authorization: Basic (UTF-8), скрыт
   python db-server.py -Action basic --show
 
 Коды возврата (важно для скриптов: 127 у ibcmd — общий «не выполнено»):
 
-  0  успех (start: узел наш, порт наш, HTTP отвечает)
+  0  успех (start: узел наш, порт наш, HTTP отвечает; stop/hold-release: снимать нечего)
   2  не удалось погасить процесс (права/сессия) — pid-файл сохранён, поставлен .stop
   3  start не поднял узел: порт не открылся или его держит чужой pid
-  4  отказ из-за чужого hold/лока старта (см. текст) либо ошибка конфигурации
-  5  лок старта занят: параллельный start уже идёт
+  4  отказ из-за чужого hold (start/hold-release) либо ошибка конфигурации
+     (.env: нет IBSRV_PATH, IBSRV_PATH не файл, нет IBSRV_DB_PATH)
+  5  отказ без действий: лок старта занят (параллельный start/stop) либо порт
+     держит чужой процесс — чужое не глушим
 
 Грабли, из-за которых это переписано (2026-11-11):
   * «узел запущен: pid=…» печаталось и при закрытых портах — агент считал базу
     поднятой и воевал с watchdog'ом;
   * -Action start снимал .hold любого владельца: чужой оффлайн-цикл ломался;
   * параллельные старты (агент + watchdog + руками) оставляли два ibsrv и pid-файл
-    на проигравшего, а следующий stop гасил победителя.
+    на проигравшего, а следующий stop гасил победителя;
+  * stop гасил владельца порта не глядя, что это за процесс: узел чужой базы на
+    том же порту умирал молча (2026-11-12);
+  * движок загрузки ставил hold kind=pause с ttl 4 ч и не снимал его: возврат
+    `-Action start` из другого треда получал rc=4 и узел лежал до истечения ttl
+    (2026-11-12: движок ставит kind=offline и снимает его сам — hold-release).
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -47,7 +56,7 @@ import time
 import uuid
 from pathlib import Path
 
-DEFAULT_ACTIONS = ('yaml', 'start', 'stop', 'status', 'basic')
+DEFAULT_ACTIONS = ('yaml', 'start', 'stop', 'status', 'basic', 'hold-release')
 
 # Сколько живёт hold по умолчанию. Оффлайн-цикл (import+apply) — 20–25 мин,
 # поэтому 45 мин: успевает любой apply, но забытый hold не блокирует базу навсегда.
@@ -91,6 +100,11 @@ def cfg(env: dict, name: str, default: str = '') -> str:
 
 def yaml_scalar(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def norm_path(value: str) -> str:
+    """Путь к виду для сравнения: слэши, без хвостового слэша, без регистра."""
+    return value.replace('\\', '/').rstrip('/').lower()
 
 
 def fmt_age(seconds: float) -> str:
@@ -229,6 +243,74 @@ class Node:
         with socket.socket() as s:
             s.settimeout(2)
             return s.connect_ex(('127.0.0.1', port)) == 0
+
+    # --- опознание процесса, держащего порт/pid ---------------------------
+    def proc_image(self, pid: int) -> str:
+        """Имя образа процесса ('' — не смог узнать)."""
+        if not pid:
+            return ''
+        if os.name == 'nt':
+            out = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/NH', '/FO', 'CSV'],
+                                 capture_output=True, text=True, errors='replace').stdout or ''
+            for line in out.splitlines():
+                m = re.match(r'^"([^"]*)"\s*,\s*"(\d+)"', line)
+                if m and int(m.group(2)) == pid:
+                    return m.group(1)
+            return ''
+        out = subprocess.run(['ps', '-p', str(pid), '-o', 'comm='],
+                             capture_output=True, text=True, errors='replace').stdout or ''
+        return out.strip()
+
+    def proc_cmdline(self, pid: int) -> str:
+        """Командная строка процесса ('' — не смог прочитать)."""
+        if not pid:
+            return ''
+        if os.name != 'nt':
+            out = subprocess.run(['ps', '-p', str(pid), '-o', 'args='],
+                                 capture_output=True, text=True, errors='replace').stdout or ''
+            return out.strip()
+        if not shutil.which('powershell.exe'):
+            return ''
+        ps_cmd = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                  f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine")
+        out = subprocess.run(['powershell.exe', '-NoProfile', '-Command', ps_cmd],
+                             capture_output=True, text=True, errors='replace').stdout or ''
+        return out.strip()
+
+    @staticmethod
+    def _yaml_db_path(path: str) -> str:
+        """Поле database.path из конфигурационного yaml автономного сервера."""
+        try:
+            for line in Path(path).read_text(encoding='utf-8', errors='replace').splitlines():
+                s = line.strip()
+                if s.startswith('path:'):
+                    return s.split(':', 1)[1].strip().strip("'\"")
+        except OSError:
+            return ''
+        return ''
+
+    def node_owner_kind(self, pid: int) -> str:
+        """Чей процесс: 'ours' (наш ibsrv), 'foreign' (чужой) или 'unknown'.
+
+        Порядок: имя образа (ibsrv), затем — если командная строка читается —
+        база из `--config`; чужой узел на том же порту гасить нельзя.
+        """
+        image = self.proc_image(pid)
+        if not image:
+            return 'unknown'
+        if 'ibsrv' not in image.lower():
+            return 'foreign'
+        cmd = self.proc_cmdline(pid)
+        if not cmd:
+            return 'ours'
+        if self.data and norm_path(self.data) in norm_path(cmd):
+            return 'ours'
+        m = re.search(r'--config=("([^"]+)"|(\S+))', cmd)
+        if m and self.db_path:
+            other = self._yaml_db_path(m.group(2) or m.group(3))
+            if other and norm_path(other) != norm_path(self.db_path):
+                return 'foreign'
+        return 'ours'
 
     def http_probe(self, timeout: float = 5.0) -> int | None:
         """Код ответа узла на корень его публикации (любой код = узел отвечает)."""
@@ -392,10 +474,15 @@ class Node:
                   'журнал 1С: .tmp/ibsrv/data/log-data', file=sys.stderr)
 
     def _owner_hint(self, owner: int) -> str:
-        out = subprocess.run(['tasklist', '/FI', f'PID eq {owner}', '/NH', '/FO', 'CSV'],
-                             capture_output=True, text=True, errors='replace').stdout or ''
-        line = (out.splitlines() or [''])[0].strip()
-        return f'tasklist: {line}' if line else 'tasklist /FI "PID eq %d"' % owner
+        """Образ и командная строка процесса-владельца — для диагностики (кроссплатформенно:
+        `tasklist` есть только на Windows, раньше на POSIX hint падал трейсбеком)."""
+        image = self.proc_image(owner)
+        cmd = self.proc_cmdline(owner)
+        if image and cmd:
+            return f'{image}: {cmd}'
+        if image:
+            return image
+        return f'PID {owner}: образ/командную строку прочитать не удалось'
 
     def action_start(self, force: bool = False) -> int:
         pid = self.pid()
@@ -417,13 +504,23 @@ class Node:
             self._diagnose_not_ready(pid, owner, None)
             return 3
 
+        # Ошибка конфигурации — до лока и до Popen: раньше битый IBSRV_PATH давал
+        # traceback FileNotFoundError вместо внятного rc=4.
+        if not Path(self.exe).is_file():
+            die(f'IBSRV_PATH не найден: {self.exe} (проверьте .env)', 4)
+        if not self.db_path:
+            die('в .env нет IBSRV_DB_PATH (каталог файловой базы)', 4)
+
         blocker = self.hold_blocker(force)
         if blocker is not None:
             print('ОТКАЗ: база на паузе другого владельца — не снимаю чужой hold.', file=sys.stderr)
             print(f'  hold: {self.hold_describe(blocker)}', file=sys.stderr)
-            print('  чей hold — тот и возобновляет (его -Action start снимет hold автоматически).',
+            print('  чей hold — тот и возобновляет: его -Action start снимет hold сам,'
+                  ' движок загрузки снимает свой hold в конце прогона (-Action hold-release).',
                   file=sys.stderr)
             print(f'  если пауза точно не нужна: {sys.argv[0]} -Action start --force', file=sys.stderr)
+            print(f'  или дождаться ttl: {sys.argv[0]} -Action status покажет возраст и ttl hold',
+                  file=sys.stderr)
             return 4
 
         lock_pid = self.start_lock_acquire()
@@ -517,17 +614,55 @@ class Node:
         return False, out
 
     def action_stop(self, hold: bool = True, offline: bool = False, ttl: int = 0) -> int:
+        # Лок — тот же, что у start: иначе окно «start увидел pid → stop убил»
+        # даёт агенту rc=0 при мёртвом узле (2026-11-12).
+        lock_pid = self.start_lock_acquire()
+        if lock_pid:
+            print(f'ОТКАЗ: уже идёт старт/останов (pid {lock_pid if lock_pid > 0 else "?"}, '
+                  f'лок {self.start_lock}) — stop не выполнен, повторите через 1-2 мин.',
+                  file=sys.stderr)
+            return 5
+        try:
+            return self._stop_locked(hold=hold, offline=offline, ttl=ttl)
+        finally:
+            self.start_lock_release()
+
+    def _stop_locked(self, hold: bool, offline: bool, ttl: int) -> int:
         owner = self.port_owner(self.http_port)
-        pid = self.pid()
-        if owner and pid and owner != pid:
-            print(f'ВНИМАНИЕ: pid-файл указывает на {pid}, а порт {self.http_port} держит {owner} — '
-                  f'гашу владельца порта (это наш узел, pid-файл протух).')
+        file_pid = self.pid()
+        pid = 0
+        if owner:
+            # Владелец порта — только кандидат: убивать можно лишь ibsrv своей базы.
+            kind = self.node_owner_kind(owner)
+            if kind != 'ours':
+                image = self.proc_image(owner) or 'образ неизвестен'
+                what = 'ibsrv ДРУГОЙ базы' if 'ibsrv' in image.lower() else 'не ibsrv'
+                print(f'ОТКАЗ: порт {self.http_port} держит чужой процесс {owner} '
+                      f'({image}, {what}) — не глушу.', file=sys.stderr)
+                print(f'  чей процесс: {self._owner_hint(owner)}', file=sys.stderr)
+                if file_pid and file_pid != owner:
+                    print(f'  pid-файл при этом указывает на {file_pid}', file=sys.stderr)
+                print('  что делать: -Action status, затем освободить порт у его владельца (его'
+                      ' .stop / -Action stop в его воркспейсе) или сменить IBSRV_HTTP_PORT',
+                      file=sys.stderr)
+                return 5
             pid = owner
-        elif owner and not pid:
-            print(f'ВНИМАНИЕ: pid-файла нет, но порт {self.http_port} держит {owner} — гашу его.')
-            pid = owner
-        elif owner and pid and owner == pid:
-            pid = owner
+            if file_pid and file_pid != owner:
+                print(f'ВНИМАНИЕ: pid-файл указывает на {file_pid}, а порт {self.http_port} '
+                      f'держит {owner} — гашу владельца порта (это наш ibsrv, pid-файл протух).')
+            elif not file_pid:
+                print(f'ВНИМАНИЕ: pid-файла нет, но порт {self.http_port} держит {owner} — '
+                      f'это наш ibsrv, гашу его.')
+        elif file_pid:
+            # Порт закрыт, а процесс из pid-файла жив: проверяем, что это ibsrv (защита от reuse pid).
+            if self.node_owner_kind(file_pid) != 'ours':
+                image = self.proc_image(file_pid) or 'образ неизвестен'
+                print(f'ОТКАЗ: pid-файл указывает на {file_pid} ({image}) — это не ibsrv, не глушу.',
+                      file=sys.stderr)
+                print(f'  {self._owner_hint(file_pid)}', file=sys.stderr)
+                print(f'  pid-файл протух; убрать его вручную: {self.pid_file}', file=sys.stderr)
+                return 5
+            pid = file_pid
         if not pid:
             print('узел не запущен (hold-файл не ставится: базу держать нечего)')
             self.pid_file.unlink(missing_ok=True)
@@ -538,7 +673,7 @@ class Node:
             self.hold_write(kind, ttl or (TTL_OFFLINE if offline else TTL_PAUSE))
             print(f'hold-файл watchdog\'а поставлен: {self.hold_file}')
             print(f'  {self.hold_describe(self.hold_read())}')
-            print('  снять: -Action start (этот же тред) или -Action start --force')
+            print('  снять: -Action hold-release (тот же тред) или -Action start --force')
         else:
             self.hold_file.unlink(missing_ok=True)
         ok, out = self._kill(pid)
@@ -568,6 +703,33 @@ class Node:
         print('  hold-файл оставлен: база не поднимется сама, пока не сделаете -Action start')
         return 2
 
+    def action_hold_release(self, force: bool = False) -> int:
+        """Снять hold. Зачем: движок загрузки сам ставит hold на оффлайн-цикл
+        и сам же его снимает по завершении прогона (start из другого треда после
+        цикла должен работать), а не ждать ttl.
+
+        Чужой hold без --force не снимается (rc=4).
+        """
+        if not self.hold_file.exists():
+            print('hold-файла нет — снимать нечего')
+            return 0
+        hold = self.hold_read()
+        owner = (hold.get('owner_thread') or '').strip()
+        caller = self.caller_thread()
+        if owner and owner != caller and not force:
+            print('ОТКАЗ: hold другого владельца — не снимаю (это защита чужого цикла).',
+                  file=sys.stderr)
+            print(f'  hold: {self.hold_describe(hold)}', file=sys.stderr)
+            print(f'  снять осознанно: {sys.argv[0]} -Action hold-release --force',
+                  file=sys.stderr)
+            print(f'  или база поднимется после ttl: {sys.argv[0]} -Action start --force',
+                  file=sys.stderr)
+            return 4
+        self.hold_file.unlink(missing_ok=True)
+        where = 'принудительно (--force)' if (owner and owner != caller) else 'свой'
+        print(f'hold снят {where}: {self.hold_describe(hold)}')
+        return 0
+
     def action_status(self) -> int:
         pid = self.pid()
         print(f'узел: {"запущен pid=" + str(pid) if pid else "нет pid-файла"}')
@@ -579,6 +741,11 @@ class Node:
             print(f'  {label}: {port} — {"слушает" if open_ else "закрыт"}')
         owner = self.port_owner(self.http_port)
         print(f'  владелец порта {self.http_port}: {owner if owner else "нет"}')
+        if owner:
+            kind = self.node_owner_kind(owner)
+            label = {'ours': 'наш ibsrv', 'foreign': 'ЧУЖОЙ процесс (stop его не тронет)',
+                     'unknown': 'образ прочитать не удалось'}[kind]
+            print(f'  чей это процесс: {label}')
         code = self.http_probe() if owner else None
         print(f'  ответ узла: {code if code is not None else "нет"}')
         if pid and owner and owner != pid:
@@ -632,7 +799,8 @@ def main() -> int:
                         help=f'stop: время жизни hold в секундах (по умолчанию {TTL_OFFLINE} для --offline, '
                              f'{TTL_PAUSE} для паузы)')
     parser.add_argument('--force', action='store_true',
-                        help='start: снять чужой hold/лок осознанно (печатает, чей он)')
+                        help='start/hold-release: снять ЧУЖОЙ hold осознанно (печатает, чей он); '
+                             'лок старта не снимает')
     parser.add_argument('--timeout', type=int, default=0,
                         help=f'start: сколько ждать готовности узла, с (по умолчанию IBSRV_START_TIMEOUT '
                              f'или {DEFAULT_START_TIMEOUT})')
@@ -651,6 +819,8 @@ def main() -> int:
         return node.action_start(force=args.force)
     if args.Action == 'stop':
         return node.action_stop(hold=not args.no_hold, offline=args.offline, ttl=args.ttl)
+    if args.Action == 'hold-release':
+        return node.action_hold_release(force=args.force)
     if args.Action == 'basic':
         return node.action_basic(args.show)
     return node.action_status()

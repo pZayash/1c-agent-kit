@@ -543,6 +543,13 @@ _ibsrv_pid_file_abs() {
     printf '%s\n' "$f"
 }
 
+# hold-файл watchdog'а: db-server.py пишет его в <корень>/.tmp/ibsrv/.hold.
+_ibsrv_hold_file_abs() {
+    local root="${repo_path:-}"
+    [[ -z "$root" ]] && { root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(pwd); }
+    printf '%s\n' "$root/.tmp/ibsrv/.hold"
+}
+
 # pid живого узла ibsrv: pid-файл + проверка имени процесса (защита от reuse PID).
 ibsrv_running_pid() {
     local pid
@@ -617,8 +624,18 @@ stop_ibsrv_node() {
         [[ -f "$c" ]] && { sk="$c"; break; }
     done
     if [[ -n "$sk" ]]; then
-        MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" run_python "$sk" -Action stop
+        # --offline (kind=offline, ttl 45 мин или IBSRV_HOLD_TTL) — намеренно, а не
+        # голый stop: hold защищает оффлайн-цикл от чужого `-Action start`, и его же
+        # снимает сам движок в конце прогона (release_ibsrv_hold). Голый stop ставил
+        # kind=pause с ttl 4 ч, и документированный возврат узла `-Action start` из
+        # другого треда/шела получал rc=4 — база лежала до истечения ttl (2026-11-12).
+        local -a _stop_args=(-Action stop --offline)
+        [[ -n "${IBSRV_HOLD_TTL:-}" ]] && _stop_args+=(--ttl "$IBSRV_HOLD_TTL")
+        MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" run_python "$sk" "${_stop_args[@]}"
         rc=$?
+        if [[ -f "$(_ibsrv_hold_file_abs)" ]]; then
+            _IBSRV_HOLD_PLACED=true
+        fi
     elif declare -F _kill_pids >/dev/null 2>&1; then
         _kill_pids "Узел ibsrv" "$pid"
         rc=$?
@@ -639,6 +656,37 @@ stop_ibsrv_node() {
     done
     _ibsrv_stop_failed_block "$pid" "$rc"
     return 1
+}
+
+# Hold, поставленный движком на оффлайн-цикл, снимаем сами в конце прогона:
+# иначе документированный возврат узла `-Action start` из другого треда/шела
+# упирается в свой же hold (rc=4) до истечения ttl. Чужой hold снять нельзя:
+# db-server сверяет owner_thread (rc=4), а движок работает под тем же BB_THREAD_ID.
+_IBSRV_HOLD_PLACED=false
+# База осталась за запущенным движком конфигуратором/клиентом — hold не снимаем.
+_IBSRV_HOLD_KEEP=false
+release_ibsrv_hold() {
+    [[ "${_IBSRV_HOLD_PLACED:-false}" == "true" ]] || return 0
+    _IBSRV_HOLD_PLACED=false
+    if [[ "${_IBSRV_HOLD_KEEP:-false}" == "true" ]]; then
+        log "INFO" "hold узла ibsrv оставлен: база за запущенным конфигуратором/клиентом ($(_ibsrv_hold_file_abs))"
+        log "INFO" "  снять после работы: python .cursor/skills/db-server/scripts/db-server.py -Action hold-release"
+        return 0
+    fi
+    local sk="" c
+    for c in .cursor/skills/db-server/scripts/db-server.py \
+             .agents/skills/db-server/scripts/db-server.py; do
+        [[ -f "$c" ]] && { sk="$c"; break; }
+    done
+    if [[ -z "$sk" ]]; then
+        log "WARN" "hold узла ibsrv не снят: нет db-server.py (см. $(_ibsrv_hold_file_abs))"
+        return 0
+    fi
+    if MSYS_NO_PATHCONV=1 MSYS_ARG_CONV_EXCL="*" run_python "$sk" -Action hold-release; then
+        log "INFO" "hold узла ibsrv снят: оффлайн-цикл загрузки завершён — узел можно поднимать (-Action start)"
+    else
+        log "WARN" "hold узла ibsrv снять не удалось (см. выше): база поднимется после ttl или -Action start --force"
+    fi
 }
 
 # Зависшие ibcmd с этой базой в командной строке (--db-path держит файловую ИБ
@@ -690,6 +738,8 @@ free_file_base() {
             fi
             log "WARN" "MCP/веб на узле недоступны, пока он остановлен. Вернуть после работы:"
             log "WARN" "  MSYS_NO_PATHCONV=1 python .cursor/skills/db-server/scripts/db-server.py -Action start"
+            log "WARN" "  (hold движка снимается сам в конце прогона; если конфигуратор/клиент запущен —"
+            log "WARN" "   после работы: -Action hold-release, иначе start из другого треда даст rc=4)"
         fi
     else
         rm -f "$(_ibsrv_pid_file_abs)" 2>/dev/null || true
@@ -717,6 +767,13 @@ prepare_launch_connection() {
     fi
     [[ -n "$db_path" ]] || return 0
     free_file_base "$db_path"
+    local _rc=$?
+    # Конфигуратор/клиент запускается прямо сейчас — база остаётся за ним,
+    # hold движка не снимаем (иначе watchdog поднимет ibsrv посреди сеанса).
+    if [[ "${_IBSRV_HOLD_PLACED:-false}" == "true" ]]; then
+        _IBSRV_HOLD_KEEP=true
+    fi
+    return $_rc
 }
 
 # Аутентификация пользователя ИБ для ibcmd (-u/-P), источники как у ib_config_auth_suffix
@@ -1410,6 +1467,9 @@ cleanup_changed_files_list() {
 # снимаются на любом выходе, чтобы не оставлять untracked-мусор в git status
 # потребителя при ошибке/Ctrl+C (раньше чистились только на успешном пути).
 cleanup_temp_files() {
+    # Hold узла ibsrv, поставленный движком на оффлайн-цикл, снимаем здесь:
+    # cleanup вызывается на любом выходе (успех/ошибка/Ctrl+C).
+    release_ibsrv_hold
     # Журнал загрузок пишем ДО снятия temp-файлов (списки читаются из них).
     load_history_write
     local d
@@ -3611,3 +3671,6 @@ _LOAD_EXIT_CODE=0
 load_history_write
 
 rm -f temp_changed_files.txt temp_changed_extensions.txt
+# Ветки с apache_start снимают EXIT-trap (`trap - EXIT`) — cleanup не вызовется,
+# а hold оффлайн-цикла снять надо (иначе start из другого треда → rc=4).
+release_ibsrv_hold

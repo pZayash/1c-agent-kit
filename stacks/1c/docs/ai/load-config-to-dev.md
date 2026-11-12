@@ -68,6 +68,14 @@ Upstream cc-1c: `db-load-git`, `db-load-xml`, `db-update`, `db-load-cf` —
   «Ошибка блокировки каталога данных сервера» (код 127). `IBCMD_DATA=shared` —
   осознанно вернуть общий каталог (сериализация всего хоста).
   Подробности — док потребителя (`docs/ai/dev-ib-ibsrv.md`).
+  **Пауза узла (`.hold`) на оффлайн-цикл:** движок останавливает узел через
+  `db-server.py -Action stop --offline` (hold `kind=offline`, ttl 45 мин или
+  `IBSRV_HOLD_TTL`) и снимает этот hold в конце прогона (`-Action hold-release`) —
+  иначе возврат узла `-Action start` **из другого треда/шела** упирался в свой же
+  hold (`rc=4`) до истечения ttl. Пока цикл идёт, чужой `-Action start` получает
+  `rc=4` — защита чужого `apply` и импорта сохранена. Если движок сам запустил
+  конфигуратор/клиент (`-H`, `-C`), база остаётся за ним и hold не снимается —
+  после работы `-Action hold-release`.
 - **`--drop-designer-sessions`** / `IB_LOAD_DROP_DESIGNER_SESSIONS` — явно разрешить
   снятие висячих сеансов «Конфигуратор» в ИБ через `ibcmd session terminate`
   (защита 4 ниже). Узел скрипт не перезапускает никогда.
