@@ -47,8 +47,7 @@ SCAN_DIRS = ("core", "stacks")
 SCAN_GLOBS = ("*.md", "*.mdc")
 # Корни алиас-монтирования: consumer-пути под ними либо kit-ссылки,
 # либо файлы потребителя — транслируем через mount-таблицу.
-ALIAS_ROOTS = (".cursor", ".claude", ".agents", ".pi", ".kilo",
-               ".opencode", "tools")
+ALIAS_ROOTS = (".cursor", ".claude", ".agents", ".pi", "tools")
 
 FENCED = re.compile(r"^(```|~~~)")
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(\s*<([^>]+)>\s*(?:\"[^\"]*\"\s*)?\)|"

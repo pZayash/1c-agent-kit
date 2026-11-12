@@ -91,18 +91,6 @@
       "kind": "alias",
       "source": "harness/pi/extensions",
       "target": ".pi/extensions"
-    },
-    {
-      "id": "kilo-plugin",
-      "kind": "alias",
-      "source": "harness/kilo/plugin",
-      "target": ".kilo/plugin"
-    },
-    {
-      "id": "opencode-plugin",
-      "kind": "alias",
-      "source": "harness/kilo/plugin",
-      "target": ".opencode/plugin"
     }
   ]
 }

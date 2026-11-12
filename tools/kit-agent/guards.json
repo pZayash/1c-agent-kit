@@ -1,5 +1,5 @@
 {
-  "comment": "Guard rules for agent bash commands (single source of truth). Read by kit_agent.py check-command, the pi adapter (pi/extensions/kit-hooks.ts) and the kilo adapter. action: block = forbid, warn = allow but tell the agent.",
+  "comment": "Guard rules for agent bash commands (single source of truth). Read by kit_agent.py check-command, the pi adapter (pi/extensions/kit-hooks.ts). action: block = forbid, warn = allow but tell the agent.",
   "rules": [
     {
       "id": "harness-blob-add",

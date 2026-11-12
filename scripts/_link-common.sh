@@ -151,8 +151,7 @@ kit_consumer_link_paths() {
   local root="$1" d p
   for p in \
     "$root/.agents/skills" "$root/.claude/skills" "$root/.claude/commands" \
-    "$root/.pi/skills" "$root/.pi/prompts" "$root/.pi/extensions" \
-    "$root/.kilo/plugin" "$root/.opencode/plugin"; do
+    "$root/.pi/skills" "$root/.pi/prompts" "$root/.pi/extensions"; do
     printf '%s\n' "$p"
   done
   # Динамический скан reparse-ссылок — новые kit-tools стеков подхватываются

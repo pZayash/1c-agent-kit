@@ -25,7 +25,7 @@ Kit разделён на стеко-нейтральное ядро и стек
 | stacks/1c | `stacks/1c/tools` | `bsl-check`, `load-changed-files`, `mcp-call`, `answer42`, `rights-xml-lint` | `tools/` |
 | stacks/py | `stacks/py/docs/ai` | Python-каноны (LDD-binding и др.) | через заглушки `docs/ai/` |
 | stacks/node | `stacks/node/docs/ai` | Node (JS/TS)-каноны (LDD-binding и др.) | через заглушки `docs/ai/` |
-| kit-internal | `pi/`, `kilo/`, `hooks/`, `templates/`, `openspec/`, `scripts/`, `tools/{kit-layout,kit-agent,kit-lint,cc-1c-skills-sync,section-patch,skill-frontmatter,cc-1c-skills}` | механика kit, не монтируется | — |
+| kit-internal | `pi/`, `hooks/`, `templates/`, `openspec/`, `scripts/`, `tools/{kit-layout,kit-agent,kit-lint,cc-1c-skills-sync,section-patch,skill-frontmatter,cc-1c-skills}` | механика kit, не монтируется | — |
 
 Манифесты слоёв: `core/core.json`, `stacks/<id>/stack.json` — `id` +
 host-deps (список id на check-функции `init-kit-deps`).
@@ -264,10 +264,6 @@ python harness/tools/kit-agent/kit_agent.py check-index         # harness gitlin
 - **pi** (TUI и RPC/ACP — bb, Zed): `pi/extensions/kit-hooks.ts` →
   `.pi/extensions`; session-start подсказки (notify + разовый инжект),
   block/warn на bash-команды по guards, команда `/kit`.
-- **Kilo Code / OpenCode**: `kilo/plugin/kit-hooks.ts` → `.kilo/plugin`
-  и `.opencode/plugin` (тот же файл; Kilo — OpenCode-семейство,
-  `engines.opencode`); guard-block через `tool.execute.before`,
-  session-start → `experimental.chat.system.transform`.
 - **Универсальный**: managed-секция `kit-agent-loop` в AGENTS.md
   (инструкция прогнать session-start и сверяться с check-command) —
   для Zed direct, любых читателей AGENTS.md и headless-режимов.
@@ -373,10 +369,8 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   создаёт symlink'и на `/mnt/...`, невидимые из Windows. `bootstrap-kit`
   и `kit-layout` отказываются работать (WSL_ALLOW=1 — осознанный обход).
   Правильно: Git Bash (`bash.exe`) или PowerShell (.ps1).
-- **Новые alias-каталоги в `git status`** — `.kilo/plugin`,
-  `.opencode/plugin` (и ранее `.pi/*`) — junction'ы kit. Если у
-  потребителя они не в `.gitignore` — добавить: `/.kilo/plugin`,
-  `/.opencode/plugin` (аналогично `.pi`).
+- **Новые alias-каталоги в `git status`** — `.pi/*` — junction'ы kit.
+  Если у потребителя они не в `.gitignore` — добавить: `/.pi/*`.
 - **Ручной список kit-путей в `.gitignore` дублирует managed-блок** — после
   появления managed-блока (`# >>> kit-managed: begin`) ручные строки
   `.cursor/skills/...`, `/.pi/*` и т.п. лишние: `verify`/`kit-doctor`

@@ -18,8 +18,8 @@ python harness/tools/kit-agent/kit_agent.py check-command "<команда>"
 ```
 
 exit 1 — команда запрещена (вывод объясняет канон, например promote вместо
-blob). `WARN` — можно, но прочти предупреждение. В pi и Kilo/OpenCode эти
-правила применяет автоматика (`.pi/extensions/kit-hooks.ts`,
-`.kilo/plugin/`), и каждое срабатывание пишется friction-сигналом в
+blob). `WARN` — можно, но прочти предупреждение. В pi эти
+правила применяет автоматика (`.pi/extensions/kit-hooks.ts`),
+и каждое срабатывание пишется friction-сигналом в
 `memory/rule-friction/` (канон: `memory-format.md` § Разлад, разбор —
 skill `evolve`). Session-start отдельно напомнит про неразобранные сигналы.

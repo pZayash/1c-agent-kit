@@ -59,8 +59,7 @@ if (-not $hasShLf) {
 . (Join-Path $scripts "_win-reparse.ps1")
 $nsCandidates = @(
     ".agents\skills", ".claude\skills", ".claude\commands",
-    ".pi\skills", ".pi\prompts", ".pi\extensions",
-    ".kilo\plugin", ".opencode\plugin"
+    ".pi\skills", ".pi\prompts", ".pi\extensions"
 )
 # Dynamic reparse scan - new stack kit-tools are picked up without a list edit.
 foreach ($d in @(".cursor\skills", ".cursor\rules", ".cursor\commands", "tools")) {

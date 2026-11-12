@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """kit-agent - harness-agnostic core for agent session hooks (idea: teamai hooks).
 
-Single source of logic for all harness adapters (pi extension, kilo plugin,
+Single source of logic for all harness adapters (pi extension,
 AGENTS.md instructions for Zed/others, future Claude/Cursor hook commands).
 
 Commands (all read-only, offline, fast):
