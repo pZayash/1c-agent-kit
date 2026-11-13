@@ -59,6 +59,7 @@ DEFAULT_CONFIG: dict = {
         ".tmp/",
         "outputs/",
         "handoffs/",
+        "specs/",
         "openspec/",
         "harness/",
         "conf/",
@@ -397,7 +398,7 @@ def analyze(root: Path, config: dict) -> Audit:
                 continue
             real_target = lowered.get(rel_target.lower())
             if real_target is None:
-                # Файл существует, но вне области аудита (код, kit, openspec…).
+                # Файл существует, но вне области аудита (код, kit, specs…).
                 continue
             edges[src].add(real_target)
             inbound[real_target] = inbound.get(real_target, 0) + 1

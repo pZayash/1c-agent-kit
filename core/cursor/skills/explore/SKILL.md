@@ -5,7 +5,7 @@ description: >
   Гибрид upstream explore-stance + grill-with-docs: гипотезы перед опросом,
   сбор намерения/постановщика/ролей (ROLES.md), свободное исследование,
   уточнение пачками независимых вопросов, словарь терминов, CONTEXT/ADR inline,
-  подготовка к openspec-propose.
+  подготовка к spec-propose.
 license: MIT
 metadata:
   derivedFrom:
@@ -17,7 +17,7 @@ metadata:
 
 Войди в режим исследования.
 Цель: снять неопределенность и довести задачу до состояния,
-когда можно сразу перейти к навыку [openspec-propose](../openspec-propose/SKILL.md).
+когда можно сразу перейти к навыку [spec-propose](../spec-propose/SKILL.md).
 
 **Жесткое ограничение:** в этом режиме не писать продуктовый код
 и не внедрять фичи.
@@ -25,7 +25,7 @@ metadata:
 Разрешено:
 
 - анализ кода, чтение артефактов, веб-поиск, «читающие» инструменты и MCP;
-- формализация OpenSpec (`proposal.md`, `design.md`, `spec.md`, `tasks.md`)
+- формализация spec-флоу (`proposal.md`, `design.md`, `spec.md`, `tasks.md`)
   по запросу;
 - **документирующие правки**: обновление `CONTEXT.md`, `ROLES.md`, реестров
   `docs/analytics/*` и, при выполнении критериев, `docs/adr/*.md`.
@@ -58,7 +58,7 @@ metadata:
 ## Базовый цикл работы
 
 1. Быстро собрать контекст:
-   - есть ли активные изменения OpenSpec (`openspec list --json`)
+   - есть ли активные spec-changes (`python harness/tools/kit-spec/kit_spec.py list --json`)
    - если в запросе или контексте назван change — сразу прочитать его артефакты
      (`proposal.md`, `design.md`, `tasks.md`, `specs/**`)
    - какие артефакты уже существуют по change
@@ -99,7 +99,7 @@ metadata:
    - зафиксировать согласованную модель решения
    - мини-словарь: список `**Термин** → [файл](путь)` (без дублирования определений в чате)
    - отдельно отметить открытые вопросы и блокеры
-   - предложить следующий шаг: продолжить исследование или перейти к `openspec-propose`
+   - предложить следующий шаг: продолжить исследование или перейти к `spec-propose`
 8. Зафиксировать знания в артефактах:
    - после **первого согласованного термина** создать/обновить `CONTEXT.md`
      сразу (inline);
@@ -143,7 +143,7 @@ metadata:
 - Роли можно не только добавлять, но и **изменять**: если выяснены новые
   обязанности или поведение владельцев роли — обновить запись (без согласования).
 - **Объединять или разделять** роли — допустимо, но **только по согласованию с
-  оператором**. Подробности — [docs/ai/ROLES-FORMAT.md](../../docs/ai/ROLES-FORMAT.md)
+  оператором**. Подробности — [docs/ai/ROLES-FORMAT.md](../../../docs/ai/ROLES-FORMAT.md)
   («Эволюция ролей»).
 - **Инвариант:** любая роль, попавшая в спеку (`proposal.md`, `design.md`,
   `spec.md`), **обязана** быть и в `ROLES.md`. В спеке — ссылка на роль, полное
@@ -152,21 +152,21 @@ metadata:
   лицо — реальная бизнес-роль (менеджер, бухгалтер, клиент), писать **имя из
   `ROLES.md`**, не ad-hoc синоним. Родовой `пользователь`/`Система` ролью не
   оформлять — не плодить записи ради абстрактного актора.
-- Формат записи роли — [docs/ai/ROLES-FORMAT.md](../../docs/ai/ROLES-FORMAT.md).
+- Формат записи роли — [docs/ai/ROLES-FORMAT.md](../../../docs/ai/ROLES-FORMAT.md).
 
 ### Аналитика организации
 
 Кроме функциональных ролей (`ROLES.md`), в диалоге всплывают **смежные сущности** —
-веди их в реестрах [docs/analytics/](../../docs/analytics/) лениво, inline:
+веди их в реестрах [docs/analytics/](../../../docs/analytics/) лениво, inline:
 
-- **Персоналия** (конкретный человек) → [people.md](../../docs/analytics/people.md);
+- **Персоналия** (конкретный человек) → [people.md](../../../docs/analytics/people.md);
 - **Должность / подразделение** (штатка) →
-  [org-structure.md](../../docs/analytics/org-structure.md);
+  [org-structure.md](../../../docs/analytics/org-structure.md);
 - **Артефакт теневой автоматизации** (эксель/ручной процесс вне УНФ — кандидат на
-  автоматизацию) → [shadow-automation.md](../../docs/analytics/shadow-automation.md).
+  автоматизацию) → [shadow-automation.md](../../../docs/analytics/shadow-automation.md).
 
 Граница: **роль ≠ должность ≠ персоналия** (один человек носит N ролей). Формат и
-схема связей — [docs/ai/ANALYTICS-FORMAT.md](../../docs/ai/ANALYTICS-FORMAT.md).
+схема связей — [docs/ai/ANALYTICS-FORMAT.md](../../../docs/ai/ANALYTICS-FORMAT.md).
 Постановщик-человек: завести персоналию и связать с должностью/ролью.
 
 ### Гипотезы перед опросом
@@ -192,7 +192,7 @@ metadata:
 
 По мотивам Anthropic «say who owns the code»: поведение агента над кодом
 зависит от того, чей это код. Классы владельцев: `agent | human | vendor`.
-Канон маркеров — [tools/spec-lint/README.md](../../tools/spec-lint/README.md)
+Канон маркеров — [tools/spec-lint/README.md](../../../tools/spec-lint/README.md)
 § Владелец кода.
 
 Дефолт без маркера — **по префиксу** (`PROJECT_PREFIX`, тот же предикат
@@ -243,7 +243,7 @@ metadata:
 - если блока дельты нет — секцию **Словарь (дельта)** не выводить.
 
 **В файлах** (`CONTEXT.md`, `memory/`) — полное определение по
-[CONTEXT-FORMAT.md](../../docs/ai/CONTEXT-FORMAT.md): канон, _Avoid_, статус
+[CONTEXT-FORMAT.md](../../../docs/ai/CONTEXT-FORMAT.md): канон, _Avoid_, статус
 `черновик` / `согласовано`.
 
 Правила:
@@ -274,10 +274,10 @@ metadata:
 
 Формат и детали ведения `CONTEXT.md`:
 
-- см. [docs/ai/CONTEXT-FORMAT.md](../../docs/ai/CONTEXT-FORMAT.md);
+- см. [docs/ai/CONTEXT-FORMAT.md](../../../docs/ai/CONTEXT-FORMAT.md);
 - назначение: каноничная лексика, связи терминов, фиксация неоднозначностей.
 
-Теги записей [memory/](../../memory/) — не в `CONTEXT.md`, а в [TAGS.md](../../TAGS.md)
+Теги записей [memory/](../../../memory/) — не в `CONTEXT.md`, а в [TAGS.md](../../TAGS.md)
 (см. `## Словари проекта` в CONTEXT).
 
 Правила по ADR (`docs/adr/*.md`):
@@ -289,15 +289,15 @@ metadata:
 - Если хотя бы одно условие не выполнено, не создавать ADR.
 - Создавать ADR лениво: только при первом действительно нужном решении.
 - Каталог `docs/adr/` создавать лениво вместе с первым ADR
-  (см. [docs/adr/README.md](../../docs/adr/README.md)).
+  (см. [docs/adr/README.md](../../../docs/adr/README.md)).
 - ID: `ADR-YYMMDD-XX`, файл `YYMMDD-XX-slug.md`. Следующий номер:
   `bash tools/sandbox/run.sh python tools/adr/next_id.py --slug …`
-- В коде/OpenSpec ссылаться `ADR-260616-01`, не «ADR Иванов …» и не `ADR-000N`.
+- В коде/specs ссылаться `ADR-260616-01`, не «ADR Иванов …» и не `ADR-000N`.
 - При archive change со статусом `proposed` — поднять ADR до `accepted`.
 
 Формат и правила ADR:
 
-- см. [docs/ai/ADR-FORMAT.md](../../docs/ai/ADR-FORMAT.md);
+- см. [docs/ai/ADR-FORMAT.md](../../../docs/ai/ADR-FORMAT.md);
 - назначение: коротко зафиксировать необратимое и неочевидное
   архитектурное решение и его причину;
 - проверка warning-only: `tools/adr/check.py` / чек `adr-check`.
@@ -324,7 +324,7 @@ metadata:
 - **Offer ADR sparingly**:
   ADR предлагать только при прохождении 3 критериев из блока выше.
 - **Document/Code boundary**:
-  если правка меняет только `CONTEXT.md`, `docs/adr/*.md`, `openspec/**`,
+  если правка меняет только `CONTEXT.md`, `docs/adr/*.md`, `specs/**`,
   это допустимо в /explore; любые правки исходников продукта недопустимы.
 
 ## Правила «grill» внутри /explore
@@ -428,7 +428,7 @@ handoff к прототипу, не grill.
 Не застревать в одном режиме: если лёгкие реплики начали накапливать решения —
 предложить вернуться к структуре и зафиксировать.
 
-## OpenSpec-интеграция
+## Spec-флоу
 
 Если есть активный change:
 
@@ -440,9 +440,9 @@ handoff к прототипу, не grill.
 - довести исследование до четких границ проблемы;
 - предложить создать proposal, когда требования, лексика и границы стали ясными.
 
-## Мост в openspec-propose
+## Мост в spec-propose
 
-Считай задачу готовой к `openspec-propose`, когда одновременно выполнено:
+Считай задачу готовой к `spec-propose`, когда одновременно выполнено:
 
 - проблема сформулирована в 1-2 предложениях без двусмысленности;
 - **намерение** (intent) и **постановщик** установлены;
@@ -455,24 +455,24 @@ handoff к прототипу, не grill.
 - отмечены основные риски и допущения;
 - открытые вопросы не блокируют черновой proposal.
 
-При передаче в `openspec-propose` напомнить: в `proposal.md` обязателен раздел
-**«Постановщик, намерение, роли»**, а каждая упомянутая роль должна быть в
-`ROLES.md` (см. правило `rules.proposal` в `openspec/config.yaml`). Также:
-`tasks.md` — только агентские задачи; ручное тестирование и проверки оператора —
-в отдельный `operator-checklist.md` (см. `rules.tasks` в `openspec/config.yaml`).
+При передаче в `spec-propose` напомнить правила артефактов (канон:
+`harness/core/docs/ai/spec-workflow.md`, `kit_spec.py instructions <artifact>`):
+`proposal.md` — секция «Артефакты» с оглавлением-ссылками; `tasks.md` — только
+агентские задачи; ручное тестирование и проверки оператора — в отдельный
+`operator-checklist.md`.
 
 Если change затрагивает код продукта в корне исходников (добавляет/меняет
 значимые методы по префиксу потребителя, напр. `PROJECT_PREFIX`) — напомнить
 что это кандидат на code-as-spec (анкеры
 REQUIREMENT/MODULE_CONTRACT/VERIFIED-BY появятся в tasks через `rules.tasks`;
 см. `tools/spec-lint/README.md`). Если capability уже code-as-spec
-(`<!-- code-as-spec: render -->` в `openspec/specs/<cap>/spec.md`) — запустить
+(`<!-- code-as-spec: render -->` в `specs/<cap>/spec.md`) — запустить
 `spec-lint check` и показать предупреждения о неконсистентностях (оторванные
 REQUIREMENT, ошибки размещения), не блокируя propose.
 
 Фраза-передача по умолчанию:
 
-`Готово к openspec-propose: контекст собран, лексика согласована, рамки зафиксированы.`
+`Готово к spec-propose: контекст собран, лексика согласована, рамки зафиксированы.`
 
 ## Когда остановиться
 
@@ -489,14 +489,14 @@ REQUIREMENT, ошибки размещения), не блокируя propose.
 адаптированы из репозитория
 [mattpocock/skills — grill-with-docs](https://github.com/mattpocock/skills/tree/main/skills/engineering/grill-with-docs)
 (MIT). Локальная адаптация: проект с исходниками в файловой выгрузке,
-OpenSpec, корень исходников вместо `src/`, префиксы потребителя, **batch grill** (пачки независимых вопросов вместо one-by-one;
+spec-флоу (`specs/`), корень исходников вместо `src/`, префиксы потребителя, **batch grill** (пачки независимых вопросов вместо one-by-one;
 см. [short Matt Pocock](https://www.youtube.com/shorts/tLyfDIt9wHg)).
 
 Проектные форматы:
 
-- [docs/ai/docs-layout.md](../../docs/ai/docs-layout.md)
-- [docs/ai/CONTEXT-FORMAT.md](../../docs/ai/CONTEXT-FORMAT.md)
-- [docs/ai/ADR-FORMAT.md](../../docs/ai/ADR-FORMAT.md)
-- [docs/ai/ROLES-FORMAT.md](../../docs/ai/ROLES-FORMAT.md)
-- [docs/ai/ANALYTICS-FORMAT.md](../../docs/ai/ANALYTICS-FORMAT.md)
-- [docs/ai/memory-format.md](../../docs/ai/memory-format.md)
+- [docs/ai/docs-layout.md](../../../docs/ai/docs-layout.md)
+- [docs/ai/CONTEXT-FORMAT.md](../../../docs/ai/CONTEXT-FORMAT.md)
+- [docs/ai/ADR-FORMAT.md](../../../docs/ai/ADR-FORMAT.md)
+- [docs/ai/ROLES-FORMAT.md](../../../docs/ai/ROLES-FORMAT.md)
+- [docs/ai/ANALYTICS-FORMAT.md](../../../docs/ai/ANALYTICS-FORMAT.md)
+- [docs/ai/memory-format.md](../../../docs/ai/memory-format.md)

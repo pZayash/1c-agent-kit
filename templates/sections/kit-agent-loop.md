@@ -11,7 +11,8 @@ harness и `bash harness/scripts/bootstrap-kit.sh .`, или закоммити�
 gitlink).
 
 Перед bash-командами с `git`/`rm` по путям kit (`harness/`, `.cursor/`, `.pi/`,
-`.agents/`, `.claude/`) и перед `openspec init` / `rtk init` проверяй команду:
+`.agents/`, `.claude/`) и перед `openspec init` / `rtk init` / любым
+`openspec <команда>` проверяй команду:
 
 ```bash
 python harness/tools/kit-agent/kit_agent.py check-command "<команда>"

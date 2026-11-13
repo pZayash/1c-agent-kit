@@ -11,7 +11,19 @@
       "id": "openspec-init",
       "match": "\\bopenspec\\s+init\\b",
       "action": "block",
-      "message": "openspec init запрещён: у потребителя kit свои openspec/ + kit skills. Дока: harness/core/docs/ai/kit-host-deps.md."
+      "message": "openspec CLI не используется. Scaffold spec-каталога: python harness/tools/kit-spec/kit_spec.py init (пишет только внутрь specs/). Changes — скилл spec-propose. Дока: harness/core/docs/ai/spec-workflow.md."
+    },
+    {
+      "id": "openspec-cli",
+      "match": "\\bopenspec\\s+(new|list|status|instructions|show|diff|validate|archive|update)\\b",
+      "action": "warn",
+      "message": "openspec CLI не нужен: python harness/tools/kit-spec/kit_spec.py <new|list|status|validate|archive>. Канон: harness/core/docs/ai/spec-workflow.md."
+    },
+    {
+      "id": "spec-manual-archive",
+      "match": "\\b(mv|move|Move-Item)\\b[^|;&\\n]*\\b(specs|openspec)[/\\\\]changes[/\\\\](?!archive[/\\\\])",
+      "action": "warn",
+      "message": "Архивация change — через kit_spec.py archive (там гейты: tasks, operator-checklist, implementation-notes). Канон: harness/core/docs/ai/spec-workflow.md."
     },
     {
       "id": "rtk-init",

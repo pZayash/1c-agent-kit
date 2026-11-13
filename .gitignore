@@ -25,3 +25,6 @@ tools/cc-1c-skills/
 *.log
 __pycache__/
 *.pyc
+
+# kit-spec: junction shim (не трекать)
+openspec/

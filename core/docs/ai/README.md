@@ -36,13 +36,20 @@
 | [logging-strategy.md](logging-strategy.md) | когда логировать, уровни, `Попытка/Исключение` |
 | [ldd.md](ldd.md) | проектирование логов на фазе спеки (LDD) |
 
+## Срез spec-flow
+
+| Файл | Зачем |
+| --- | --- |
+| [spec-workflow.md](spec-workflow.md) | spec-флоу kit: specs/changes, дельты, архивация, `kit_spec.py` |
+| [code-as-spec.md](code-as-spec.md) | рамка code-as-spec: анкеры, render-маркер, OWNER; bindings — `stacks/<s>/docs/ai/code-as-spec-<s>.md` |
+
 Пилот: `logging-strategy-org.md`.
 
 ## Срез host-deps (2026-08-20+)
 
 | Файл | Зачем |
 | --- | --- |
-| [kit-host-deps.md](kit-host-deps.md) | node/openspec/rtk на worktree; **не** `openspec init` |
+| [kit-host-deps.md](kit-host-deps.md) | node/rtk/python на worktree; спеки — `kit_spec.py`, **не** `openspec init` |
 
 ## Срез qmd-client (2026-09-01)
 
@@ -107,5 +114,5 @@ Overlay: `harness/pi/` (`extensions/auto-session-title.ts`), линк —
 
 ## Пока в репо потребителя
 
-Печать, MCP, слоты, OpenSpec, `tools/`, skills. Индекс потребителя —
+Печать, MCP, слоты, `tools/`, skills. Индекс потребителя —
 `docs/README.md` (не копировать kit blob).

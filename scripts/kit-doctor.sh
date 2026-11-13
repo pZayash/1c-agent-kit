@@ -300,6 +300,50 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     esac
     rm -f "$a42log"
   fi
+
+  # 13. spec-flow: корень specs/ (или легаси openspec/), validate активных
+  #     changes и WARN на открытые чекбоксы в архиве (WARN only). Чужой
+  #     specs/ без маркера и changes/ пропускаем — он не kit-owned.
+  KIT_SPEC="$HARNESS_ROOT/tools/kit-spec/kit_spec.py"
+  if [[ -n "$PY" && -f "$KIT_SPEC" ]]; then
+    spec_state=none
+    if [[ -d "$CONSUMER_ROOT/specs" ]]; then
+      if [[ -f "$CONSUMER_ROOT/specs/.kit-spec.json" ]]; then
+        ok "spec root specs/"; spec_state=kit
+      elif [[ -d "$CONSUMER_ROOT/specs/changes" ]]; then
+        warn "specs/ без маркера .kit-spec.json (self-heal: kit_spec.py init)"
+        spec_state=kit
+      else
+        info "specs/ без маркера и changes/ — чужой каталог, spec-flow пропущен"
+      fi
+    elif [[ -d "$CONSUMER_ROOT/openspec" ]]; then
+      warn "legacy spec root openspec/ - migrate: python $HARNESS_REL/tools/kit-spec/kit_spec.py migrate-root --apply"
+      spec_state=legacy
+    else
+      info "spec root отсутствует (spec-флоу не используется или kit_spec.py init)"
+    fi
+    if [[ "$spec_state" != none ]]; then
+      vlog="$(mktemp)"
+      "$PY" "$KIT_SPEC" validate --all --root "$CONSUMER_ROOT" >"$vlog" 2>&1
+      vrc=$?
+      if grep -q '^WARN' "$vlog" 2>/dev/null; then
+        warn "spec validate warns:"
+        grep '^WARN' "$vlog" | head -10 | sed 's/^/       /'
+      fi
+      if [[ $vrc -eq 0 ]]; then
+        ok "spec validate (active changes)"
+      else
+        warn "spec validate issues:"
+        grep -v '^WARN' "$vlog" | sed 's/^/       /' | head -15
+      fi
+      "$PY" "$KIT_SPEC" validate --archive --root "$CONSUMER_ROOT" >"$vlog" 2>&1 || true
+      if grep -q '^WARN archive/' "$vlog" 2>/dev/null; then
+        warn "spec archive: открытые чекбоксы в архиве:"
+        grep '^WARN archive/' "$vlog" | head -10 | sed 's/^/       /'
+      fi
+      rm -f "$vlog"
+    fi
+  fi
 fi
 
 echo "=== kit-doctor: $([ "$FAIL" -eq 0 ] && echo PASS || echo FAIL) ==="

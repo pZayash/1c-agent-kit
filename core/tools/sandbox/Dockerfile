@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Установка глобальных пакетов npm (вне /workspace — не перекрывается bind-mount репо)
-RUN npm install -g typescript ts-node @fission-ai/openspec@1.2.0
+RUN npm install -g typescript ts-node
 
 # RTK (Rust Token Killer) — Linux-бинарник. Kit не скачивает и не исполняет
 # удалённые install-скрипты; оператор ставит rtk сам, если нужен:

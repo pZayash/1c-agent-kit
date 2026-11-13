@@ -2,7 +2,7 @@
 name: close-chat
 description: >-
   Закрытие чата по фиксированному пайплайну: открытые вопросы → архивация
-  OpenSpec → очистка мусора → коммит изменений сессии. Триггеры: /close-chat,
+  spec-changes → очистка мусора → коммит изменений сессии. Триггеры: /close-chat,
   «закрыть чат», «закрытие сессии», «конец чата», «заверши сессию».
 argument-hint: "--dry-run | --skip 0|1|2|3 (опционально)"
 ---
@@ -10,7 +10,7 @@ argument-hint: "--dry-run | --skip 0|1|2|3 (опционально)"
 # close-chat — закрытие сессии по чек-листу
 
 Скилл проводит сессию через четыре фиксированных шага в конце работы: убедиться, что нет
-подвешенных вопросов, заархивировать готовые OpenSpec changes, убрать мусор, закоммитить
+подвешенных вопросов, заархивировать готовые spec-changes, убрать мусор, закоммитить
 только то, что было сделано в этом чате.
 
 **Принцип:** быстро прогнать пайплайн с минимумом вопросов. По умолчанию коммитим только
@@ -48,9 +48,9 @@ touched — включаем в коммит без вопроса (целико
    (например, авто-сгенерированные артефакты touched-скриптов). Если файл уверенно
    touched — относим к touched без вопроса. Помечать «неоднозначно» только если действительно
    нет признаков принадлежности к сессии.
-2. **OpenSpec touched** — поддиректории `openspec/changes/<id>/`, которые тронули в чате.
+2. **Spec touched** — поддиректории `specs/changes/<id>/`, которые тронули в чате.
 3. **session-markers** — множество маркеров `№%<change-id>` сессии: по одному на каждый id
-   из OpenSpec touched (например `№%print-faksimile-toggle-group-a`). Канон группировки —
+   из Spec touched (например `№%print-faksimile-toggle-group-a`). Канон группировки —
    [git-workflow.md](../../../docs/ai/git-workflow.md).
 
 Caveman-режим на подтверждениях ослабляется (см. Auto-Clarity skill `caveman`): вопросы и
@@ -64,14 +64,14 @@ Caveman-режим на подтверждениях ослабляется (с�
 Источники (просканировать молча):
 
 - TodoWrite-список сессии — пункты `in_progress` / `pending`.
-- **Незакрытые OpenSpec changes из touched-списка** — `openspec/changes/<id>/tasks.md` с прогрессом <100%.
-- **`operator-checklist.md` из touched OpenSpec changes** — ручные задачи оператора (smoke,
-  проверки в целевом runtime). Файл НЕ парсится openspec CLI и не входит в прогресс tasks.md, но
+- **Незакрытые spec-changes из touched-списка** — `specs/changes/<id>/tasks.md` с прогрессом <100%.
+- **`operator-checklist.md` из touched spec-changes** — ручные задачи оператора (smoke,
+  проверки в целевом runtime). Файл НЕ парсится kit_spec и не входит в прогресс tasks.md, но
   незакрытые пункты (`- [ ]`) — повод спросить оператора. Если файл есть — вывести его
   содержимое в чат (оператору неудобно открывать файл вручную).
-- **`implementation-notes.md` из touched OpenSpec changes** — журнал отклонений от
+- **`implementation-notes.md` из touched spec-changes** — журнал отклонений от
   proposal/design
-  ([docs/ai/openspec-implementation-notes.md](../../../docs/ai/openspec-implementation-notes.md)).
+  ([docs/ai/spec-workflow.md](../../../docs/ai/spec-workflow.md)).
   Прочитать, выделить только **явные** отклонения и нерешённые TODO («отложено», «спайк»,
   «нужно подтвердить», «не решено», расхождения smoke-тестов). Если notes непусты и change
   близок к archive — напомнить «Разбери разлад» / [`/evolve`](../evolve/SKILL.md) до
@@ -94,8 +94,8 @@ Caveman-режим на подтверждениях ослабляется (с�
 
 > **Примечание про archive**: `implementation-notes.md` должен быть удалён **до** archive
 > (см.
-> [docs/ai/openspec-implementation-notes.md](../../../docs/ai/openspec-implementation-notes.md)).
-> Это делается на шаге 1 в рамках [openspec-archive-change](../openspec-archive-change/SKILL.md).
+> [docs/ai/spec-workflow.md](../../../docs/ai/spec-workflow.md)).
+> Это делается на шаге 1 в рамках [spec-archive](../spec-archive/SKILL.md).
 > На шаге 0 файл ещё нужен — не удалять.
 
 ## Шаг 0б. Уроки сессии (memory → docs)
@@ -117,7 +117,7 @@ Caveman-режим на подтверждениях ослабляется (с�
 - Запись в `memory/` должна была появиться **во время** сессии, не на close-chat
   (close-chat только напоминает про docs).
 
-## Шаг 1. Архивация OpenSpec
+## Шаг 1. Архивация spec-changes
 
 Кандидаты — **только touched-changes**, у которых после шага 0 tasks 100%.
 
@@ -136,12 +136,12 @@ Caveman-режим на подтверждениях ослабляется (с�
 
 Для каждого change, готового к архивации (или с явным «архивировать как есть»):
 
-1. Sync delta-specs в `openspec/specs/` (правило из [memory/feedback_openspec_always_sync_and_archive.md](../../../memory/feedback_openspec_always_sync_and_archive.md)).
-2. Архивировать через скилл [openspec-archive-change](../openspec-archive-change/SKILL.md).
-   При `spec-lint render`: **один** процесс; бюджет как в
-   [sandbox.md § spec-lint render](../../../docs/ai/sandbox.md) и
-   [spec-lint README](../../../tools/spec-lint/README.md) — не плодить фоновые
-   `render` при тишине.
+1. Sync delta-specs в `specs/` (правило из [docs/ai/spec-workflow.md](../../../docs/ai/spec-workflow.md)).
+2. Архивировать через скилл [spec-archive](../spec-archive/SKILL.md).
+   Render-ветка code-as-spec (если у стека есть binding-инструмент):
+   **один** процесс, бюджет и fallback — по binding-доку стека
+   (`stacks/<s>/docs/ai/code-as-spec-<s>.md`) и компаньону `spec-archive-<s>`.
+   Не плодить фоновые `render` при тишине.
 3. Сообщить пользователю: что заархивировано, куда переехало.
 
 Changes <100% без подтверждения «как есть» — не трогать, перечислить
@@ -223,7 +223,7 @@ bash tools/sandbox/run.sh python tools/git-partial-stage.py "путь/к/фай�
    катом / опционально.
 2. **Дробление на несколько коммитов — по умолчанию НЕТ.** Один коммит на всё touched.
    Дробить только если в touched **явно** смешаны несвязанные темы (например, 2+ разных
-   OpenSpec change с разными `<id>`, либо feat по одной подсистеме + несвязанный fix по
+   spec-change с разными `<id>`, либо feat по одной подсистеме + несвязанный fix по
    другой). При срабатывании триггера — один короткий вопрос: «один коммит или N по
    темам?». В остальных случаях — один коммит без вопроса.
 3. Если есть «неоднозначно» — **один** общий вопрос со списком: «включить в коммит /
@@ -249,7 +249,7 @@ bash tools/sandbox/run.sh python tools/git-partial-stage.py "путь/к/фай�
   (агент пишет memory **во время** сессии; шаг 0б — **предложение** оператору
   перенести уроки в docs, см. [agent-session-lessons.md](../../../docs/ai/agent-session-lessons.md)).
 - Не трогает untracked-файлы, которых нет ни в whitelist, ни в touched-списке.
-- Не архивирует OpenSpec changes, которые не трогали в этой сессии.
+- Не архивирует spec-changes, которые не трогали в этой сессии.
 - Не запускает стековые чеки, тесты и сборку — это отдельные шаги, юзер решает сам.
 - Не каскадит при обрыве: если на любом шаге пользователь сказал «стоп» — остановиться, ничего не откатывать.
 - **Не задаёт лишних вопросов.** Каждый вопрос пользователю должен быть оправдан: либо
@@ -269,10 +269,10 @@ bash tools/sandbox/run.sh python tools/git-partial-stage.py "путь/к/фай�
 ## Связанные скиллы и команды
 
 - [handoff](../handoff/SKILL.md) — оформить полезное вне скоупа сессии для следующего агента.
-- [openspec-archive-change](../openspec-archive-change/SKILL.md) — собственно архивация change.
+- [spec-archive](../spec-archive/SKILL.md) — собственно архивация change.
 - [`/git-summarize-and-commit`](../../../.cursor/commands/git-summarize-and-commit.md) —
   финальный коммит с семантическим сообщением.
-- [memory/feedback_openspec_always_sync_and_archive.md](../../../memory/feedback_openspec_always_sync_and_archive.md)
+- [docs/ai/spec-workflow.md](../../../docs/ai/spec-workflow.md)
   — правило sync+archive.
 - [git-workflow.md](../../../docs/ai/git-workflow.md) — группировка по `№%`, partial stage смешанных файлов.
 - [agent-session-lessons.md](../../../docs/ai/agent-session-lessons.md) — memory → docs, шаг 0б.

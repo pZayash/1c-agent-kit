@@ -21,7 +21,6 @@ $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "_win-reparse.ps1")
 
-$OpenSpecPkg = "@fission-ai/openspec@1.2.0"
 $fail = 0
 $root = $ConsumerRoot
 try { $root = (Resolve-Path $ConsumerRoot).Path } catch { $root = $ConsumerRoot }
@@ -38,7 +37,7 @@ function Sync-EnvPath {
 }
 
 function Write-Never {
-    Write-Host "NEVER: openspec init  (own openspec/ + kit skills)"
+    Write-Host "NEVER: openspec init  (kit_spec.py init instead; openspec CLI not used)"
     Write-Host "NEVER: rtk init       (writes CLAUDE.md)"
     Write-Host "NEVER: rtk init -g    (Claude hook; Cursor prefixes rtk itself)"
 }
@@ -83,21 +82,6 @@ function dep_node {
 
 function dep_npm { [void](Require-Cmd "npm" "comes with node") }
 
-function dep_openspec {
-    $osOk = Test-OnPath "openspec"
-    if ($osOk) {
-        Write-Host "OK openspec"
-    } else {
-        Write-Host "FAIL missing: openspec  (npm i -g $OpenSpecPkg)"
-        $script:fail = 1
-    }
-    if ($Install -and -not $osOk -and (Test-OnPath "npm")) {
-        Write-Host "install $OpenSpecPkg"
-        npm install -g $OpenSpecPkg
-        Sync-EnvPath
-    }
-}
-
 function dep_rtk { [void](Require-Cmd "rtk" "https://github.com/rtk-ai/rtk - install manually, any way you like") }
 
 function dep_rg {
@@ -120,7 +104,8 @@ function dep_python {
     if ((Test-OnPath "python") -or (Test-OnPath "python3") -or (Test-OnPath "py")) {
         Write-Host "OK python"
     } else {
-        Write-Host "WARN python not on PATH (sandbox/host scripts)"
+        Write-Host "FAIL missing: python  (kit tools: kit-layout, kit-spec, sandbox)"
+        $script:fail = 1
     }
 }
 
@@ -224,11 +209,14 @@ if ($null -eq $depsRows) {
 }
 
 Write-Host "=== consumer ==="
+$specsDir = Join-Path $root "specs"
 $osDir = Join-Path $root "openspec"
-if (Test-Path $osDir) {
-    Write-Host "OK openspec/ (from git, not init)"
+if (Test-Path $specsDir) {
+    Write-Host "OK specs/ (from git, not init)"
+} elseif (Test-Path $osDir) {
+    Write-Host "WARN openspec/ legacy root - migrate: python harness/tools/kit-spec/kit_spec.py migrate-root --apply"
 } else {
-    Write-Host "FAIL missing: openspec/  - merge consumer branch; NEVER openspec init"
+    Write-Host "FAIL missing: specs/  - merge consumer branch or kit_spec.py init; NEVER openspec init"
     $fail = 1
 }
 $envFile = Join-Path $root ".env"
@@ -277,7 +265,7 @@ Remove-Item -LiteralPath $probe, $probeT, $probeH -Force -ErrorAction SilentlyCo
 if ($Install) {
     Sync-EnvPath
     Write-Host "=== re-check after install ==="
-    foreach ($c in @("node", "npm", "openspec", "rtk", "rg")) {
+    foreach ($c in @("node", "npm", "python", "rtk", "rg")) {
         if (Test-OnPath $c) { Write-Host "OK $c" } else { Write-Host "FAIL still missing: $c"; $fail = 1 }
     }
 }

@@ -25,7 +25,7 @@ Kit разделён на стеко-нейтральное ядро и стек
 | stacks/1c | `stacks/1c/tools` | `bsl-check`, `load-changed-files`, `mcp-call`, `answer42`, `rights-xml-lint` | `tools/` |
 | stacks/py | `stacks/py/docs/ai` | Python-каноны (LDD-binding и др.) | через заглушки `docs/ai/` |
 | stacks/node | `stacks/node/docs/ai` | Node (JS/TS)-каноны (LDD-binding и др.) | через заглушки `docs/ai/` |
-| kit-internal | `pi/`, `hooks/`, `templates/`, `openspec/`, `scripts/`, `tools/{kit-layout,kit-agent,kit-lint,cc-1c-skills-sync,section-patch,skill-frontmatter,cc-1c-skills}` | механика kit, не монтируется | — |
+| kit-internal | `pi/`, `hooks/`, `templates/`, `specs/`, `scripts/`, `tools/{kit-layout,kit-agent,kit-spec,kit-lint,cc-1c-skills-sync,section-patch,skill-frontmatter,cc-1c-skills}` | механика kit, не монтируется | — |
 
 Манифесты слоёв: `core/core.json`, `stacks/<id>/stack.json` — `id` +
 host-deps (список id на check-функции `init-kit-deps`).
@@ -151,7 +151,7 @@ bash harness/scripts/bootstrap-kit.sh .
 # Windows (PowerShell)
 powershell -NoProfile -ExecutionPolicy Bypass -File harness/scripts/bootstrap-kit.ps1 -ConsumerRoot .
 
-# Host PATH (node, openspec CLI, rtk) — NEVER openspec init
+# Host PATH (node, python, rtk) — NEVER openspec init (спеки — kit_spec.py)
 powershell -NoProfile -File harness/scripts/init-kit-deps.ps1 -ConsumerRoot . -Install
 # Linux: INSTALL=1 bash harness/scripts/init-kit-deps.sh .
 
@@ -448,11 +448,11 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
   делает junction/symlink `.agents/skills` → `.cursor/skills`
   (и `.claude/skills`). Не копировать потребительский
   `setup-project-symlinks.sh` целиком (`src/cf` — layout потребителя).
-- **Нет node / openspec / rtk на голом Windows-worktree** — слот Docker
+- **Нет node / python / rtk на голом Windows-worktree** — слот Docker
   уже содержит их в образе; 42/`features` — нет. Скрипт
   `init-kit-deps` (`-Install`) ставит core-зависимости (`core/core.json`)
-  + зависимости выбранных стеков (`stacks/<id>/stack.json`). **Не** `openspec init` (свои
-  `openspec/` + kit skills). **Не** `rtk init` (CLAUDE.md). Канон:
+  + зависимости выбранных стеков (`stacks/<id>/stack.json`). **Не** `openspec init`
+  (спеки — `kit_spec.py`, scaffold безопасен). **Не** `rtk init` (CLAUDE.md). Канон:
   [core/docs/ai/kit-host-deps.md](core/docs/ai/kit-host-deps.md).
 - **Пути в разном регистре (Win/macOS)** — NTFS не видит
   `Foo`/`foo`, индекс Git видит два пути. Merge:
@@ -485,7 +485,7 @@ bash harness/scripts/link-cc-1c-skills.sh . .kit/local-skills.txt
 1С-специфика и компаньоны `<name>-1c` — [stacks/1c/cursor/](stacks/1c/cursor/).
 Канон `harness-promote`: [core/cursor/skills/harness-promote/](core/cursor/skills/harness-promote/).
 
-**Срез A:** caveman, openspec-*, explore, …  
+**Срез A:** caveman, spec-*, explore, …  
 **Срез B (workflow):** handoff, close-chat, load-changed-files, bsl-check,
 architect-apply, review, review-request, retro.
 

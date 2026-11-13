@@ -15,7 +15,7 @@ argument-hint: "<slug>"
 `handoffs/<slug>/rN-request.md`. Это рабочий канал между двумя сессиями, не спека
 и не долговременная память.
 
-**Принцип:** ссылаться на устойчивые артефакты (`openspec/`, `memory/`, коммиты,
+**Принцип:** ссылаться на устойчивые артефакты (`specs/`, `memory/`, коммиты,
 дифф по маркерам `№%`), не копировать их.
 
 **Парный скилл:** вердикт по заявке пишет ревьювер —
@@ -38,7 +38,7 @@ argument-hint: "<slug>"
 
 `/review-request <slug>`
 
-- `<slug>` — единица треда ревью. Имя openspec change, если ревью привязано к
+- `<slug>` — единица треда ревью. Имя spec-change, если ревью привязано к
   change; иначе свободный kebab-топик (без даты-префикса). Пример:
   `upd-tnved-rashodnaya`, `forms-web-client-blocker`.
 - Если `<slug>` не задан — вывести из контекста; при неоднозначности спросить
@@ -76,7 +76,7 @@ argument-hint: "<slug>"
 
 **Когда**: YYYY-MM-DD HH:MM (локальное)
 **Ветка / коммит**: <ветка>, <короткий SHA> — <subject> (если git)
-**Change**: openspec/changes/<slug>/ (если есть; иначе «нет change»)
+**Change**: specs/changes/<slug>/ (если есть; иначе «нет change»)
 **Статус работы**: закончено | не закончено | затык
 
 ## Фокус ревью
@@ -100,7 +100,7 @@ argument-hint: "<slug>"
 ## Состав работы
 
 - Файлы по маркеру `№%<slug>` (не дифф; команда: `git diff | grep -o '№%...'`).
-- Ссылки на `openspec/changes/<slug>/` (proposal/design/tasks/spec).
+- Ссылки на `specs/changes/<slug>/` (proposal/design/tasks/spec).
 
 ## Ответ по прошлому вердикту
 
@@ -124,7 +124,7 @@ argument-hint: "<slug>"
 
 ## Ссылки
 
-- openspec/, memory/, коммиты — без копирования содержимого.
+- specs/, memory/, коммиты — без копирования содержимого.
 ```
 
 ## Чего не писать
@@ -163,9 +163,9 @@ slug: <slug>
 ## Границы
 
 - `/review-request` не коммитит и не пушит (`handoffs/` вне git).
-- Не заменяет OpenSpec: контракт/спека меняется в `openspec/**`, заявка только
+- Не заменяет spec-флоу: контракт/спека меняется в `specs/**`, заявка только
   ссылается. Дрифт требований — по
-  [openspec-apply-change](../openspec-apply-change/SKILL.md).
+  [spec-apply](../spec-apply/SKILL.md).
 - Не дублирует `memory/` и `handoff`.
 - Не гонять по ревью-файлам стековые чеки — это не код.
 

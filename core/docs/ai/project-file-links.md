@@ -68,8 +68,8 @@ conf/CommonModules/%D1%8F%D1%8F_%D0%A3%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D1%8F%D0%9E
 [Module.bsl](conf/CommonModules/яя_УсловияОплатыПродажи/Ext/Module.bsl)
 ```
 
-Короткая подпись в тексте: [design.md](../../../../openspec/changes/example/design.md) — путь
-относительно текущего артефакта в `openspec/`, если так принято в папке change.
+Короткая подпись в тексте: [design.md](../../../../specs/changes/example/design.md) — путь
+относительно текущего артефакта в `specs/`, если так принято в папке change.
 
 ### 3. Markdown-ссылка — файл и строка (без тела кода)
 
@@ -88,12 +88,12 @@ conf/CommonModules/%D1%8F%D1%8F_%D0%A3%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D1%8F%D0%9E
 | --- | --- |
 | Указать файл/строку без кода | `[label](path#Ln)` — **первый выбор** |
 | Показать кусок кода в ответе | code citation с **непустым** телом |
-| Ссылка в `docs/` / OpenSpec / handoff | `[label](path)` |
+| Ссылка в `docs/` / specs / handoff | `[label](path)` |
 | Несколько файлов в списке | каждый — отдельная markdown-ссылка |
 
 ## Обязательные правила пути
 
-- От **корня репозитория**: `conf/…`, `docs/…`, `openspec/…` — не `/work/conf/…`, не `c:\…`.
+- От **корня репозитория**: `conf/…`, `docs/…`, `specs/…` — не `/work/conf/…`, не `c:\…`.
 - Разделитель **`/`** (даже если агент в Linux agent-slot).
 - Кириллица и пробелы — **как на диске**, без `encodeURI` / `%D0%…`.
 - В agent-slot workspace = `/work`, но в ссылках всё равно `conf/…` — Cursor на хосте
@@ -129,5 +129,5 @@ conf/CommonModules/%D1%8F%D1%8F_%D0%A3%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D1%8F%D0%9E
 
 - Имена **новых** файлов агентом — латиница ([markdown-formatting.md § Имена](markdown-formatting.md));
   существующие кириллические пути в `conf/` и legacy `docs/` не трогать.
-- Handoff, OpenSpec, review: те же форматы ([handoff/SKILL.md](../../../../.cursor/skills/handoff/SKILL.md)).
+- Handoff, spec-флоу, review: те же форматы ([handoff/SKILL.md](../../../../.cursor/skills/handoff/SKILL.md)).
 - Реестр cursor rules: [cursor-rules.md](../../../../docs/ai/cursor-rules.md).

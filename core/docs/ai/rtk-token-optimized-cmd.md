@@ -29,8 +29,7 @@ rtk gh pr view 42
 rtk cargo test
 
 # ❌ Не поддерживается — запускать напрямую, без rtk
-npx markdownlint docs/
-openspec status --change "my-change"
+markdownlint docs/
 pnpm install
 ```
 
@@ -48,7 +47,7 @@ npx markdownlint docs/ && rtk git add . && rtk git commit -m "fix"
 
 - **Забыть `rtk` на `git status` / `git diff` / `git commit`** — лишние
   сотни токенов на каждый вызов. Git — основной сценарий экономии.
-- **Добавить `rtk` к `pnpm`/`npm`/`npx`/`openspec`** — получишь
+- **Добавить `rtk` к `pnpm`/`npm`/`npx`** — получишь
   `[rtk: program not found]`, exit 127.
 - **Забыть `rtk` в длинной цепочке `&&`** — префикс нужен на каждом
   поддерживаемом звене отдельно.
@@ -76,12 +75,12 @@ RTK — нативный Windows-бинарник. Он запускает до�
 `[rtk: program not found]` с exit code 127.
 
 ```bash
-# ❌ Не работает — openspec установлен через npm, это shell-скрипт
-rtk openspec status --change "my-change"
+# ❌ Не работает — markdownlint установлен через npm, это shell-скрипт
+rtk markdownlint docs/
 # → [rtk: program not found], exit 127
 
 # ✅ Правильно — запускать напрямую
-openspec status --change "my-change"
+markdownlint docs/
 ```
 
 **Как отличить**: если команда установлена через `npm install -g`,

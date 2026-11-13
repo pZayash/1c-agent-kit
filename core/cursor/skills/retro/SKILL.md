@@ -63,7 +63,7 @@ Generic-советы «пишите тесты» — не находки.
    `evolve note`; канон [memory-format.md](../../../docs/ai/memory-format.md)
    § Разлад). Разобранные сигналы не переразбирать.
 3. **`memory/*.md`** и `memory.md` — факты сессии (если писались).
-4. **OpenSpec** — `openspec/changes/<id>/implementation-notes.md`, `tasks.md`,
+4. **Spec-флоу** — `specs/changes/<id>/implementation-notes.md`, `tasks.md`,
    `operator-checklist.md` (отклонения, «отложено», smoke).
 5. **Git** — `git log` / `git diff` / `git status` сессии, touched-файлы.
 6. **Steering kit** — `AGENTS.md` (и managed-секции `templates/sections/*.md`),

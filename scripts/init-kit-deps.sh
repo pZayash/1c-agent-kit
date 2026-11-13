@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Check (and optionally install) kit host PATH tools. Never openspec init / rtk init.
+# Check (and optionally install) kit host PATH tools. Never openspec init / rtk init
+# (openspec CLI не используется — спеки через harness/tools/kit-spec).
 # Deps: core/core.json + stacks/<s>/stack.json выбранных стеков (.kit.json),
 # структурно — ключ `deps` из `kit_layout.py print-config --json`.
 # Стеко-специфичные id без core dep_<d> → хук stacks/<s>/deps-check.sh.
@@ -18,7 +19,6 @@ source "$SCRIPT_DIR/_link-common.sh"
 CONSUMER_ROOT="${1:-.}"
 INSTALL="${INSTALL:-0}"
 HARNESS_REL="${HARNESS_REL:-harness}"
-OPENSPEC_PKG="@fission-ai/openspec@1.2.0"
 
 if kit_is_windows; then
   args=(-ConsumerRoot "$(cd "$CONSUMER_ROOT" && pwd)" -HarnessRel "$HARNESS_REL")
@@ -47,18 +47,12 @@ dep_node() {
   fi
 }
 dep_npm()     { need npm "comes with node"; }
-dep_openspec() {
-  if have openspec; then echo "OK openspec"; else
-    echo "FAIL missing: openspec  (npm i -g $OPENSPEC_PKG)"; fail=1
-    if [[ "$INSTALL" == "1" ]] && have npm; then
-      echo "install $OPENSPEC_PKG"; npm install -g "$OPENSPEC_PKG" || true
-    fi
-  fi
-}
 dep_rtk()     { need rtk "https://github.com/rtk-ai/rtk — поставь вручную, как удобно"; }
 dep_rg()      { need rg "apt install ripgrep"; }
 dep_docker()  { warn_have docker; }
-dep_python()  { if have python || have python3; then echo "OK python"; else echo "WARN python not on PATH"; fi; }
+dep_python()  { if have python || have python3 || have py; then echo "OK python"; else
+    echo "FAIL missing: python  (kit tools: kit-layout, kit-spec, sandbox)"; fail=1
+  fi; }
 dep_qmd()     { warn_have qmd; }
 dep_unzip()   { warn_have unzip "BSLLS download"; }
 
@@ -104,7 +98,7 @@ run_stack_deps() {
   fi
 }
 
-echo "NEVER: openspec init  (own openspec/ + kit skills)"
+echo "NEVER: openspec init  (kit_spec.py init вместо него; openspec CLI не нужен)"
 echo "NEVER: rtk init       (writes CLAUDE.md)"
 echo "NEVER: rtk init -g    (Claude hook; Cursor prefixes rtk itself)"
 
@@ -127,7 +121,7 @@ declare -A seen=()
 # (текстовый парсинг JSON запрещён). Нет python → WARN + пропуск секций.
 deps_rows=""
 deps_cfg=""
-PY="$(command -v python || command -v python3 || true)"
+PY="$(command -v python || command -v python3 || command -v py || true)"
 if [[ -n "$PY" ]] && deps_cfg="$(kit_print_config_json "$CONSUMER_ROOT" "$HARNESS_REL" 2>/dev/null)"; then
   deps_rows="$(printf '%s' "$deps_cfg" | "$PY" -c 'import json,sys
 c=json.load(sys.stdin)
@@ -156,10 +150,12 @@ else
 fi
 
 echo "=== consumer ==="
-if [[ -d "$CONSUMER_ROOT/openspec" ]]; then
-  echo "OK openspec/ (from git, not init)"
+if [[ -d "$CONSUMER_ROOT/specs" ]]; then
+  echo "OK specs/ (from git, not init)"
+elif [[ -d "$CONSUMER_ROOT/openspec" ]]; then
+  echo "WARN openspec/ legacy root — миграция: python $HARNESS_REL/tools/kit-spec/kit_spec.py migrate-root --apply"
 else
-  echo "FAIL missing: openspec/  — merge consumer branch; NEVER openspec init"
+  echo "FAIL missing: specs/  — merge consumer branch или kit_spec.py init; NEVER openspec init"
   fail=1
 fi
 if [[ -f "$CONSUMER_ROOT/.env" ]]; then echo "OK .env"; else echo "WARN missing .env"; fi

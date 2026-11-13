@@ -1,6 +1,6 @@
 # Метаданные XML: ловушки LoadConfigFromFiles
 
-Кейсы из OpenSpec `payment-terms-kp-zp` (2026-06-16): `meta-edit` /
+Кейсы из spec-change `payment-terms-kp-zp` (2026-06-16): `meta-edit` /
 `meta-compile` + `meta-validate` прошли, а `1cv8 CONFIG /LoadConfigFromFiles`
 падал с **«Исключение XDTO при чтении файла»**.
 
@@ -357,7 +357,7 @@ XML метаданных и форм 1С — **UTF-8 BOM + CRLF**, без хво
 
 ## Источник
 
-OpenSpec `payment-terms-kp-zp`, исполнитель 2026-06-16; память:
+spec-change `payment-terms-kp-zp`, исполнитель 2026-06-16; память:
 [memory/2026-06-16-metadata-xml-loadconfig-pitfalls.md](../../../../../memory/2026-06-16-metadata-xml-loadconfig-pitfalls.md).
 Добивка 2026-06-18 (CRLF/rtk) — секция выше.
 Частичный импорт корневого объекта — 2026-10-05, секция выше; память:

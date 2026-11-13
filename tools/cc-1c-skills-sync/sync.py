@@ -4,7 +4,7 @@
 Upstream clone: tools/cc-1c-skills (gitignore).
 Consumer projects link via harness/scripts/link-cc-1c-skills.
 
-See openspec/changes/cc-1c-skills-in-kit/
+Spec-флоу kit: specs/changes/ (kit_spec).
 """
 from __future__ import annotations
 

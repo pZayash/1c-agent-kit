@@ -331,6 +331,52 @@ if (Test-Path -LiteralPath $harness) {
             Write-Info "answer42: version unknown (not installed / offline)"
         }
     }
+
+    # 13. spec-flow: spec root specs/ (or legacy openspec/), validate active
+    #     changes and WARN on open checkboxes in the archive (WARN only).
+    #     Foreign specs/ without marker and changes/ is skipped - not kit-owned.
+    $kitSpec = Join-Path $harness "tools\kit-spec\kit_spec.py"
+    if ($py -and (Test-Path -LiteralPath $kitSpec)) {
+        $specsDir = Join-Path $root "specs"
+        $osDir = Join-Path $root "openspec"
+        $specState = "none"
+        if (Test-Path -LiteralPath $specsDir) {
+            if (Test-Path -LiteralPath (Join-Path $specsDir ".kit-spec.json")) {
+                Write-Ok "spec root specs/"; $specState = "kit"
+            } elseif (Test-Path -LiteralPath (Join-Path $specsDir "changes")) {
+                Write-WarnX "specs/ without .kit-spec.json marker (self-heal: kit_spec.py init)"
+                $specState = "kit"
+            } else {
+                Write-Info "specs/ without marker and changes/ - foreign dir, spec-flow skipped"
+            }
+        } elseif (Test-Path -LiteralPath $osDir) {
+            Write-WarnX "legacy spec root openspec/ - migrate: python $HarnessRel/tools/kit-spec/kit_spec.py migrate-root --apply"
+            $specState = "legacy"
+        } else {
+            Write-Info "spec root missing (spec-flow unused or kit_spec.py init)"
+        }
+        if ($specState -ne "none") {
+            $vOut = & $py.Source $kitSpec validate --all --root $root 2>&1
+            $vWarn = @($vOut | Where-Object { "$_" -like 'WARN*' })
+            if ($vWarn.Count -gt 0) {
+                Write-WarnX "spec validate warns:"
+                $vWarn | Select-Object -First 10 | ForEach-Object { Write-Host "       $_" }
+            }
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "spec validate (active changes)"
+            } else {
+                Write-WarnX "spec validate issues:"
+                $vOut | Where-Object { "$_" -notlike 'WARN*' } |
+                    Select-Object -First 15 | ForEach-Object { Write-Host "       $_" }
+            }
+            $vOut = & $py.Source $kitSpec validate --archive --root $root 2>&1
+            $vWarn = @($vOut | Where-Object { "$_" -like 'WARN archive/*' })
+            if ($vWarn.Count -gt 0) {
+                Write-WarnX "spec archive: open checkboxes in archive:"
+                $vWarn | Select-Object -First 10 | ForEach-Object { Write-Host "       $_" }
+            }
+        }
+    }
 }
 
 if ($script:Failed) {

@@ -57,16 +57,7 @@ MIT license text below.
 
 See MIT license text below.
 
-### 6. `cursor/skills/openspec-*` — OpenSpec
-
-- Source: <https://github.com/fission-ai/openspec>
-- License: MIT
-- Copyright: (c) 2024 OpenSpec Contributors
-
-Adapted OpenSpec workflow skills (frontmatter `license: MIT`). See MIT license
-text below.
-
-### 7. `cursor/skills/caveman/`, `cursor/rules/caveman.mdc`
+### 6. `cursor/skills/caveman/`, `cursor/rules/caveman.mdc`
 
 Original content in this repository; no third-party origin recorded. Licensed
 under the repository MIT license.

@@ -21,7 +21,7 @@ XML** — экономишь контекст и токены. Результа�
 
 **Парные скиллы:**
 
-- [openspec-apply-change](../openspec-apply-change/SKILL.md) — обычный полный
+- [spec-apply](../spec-apply/SKILL.md) — обычный полный
   apply одной моделью. `architect-apply` — фаза **перед** ним: ядро + задание,
   остальное доделывает исполнитель.
 - [review-request](../review-request/SKILL.md) / [review](../review/SKILL.md) —
@@ -36,16 +36,16 @@ XML** — экономишь контекст и токены. Результа�
 - Явные триггеры: «архитекторский apply», «дай обвязку исполнителю», «каркас под
   слабую модель».
 
-Если задачу делаешь сам целиком — это [openspec-apply-change](../openspec-apply-change/SKILL.md),
+Если задачу делаешь сам целиком — это [spec-apply](../spec-apply/SKILL.md),
 не этот скилл.
 
 ## Аргументы
 
 `/architect-apply <change|slug> [scope] [exec]`
 
-- `<change|slug>` — имя OpenSpec change (он же `slug` треда ревью на шине).
+- `<change|slug>` — имя spec-change (он же `slug` треда ревью на шине).
   Если не задан — вывести из контекста; при неоднозначности
-  спросить одним вопросом (`openspec list --json`).
+  спросить одним вопросом (`kit_spec.py list --json`).
 - `scope` (необязательно) — пользовательская подсказка по объёму: `full` (Опус
   делает почти всё), `core` (ядро + задание), `min` (минимум кода, упор на
   задание). По умолчанию Опус **выбирает сам** (см. ниже).
@@ -89,12 +89,13 @@ XML** — экономишь контекст и токены. Результа�
 
 ## Шаги
 
-1. **Выбрать change.** `openspec list --json` при неоднозначности. Деградация:
+1. **Выбрать change.** `python harness/tools/kit-spec/kit_spec.py list --json` при неоднозначности. Деградация:
    если активного change нет — работай по свободной задаче, `slug` возьми из
    контекста или спроси. Объяви: «architect-apply по change: `<name>`».
 
-2. **Прочитать контекст.** `openspec instructions apply --change "<name>" --json`;
-   прочитать `contextFiles` (proposal/design/specs/tasks). Без change — задачу/
+2. **Прочитать контекст.** `python harness/tools/kit-spec/kit_spec.py status "<name>" --json`;
+   прочитать proposal/design/tasks + дельты `specs/changes/<name>/specs/<cap>/spec.md`
+   change. Без change — задачу/
    обсуждение из чата.
 
 3. **Решить объём** (адаптивно, с учётом `scope`/`exec`). Назвать вслух, что
@@ -109,20 +110,20 @@ XML** — экономишь контекст и токены. Результа�
 4a. **Code-as-spec для ядра.** Написанные архитектором экспортные методы SHALL
     нести REQUIREMENT-блоки над сигнатурой (формат: `// СПЕЦИФИКАЦИЯ` →
     `// REQUIREMENT: REQ-NNN — ...` → prose → `// VERIFIED-BY: ...`). Если есть
-    связанный prose spec в `openspec/specs/<cap>/spec.md` — перенести prose в
+    связанный prose spec в `specs/<cap>/spec.md` — перенести prose в
     анкер. Если speки нет, но метод значимый — создать новый REQUIREMENT с
     `(no-test)`. MODULE_CONTRACT в шапку модуля (если ещё нет). Маркер
     `<!-- render -->` в spec.md добавляет apply, не трогать здесь.
 
-5. **Зафиксировать решения** в `openspec/changes/<name>/implementation-notes.md`
+5. **Зафиксировать решения** в `specs/changes/<name>/implementation-notes.md`
    (только при отступлениях/решениях на месте — гейт как в
-   [openspec-apply-change](../openspec-apply-change/SKILL.md)). Контракты колонок,
+   [spec-apply](../spec-apply/SKILL.md)). Контракты колонок,
    неявные допущения, закрытые open questions.
 
 6. **Отметить сделанное** в `tasks.md`: `[ ]` → `[x]` по кодовым задачам, что
    реально выполнил. Стековые артефакты/формы/тесты оставить исполнителю.
 
-7. **Написать задание** `openspec/changes/<name>/executor-task.md` по шаблону
+7. **Написать задание** `specs/changes/<name>/executor-task.md` по шаблону
    ниже.
 
 8. **Передать исполнителю.** Выдать пользователю:
@@ -136,7 +137,7 @@ XML** — экономишь контекст и токены. Результа�
 
 ## Шаблон executor-task.md
 
-Файл `openspec/changes/<name>/executor-task.md`. Разделы:
+Файл `specs/changes/<name>/executor-task.md`. Разделы:
 
 1. **Заголовок + роль исполнителя** — «Ты линейный исполнитель; ядро написано и
    проверено; работай по контракту; отступления — в implementation-notes.md».
@@ -171,6 +172,6 @@ XML** — экономишь контекст и токены. Результа�
 - Объём — адаптивно; решение фиксируешь в `executor-task.md`.
 - Не коммитить без явного разрешения пользователя.
 - Дрифт требований по ходу — в `implementation-notes.md` (не молча в код), гейт
-  малый/структурный как в [openspec-apply-change](../openspec-apply-change/SKILL.md).
+  малый/структурный как в [spec-apply](../spec-apply/SKILL.md).
 - `executor-task.md` и `implementation-notes.md` живут в папке change; задание —
   рабочий артефакт, при архивации не нужен (notes удалить перед archive).

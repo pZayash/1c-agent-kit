@@ -93,3 +93,4 @@ Tool: `harness/stacks/1c/tools/answer42/` (`answer42.ps1` / `answer42.sh`, `smok
 | Файл | Зачем |
 | --- | --- |
 | [ldd-1c.md](ldd-1c.md) | binding LDD на 1С: ЖР, уровни, correlation, triage |
+| [code-as-spec-1c.md](code-as-spec-1c.md) | binding code-as-spec на 1С: анкеры в модулях, spec-lint, render-бюджет |

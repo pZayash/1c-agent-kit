@@ -2,7 +2,7 @@
 name: handoff
 description: >-
   Сжать текущую сессию в handoff-документ для продолжения в новом чате или на
-  другой машине. Ссылается на openspec/, memory/, коммиты — не дублирует их.
+  другой машине. Ссылается на specs/, memory/, коммиты — не дублирует их.
   Триггеры: handoff, /handoff, «передай контекст», «сохрани для продолжения».
 argument-hint: "Фокус следующей сессии или путь к .md (опционально)"
 ---
@@ -14,7 +14,7 @@ argument-hint: "Фокус следующей сессии или путь к .m
 (MIT) под проект-потребитель.
 
 **Принцип:** ссылаться на устойчивые артефакты, не копировать их. Handoff — снимок сессии,
-не замена OpenSpec и не долговременная память.
+не замена spec-флоу и не долговременная память.
 
 **Не для ревью.** Двусторонний протокол ревью — отдельные скиллы по ролям: заявку
 исполнителя пишет [review-request](../review-request/SKILL.md), вердикт ревьювера —
@@ -54,7 +54,7 @@ argument-hint: "Фокус следующей сессии или путь к .m
 Ссылки на файлы — [docs/ai/project-file-links.md](../../../docs/ai/project-file-links.md)
 (кратко: [.cursor/rules/project-file-links.mdc](../../rules/project-file-links.mdc);
 markdown `[text](path)` / `[text](path#Ln)` или code citation; без wikilinks —
-`openspec/config.yaml` → `rules.proposal`).
+`harness/core/docs/ai/spec-workflow.md` и `kit_spec.py instructions`).
 
 ```markdown
 # Handoff: <цель сессии одной строкой>
@@ -82,7 +82,7 @@ changes — указывай это явно (см. [git-workflow.md](../../../d
 ## Проверки
 
 - **Проверки стека** (статические чеки/линтеры и валидаторы потребителя) — пройдено / ошибки / не запускалось.
-- **OpenSpec**: активное изменение `openspec/changes/<id>/` — статус задач (кратко).
+- **Spec-флоу**: активное изменение `specs/changes/<id>/` — статус задач (кратко).
 
 ## Следующие шаги
 
@@ -90,7 +90,7 @@ changes — указывай это явно (см. [git-workflow.md](../../../d
 
 ## Что подгрузить в следующей сессии
 
-- **Навыки**: перечислить релевантные из `.cursor/skills/` (например `openspec-apply-change`, `explore`, стековые скиллы потребителя).
+- **Навыки**: перечислить релевантные из `.cursor/skills/` (например `spec-apply`, `explore`, стековые скиллы потребителя).
 - **Документация**: `docs/ai/...` по теме задачи.
 - **Память**: `qmd query` / `qmd search` с `--path "memory/"` по ключевым терминам; при необходимости [memory.md](../../../memory.md).
 - **MCP** (если у потребителя есть MCP-доступ к данным вне исходников — целевой runtime, сервисы): [docs/ai/mcp-config.md](../../../docs/ai/mcp-config.md) — конфиг `.mcp.json`, CLI `tools/mcp-call/`.
@@ -98,8 +98,8 @@ changes — указывай это явно (см. [git-workflow.md](../../../d
 
 ## Ссылки (содержимое не копировать)
 
-- [proposal.md](openspec/changes/<id>/proposal.md), [design.md](...), [tasks.md](...)
-- [implementation-notes.md](openspec/changes/<id>/implementation-notes.md) — если есть (не копировать текст; перед archive файл удаляют)
+- [proposal.md](specs/changes/<id>/proposal.md), [design.md](...), [tasks.md](...)
+- [implementation-notes.md](specs/changes/<id>/implementation-notes.md) — если есть (не копировать текст; перед archive файл удаляют)
 - Записи в `memory/<имя>.md`
 - Коммиты / PR (URL или SHA)
 - `research/`, `git-commit-summary/` — если оттуда брали решения
@@ -124,9 +124,9 @@ changes — указывай это явно (см. [git-workflow.md](../../../d
 ## Границы
 
 - Handoff не конфигурация и не код; **не** гонять по нему стековые чеки.
-- Handoff **не заменяет** OpenSpec: если нужен change, а proposal нет — предложить
-  [openspec-propose](../openspec-propose/SKILL.md) и сослаться на будущий
-  `openspec/changes/<id>/`.
+- Handoff **не заменяет** spec-флоу: если нужен change, а proposal нет — предложить
+  [spec-propose](../spec-propose/SKILL.md) и сослаться на будущий
+  `specs/changes/<id>/`.
 - Handoff **не дублирует** `memory/` и `memory.md` — другой канал (сессия vs долгая память).
 - **Коммит в git** — только по явному запросу пользователя (см. AGENTS.md).
 

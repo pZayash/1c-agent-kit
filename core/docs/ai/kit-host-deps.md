@@ -5,10 +5,13 @@
 | Слой | Что | Скрипт |
 | --- | --- | --- |
 | **Links** | junctions/symlink skills/tools (по `.kit.json` — core + выбранные стеки) | `bootstrap-kit` |
-| **Host PATH** | git, node, openspec CLI, rtk, rg + per-stack (`stack.json` → хук `deps-check`) | `init-kit-deps` |
+| **Host PATH** | git, node, python, rtk, rg + per-stack (`stack.json` → хук `deps-check`) | `init-kit-deps` |
 
-Docker-слот (`org-agent-*`): node 20 + `@fission-ai/openspec@1.2.0` + rtk
-уже в образе. Голый Windows-worktree (42/`features`) — **нет**.
+Docker-слот (`org-agent-*`): node 20 + python + rtk уже в образе.
+Голый Windows-worktree (42/`features`) — **нет**.
+
+Спек-флоу (`specs/`, changes) — инструмент `harness/tools/kit-spec/kit_spec.py`,
+host-dep не нужен (stdlib python). openspec CLI не используется.
 
 ## Вход
 
@@ -16,7 +19,7 @@ Docker-слот (`org-agent-*`): node 20 + `@fission-ai/openspec@1.2.0` + rtk
 # только проверка (exit 1, если нет обязательных)
 bash harness/scripts/init-kit-deps.sh .
 
-# поставить недостающее (node / openspec CLI / rtk / rg)
+# поставить недостающее (node / python / rtk / rg)
 INSTALL=1 bash harness/scripts/init-kit-deps.sh .
 ```
 
@@ -31,24 +34,22 @@ powershell -NoProfile -File harness/scripts/init-kit-deps.ps1 -ConsumerRoot . -I
 
 | Команда | Почему |
 | --- | --- |
-| `openspec init` | Дефолтный `openspec/`, skills, AGENTS/CLAUDE. У нас свои. Init затрёт. |
+| `openspec init` | openspec CLI не нужен и опасен: init пишет vendor-скиллы/команды сквозь junction-алиасы (`.claude`, `.pi`, `.agents` → `.cursor`). Scaffold — `kit_spec.py init`. |
 | `rtk init` | Пишет инструкции в `CLAUDE.md`. У нас канон уже в AGENTS / `rtk-token-optimized-cmd.md`. |
 | `rtk init -g` | Хук Claude Code. Cursor-агент и так ставит префикс `rtk`. Не часть kit. |
 
-Каталог `openspec/` приходит **из git** потребителя (merge `dev`), не из CLI init.
-Нет папки → merge ветки, не `openspec init`.
-
-CLI: `npm install -g @fission-ai/openspec@1.2.0` (пин как в
-`core/tools/sandbox/Dockerfile` / agent-container). `openspec` **без** `rtk`
-(npm-shim → `[rtk: program not found]`).
+Каталог `specs/` приходит **из git** потребителя (merge `dev`) или scaffold
+`python harness/tools/kit-spec/kit_spec.py init` (пишет только внутрь `specs/`).
+Легаси `openspec/` → `kit_spec.py migrate-root --apply`.
+Нет папки → merge ветки или `kit_spec.py init`, не `openspec init`.
 
 ## Обязательный PATH
 
 | Инструмент | Зачем | Поставить |
 | --- | --- | --- |
 | git | worktree, submodule | вручную |
-| Node.js 20 (min 18) | openspec, markdownlint | Win: `winget install OpenJS.NodeJS.LTS` |
-| openspec CLI 1.2.x | skills `openspec-*` | `npm i -g @fission-ai/openspec@1.2.0` |
+| Node.js 20 (min 18) | markdownlint | Win: `winget install OpenJS.NodeJS.LTS` |
+| python | kit-инструменты (kit-layout, kit-spec, kit-agent), sandbox | Win: `winget install Python.Python.3.12` |
 | rtk | префикс `git`/`docker` у агента | https://github.com/rtk-ai/rtk — оператор ставит сам |
 | rg | фильтры rtk + поиск агента | Win: `winget install BurntSushi.ripgrep.MSVC` |
 
@@ -106,9 +107,9 @@ Legacy link-скрипты (`LEGACY_LINKS=1`) — `SKIP consumer-owned`,
 ## Порядок на новом worktree (42)
 
 1. Починить gitdir, если `not a git repository: harness/../.git/modules/harness`.
-2. Merge канон-ветки (чтобы был `openspec/` в git).
+2. Merge канон-ветки (чтобы был `specs/` в git).
 3. `init-kit-deps -Install` — **не** `openspec init`.
-4. `bootstrap-kit` → `kit_layout.py verify`.
+4. `bootstrap-kit` → `kit_layout.py verify`; `kit_spec.py init`, если `specs/` нет.
 5. Стековые инструменты — по докам выбранных стеков (их `deps-check`
    показывает, чего не хватает; бинари ставятся один раз на хост, не в
    worktree).
