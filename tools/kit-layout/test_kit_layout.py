@@ -981,6 +981,44 @@ class ConsumerOwnedConflictTest(unittest.TestCase):
         self.assertEqual(mine.read_text(encoding='utf-8'), 'edited\n')
         self.assertFalse(kl.is_link(mine))
 
+    def test_verify_alias_conflict_reports_hint(self):
+        own = self.tmp / '.agents' / 'skills'
+        own.mkdir(parents=True)
+        (own / 'dsh-skill.md').write_text('mine\n', encoding='utf-8')
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT consumer-owned dir', out)
+        self.assertIn('exclude_resources', out)
+
+    def test_verify_dir_conflict_reports_hint(self):
+        own = self.tmp / '.cursor' / 'skills' / 'explore'
+        own.mkdir(parents=True)
+        (own / 'SKILL.md').write_text('mine\n', encoding='utf-8')
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT consumer-owned dir', out)
+        self.assertIn('exclude_resources', out)
+
+    def test_verify_consumer_file_is_conflict_not_stale(self):
+        mine = self.tmp / '.cursor' / 'rules' / 'a.mdc'
+        mine.parent.mkdir(parents=True)
+        mine.write_text('mine differs\n', encoding='utf-8')
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT consumer-owned file', out)
+        self.assertIn('exclude_resources', out)
+        self.assertNotIn('stale copy-fallback', out)
+
+    def test_verify_manifested_stale_fallback_still_warns(self):
+        mine = self.tmp / '.cursor' / 'rules' / 'a.mdc'
+        mine.parent.mkdir(parents=True)
+        mine.write_text('stale copy\n', encoding='utf-8')
+        self._manifest('.cursor/rules/a.mdc',
+                       'harness/core/cursor/rules/a.mdc', '0' * 64)
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertIn('stale copy-fallback', out)
+        self.assertNotIn('CONFLICT consumer-owned file', out)
+
 
 class ExcludeResourcesTest(unittest.TestCase):
     """.kit.json "exclude_resources" drops whole layout resources."""

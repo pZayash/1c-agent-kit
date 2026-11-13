@@ -79,6 +79,25 @@ sandbox) печатается `WARN: powershell.exe не в PATH - исполь�
 - `harness/.git` file-gitdir — `fix-harness-gitdir`
 - 42 HTTP git: GCM без TTY; fetch с `D:\git-data\repositories\team\proj.git`
 
+## CONFLICT при раскладке — consumer-owned пути
+
+`bootstrap-kit` и `kit_layout.py verify` не трогают чужое: не-link путь
+по managed-пути (свой `.agents/skills`, свой файл поверх kit-ребёнка)
+печатает `FAIL CONFLICT consumer-owned ...` и остаётся нетронутым —
+kit заменяет только пути из `.kit/fallback.txt`. Разрешение — на выбор:
+
+1. Переименовать/удалить consumer-путь и перезапустить `bootstrap-kit`.
+2. Исключить ресурс целиком: `.kit.json "exclude_resources": [<id>, ...]`
+   (id — `kit_layout.py print-config --json`, поле `resources`). Так
+   потребитель оставляет за собой целевой каталог (`.agents/skills`,
+   `.claude/skills`) без вилки `layout.json`.
+3. Отдельного ребёнка внутри ресурса — имя в `.kit/local-*.txt`.
+
+Legacy link-скрипты (`LEGACY_LINKS=1`) — `SKIP consumer-owned`,
+перезапись только по явному `-ReplaceCopies` / `KIT_REPLACE_COPIES=1`.
+Подробности: `harness/README.md`, секции «`.kit.json`» и «Consumer-owned
+пути — CONFLICT».
+
 ## Порядок на новом worktree (42)
 
 1. Починить gitdir, если `not a git repository: harness/../.git/modules/harness`.

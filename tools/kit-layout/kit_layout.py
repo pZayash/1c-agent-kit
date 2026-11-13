@@ -89,7 +89,8 @@ Commands:
   plan    [consumer-root]   dry-run of apply, exit 0 (--all-stacks: no filter)
   apply   [consumer-root]   takes .kit/lock for the mutation window
   verify  [consumer-root]   all expected links exist and are links; exit 1 on FAIL
-                            (file copy-fallback = WARN, dir copies = FAIL)
+                            (manifested file copy-fallback = WARN;
+                            consumer-owned path at a kit path = CONFLICT FAIL)
   tracked [consumer-root]   list kit link paths tracked in the consumer index;
                             exit 1 if any (junction traversal on Windows)
   print-config [consumer-root]  resolved .kit.json view (--json for scripts)
@@ -977,7 +978,8 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
             # rmtree it, report CONFLICT instead.
             ctx.say('FAIL', f'CONFLICT consumer-owned dir at kit path: {rel} '
                            f'(left untouched; remove/rename it or exclude the '
-                           f'resource via .kit.json "exclude_resources")')
+                           f'resource via .kit.json "exclude_resources"; see '
+                           f'{ctx.harness_rel}/README.md)')
             return False
         else:
             src_sha = hash_file(target)
@@ -1014,7 +1016,8 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
                 ctx.say('FAIL', f'CONFLICT consumer-owned file at kit path: '
                                f'{rel} (left untouched; remove/rename it or '
                                f'exclude the resource via .kit.json '
-                               f'"exclude_resources")')
+                               f'"exclude_resources"; see '
+                               f'{ctx.harness_rel}/README.md)')
                 return False
             link_sha = hash_file(link)
             if link_sha != rec['sha'] and link_sha != src_sha:
@@ -1115,7 +1118,10 @@ def verify_resource(ctx, res):
             else:
                 ctx.say('OK', f'OK {res["target"]}')
         elif target.exists():
-            ctx.say('FAIL', f'FAIL not link (copy?): {res["target"]}')
+            ctx.say('FAIL', f'CONFLICT consumer-owned dir at kit path: {rel} '
+                           f'(remove/rename it or exclude the resource via '
+                           f'.kit.json "exclude_resources"; see '
+                           f'{ctx.harness_rel}/README.md)')
             ok = False
         elif not source.is_dir():
             ctx.say('OK', f'SKIP verify {res["id"]} (no source)')
@@ -1151,10 +1157,19 @@ def verify_resource(ctx, res):
                 ctx.say('OK', f'OK {rel}')
         elif link.exists():
             if want_dir:
-                ctx.say('FAIL', f'FAIL not link (copy?): {rel}')
+                ctx.say('FAIL', f'CONFLICT consumer-owned dir at kit path: '
+                               f'{rel} (remove/rename it or exclude the '
+                               f'resource via .kit.json "exclude_resources"; '
+                               f'see {ctx.harness_rel}/README.md)')
                 ok = False
             elif file_equal(link, child):
                 ctx.say('WARN', f'WARN copy-fallback, in sync: {rel}')
+            elif ctx.old_fallback.get(rel) is None:
+                ctx.say('FAIL', f'CONFLICT consumer-owned file at kit path: '
+                               f'{rel} (remove/rename it or exclude the '
+                               f'resource via .kit.json "exclude_resources"; '
+                               f'see {ctx.harness_rel}/README.md)')
+                ok = False
             else:
                 ctx.say('WARN', f'WARN stale copy-fallback, content differs: {rel}')
         else:
@@ -1771,6 +1786,10 @@ def main(argv=None):
 
     failed = False
     if a.command == 'verify':
+        # The fallback manifest must be loaded before verify_resource:
+        # it distinguishes a stale copy-fallback (WARN) from a
+        # consumer-owned file at a kit path (CONFLICT FAIL).
+        load_fallback_manifest(ctx)
         for res in eff:
             failed |= not verify_resource(ctx, res)
         orphans, for_orph = find_orphans(ctx, resources, eff)
@@ -1778,7 +1797,6 @@ def main(argv=None):
             ctx.say('WARN', f'WARN orphan kit link (not in effective set): {rel}')
         for rel, raw in for_orph:
             ctx.say('WARN', f'WARN unmanaged orphan (foreign-ns): {rel} -> {raw}')
-        load_fallback_manifest(ctx)
         fb_pristine, fb_edited = find_fallback_orphans(ctx)
         for rel in fb_pristine + fb_edited:
             ctx.say('WARN', f'WARN orphan fallback entry: {rel}')

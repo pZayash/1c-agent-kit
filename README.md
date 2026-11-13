@@ -214,8 +214,11 @@ symlink, чей `readlink` указывает внутрь `harness/`, имя н
 раньше `REPLACE COPY` мог снести реальный `.agents/skills`). Заменять
 можно только пути из `.kit/fallback.txt`; byte-identical файл апгрейдится
 до ссылки как in-sync fallback. Разрешение: удалить/переименовать путь
-или исключить ресурс — `.kit.json "exclude_resources"`. `verify` по
-конфликтному пути — `FAIL not link (copy?)`, пока не разрешить.
+или исключить ресурс — `.kit.json "exclude_resources"` (см. секцию
+`.kit.json` выше). `verify` классифицирует так же: consumer-owned путь →
+`FAIL CONFLICT consumer-owned ...` с подсказкой к `exclude_resources`,
+неманифестнутый файл больше не выглядит «stale copy-fallback» — поэтому
+агент, увидев FAIL в `verify`/`kit-doctor`, сразу получает рецепт.
 Legacy link-скрипты (`LEGACY_LINKS=1`) — та же политика: consumer-owned
 путь → `SKIP consumer-owned ...`, перезапись только по явному opt-in
 `-ReplaceCopies` (ps1) / `KIT_REPLACE_COPIES=1` (sh).
