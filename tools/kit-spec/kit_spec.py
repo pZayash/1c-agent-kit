@@ -40,6 +40,7 @@ Stdlib only.
 """
 import argparse
 import datetime
+import fnmatch
 import json
 import os
 import re
@@ -57,8 +58,10 @@ MARKER = '.kit-spec.json'
 RESERVED = {'changes', 'readme.md'}
 ARTIFACTS = ('proposal', 'design', 'tasks')
 KNOWN_CHANGE_FILES = {a + '.md' for a in ARTIFACTS} | {
-    'operator-checklist.md', 'implementation-notes.md', 'executor-task.md',
+    'operator-checklist.md', 'implementation-notes.md',
     '.openspec.yaml'}
+# kit-семейства: executor-task.md (задание), executor-prompt.md (контракт)
+KNOWN_CHANGE_GLOBS = ('executor-*.md',)
 KEBAB_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 CHECK_RE = re.compile(r'^\s*- \[([ xX])\]', re.M)
 REQ_SECTION_RE = re.compile(r'^## (ADDED|MODIFIED|REMOVED|RENAMED) Requirements',
@@ -279,6 +282,25 @@ def change_report(specs, name):
 
 # ── validate ────────────────────────────────────────────────────────
 
+def load_local_rules(specs):
+    """specs/rules.local.json — потребительский whitelist посторонних
+    файлов/каталогов в changes. -> (rules, warn)."""
+    path = specs.dir / 'rules.local.json'
+    if not path.is_file():
+        return {}, None
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}, 'rules.local.json: битый JSON — игнорируется'
+    if not isinstance(data, dict):
+        return {}, 'rules.local.json: не объект — игнорируется'
+    return data, None
+
+
+def _globs(name, patterns):
+    return any(fnmatch.fnmatchcase(name, p) for p in patterns)
+
+
 def validate_change(specs, name):
     """(fails, warns) по правилам design §4."""
     fails, warns = [], []
@@ -297,14 +319,25 @@ def validate_change(specs, name):
     if (cdir / '.openspec.yaml').is_file():
         warns.append('легаси-маркер .openspec.yaml — удали: '
                      'kit_spec.py clean-legacy --apply')
+    local, w = load_local_rules(specs)
+    if w:
+        warns.append(w)
+    tol_files = local.get('tolerated_files') or []
+    tol_dirs = local.get('tolerated_dirs') or []
     for p in sorted(cdir.iterdir()):
         if p.name.startswith('.') and p.name != '.openspec.yaml':
             continue
         if p.is_dir() and p.name == 'specs':
             continue
-        if p.is_file() and p.name not in KNOWN_CHANGE_FILES:
+        if p.is_file():
+            if p.name in KNOWN_CHANGE_FILES or \
+                    _globs(p.name, KNOWN_CHANGE_GLOBS) or \
+                    _globs(p.name, tol_files):
+                continue
             warns.append(f'посторонний файл в change: {p.name}')
-        elif p.is_dir() and p.name != 'specs':
+        elif p.is_dir():
+            if _globs(p.name, tol_dirs):
+                continue
             warns.append(f'посторонний каталог в change: {p.name}/')
     prop = cdir / 'proposal.md'
     if prop.is_file():
@@ -358,7 +391,7 @@ def validate_library(specs):
         if p.name.startswith('.'):
             continue
         if p.is_file():
-            if p.name not in ('README.md', 'project.md'):
+            if p.name not in ('README.md', 'project.md', 'rules.local.json'):
                 warns.append(f'specs/{p.name}: файл не в capability-каталоге '
                              '(non-capability child)')
             continue

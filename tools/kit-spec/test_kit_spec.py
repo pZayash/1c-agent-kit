@@ -517,6 +517,37 @@ class ValidateStrayTest(TempConsumer):
         self.assertEqual(rc, 0)
         self.assertIn('посторонний файл', out)
 
+    def test_executor_glob_kit_tolerated(self):
+        (self.tmp / 'specs' / 'changes' / 'my-change' /
+         'executor-prompt.md').write_text('x')
+        _, out = run(ks.cmd_validate, root=str(self.tmp), spec_root=None,
+                     name='my-change', all=False, archive=False)
+        self.assertNotIn('executor-prompt.md', out)
+
+    def test_rules_local_tolerates(self):
+        (self.tmp / 'specs' / 'rules.local.json').write_text(json.dumps({
+            'tolerated_files': ['review-*.md', 'notes-*.md'],
+            'tolerated_dirs': ['probe*']}))
+        c = self.tmp / 'specs' / 'changes' / 'my-change'
+        (c / 'review-r1.md').write_text('x')
+        (c / 'notes-context.md').write_text('x')
+        (c / 'probe-x').mkdir()
+        _, out = run(ks.cmd_validate, root=str(self.tmp), spec_root=None,
+                     name='my-change', all=False, archive=False)
+        self.assertNotIn('посторонний', out)
+
+    def test_rules_local_bad_json_warns(self):
+        (self.tmp / 'specs' / 'rules.local.json').write_text('{bad')
+        _, out = run(ks.cmd_validate, root=str(self.tmp), spec_root=None,
+                     name='my-change', all=False, archive=False)
+        self.assertIn('rules.local.json: битый JSON', out)
+
+    def test_rules_local_self_not_stray_in_library(self):
+        (self.tmp / 'specs' / 'rules.local.json').write_text('{}')
+        specs = ks.Specs(str(self.tmp / 'specs'), 'new')
+        warns = ks.validate_library(specs)
+        self.assertFalse([w for w in warns if 'rules.local.json' in w], warns)
+
 
 class MigratePreFlightTest(MigrateTest):
     def test_no_partial_moves_on_collision(self):

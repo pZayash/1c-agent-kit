@@ -21,9 +21,10 @@ specs/
     └── archive/YYYY-MM-DD-<id>/   # завершённые
 ```
 
-Зарезервированные дети `specs/`: `changes`, `README.md`. Дети `.*` —
-service. `project.md` — tolerated-легаси (migrate-root переносит без
-WARN; каноном не является — дом ему в docs/ проекта).
+Зарезервированные дети `specs/`: `changes`, `README.md`,
+`rules.local.json`. Дети `.*` — service. `project.md` —
+tolerated-легаси (migrate-root переносит без WARN; каноном не является —
+дом ему в docs/ проекта).
 Легаси-корень `openspec/` — read-only (list/status/validate), миграция:
 `kit_spec.py migrate-root --apply` (переносит в `specs/` и оставляет
 junction-shim: `openspec/changes` → `specs/changes` и точечные
@@ -47,15 +48,25 @@ python harness/tools/kit-spec/kit_spec.py clean-legacy    # rm .openspec.yaml (d
 
 `archive` и `migrate-root --apply` сами удаляют `.openspec.yaml`
 (мёртвый маркер openspec CLI) из затрагиваемых changes — `clean-legacy`
-нужен только для уже-мигрированных деревьев с остатком. Посторонние
-файлы потребителя (`review-*.md` и т.п.) инструмент не трогает: WARN
-validate — сигнал, разбор — за проектом.
+нужен только для уже-мигрированных деревьев с остатком.
+
+Посторонние файлы в change — WARN validate (kit-семейство
+`executor-*.md` тихо). Легитимные конвенции потребителя глушатся через
+`specs/rules.local.json` (коммитится в репо проекта):
+
+```json
+{"tolerated_files": ["review-*.md", "notes-*.md"],
+ "tolerated_dirs": ["probe*"]}
+```
+
+Ad-hoc эксперименты (`build_probe.py`, `load-list.txt`) лучше чистить,
+а не терпеть — но решение за проектом.
 
 Проектные правила спека (роли артефактов, mental test, чек-листы
-постановщика) — не в `rules.json` и не в `specs/`: это конвенции для
-модели, дом им — `docs/ai/` потребителя (напр. `spec-rules-<proj>.md`)
-со ссылкой из AGENTS.md. `rules.json` — kit-owned структурная схема
-артефактов; consumer-overlay'я нет.
+постановщика) — не в `rules.json`: это конвенции для модели, дом им —
+`docs/ai/` потребителя (напр. `spec-rules-<proj>.md`) со ссылкой из
+AGENTS.md. `rules.json` — kit-owned структурная схема артефактов;
+consumer-overlay ограничен whitelist'ом файлов выше.
 
 `instructions <artifact>` — единственный канал выдачи правил артефакту
 (источник: `tools/kit-spec/templates/rules.json`; этот документ — канон-
