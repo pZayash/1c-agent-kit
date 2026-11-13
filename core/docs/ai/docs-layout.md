@@ -52,7 +52,9 @@
 | Старый путь пилота | заглушка `docs/ai/<имя>.md` → `harness/<слой>/docs/ai/<имя>.md` |
 
 Не копировать тело kit в `docs/ai/` потребителя. Не `git add harness/README.md`
-как blob проекта.
+как blob проекта. Заглушка — **опциональна**: если `docs/**` потребителя под
+гейтами (i18n-пары, lint), канон читается прямо по
+`harness/<слой>/docs/ai/<имя>.md` без заглушки.
 
 Шаблон оглавления: [templates/docs/README.md](../../../templates/docs/README.md).
 
