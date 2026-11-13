@@ -1,6 +1,6 @@
 # code-as-spec — binding 1C
 
-Рамка и правила — [core/docs/ai/code-as-spec.md](../../../core/docs/ai/code-as-spec.md).
+Рамка и правила — [core/docs/ai/code-as-spec.md](../../../../core/docs/ai/code-as-spec.md).
 Здесь — специфика 1С: синтаксис анкера, носитель, инструмент `spec-lint`,
 владелец по `PROJECT_PREFIX`.
 

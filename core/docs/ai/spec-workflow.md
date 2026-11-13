@@ -21,7 +21,9 @@ specs/
     └── archive/YYYY-MM-DD-<id>/   # завершённые
 ```
 
-Зарезервированные дети `specs/`: `changes`, `README.md`. Дети `.*` — service.
+Зарезервированные дети `specs/`: `changes`, `README.md`. Дети `.*` —
+service. `project.md` — tolerated-легаси (migrate-root переносит без
+WARN; каноном не является — дом ему в docs/ проекта).
 Легаси-корень `openspec/` — read-only (list/status/validate), миграция:
 `kit_spec.py migrate-root --apply` (переносит в `specs/` и оставляет
 junction-shim: `openspec/changes` → `specs/changes` и точечные

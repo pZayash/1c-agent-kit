@@ -303,6 +303,47 @@ class MigrateTest(TempConsumer):
         self.assertEqual(rc, 1)
         self.assertIn('коллизия', out)
 
+    def test_migrate_project_md_tolerated(self):
+        (self.tmp / 'openspec' / 'project.md').write_text('# ctx\n')
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('project.md не канон', out)
+        self.assertTrue((self.tmp / 'specs' / 'project.md').is_file())
+        specs = ks.Specs(str(self.tmp / 'specs'), 'new')
+        warns = ks.validate_library(specs)
+        self.assertFalse([w for w in warns if 'project.md' in w], warns)
+
+    def test_generated_readme_line_length(self):
+        for line in ks.GENERATED_README.splitlines():
+            self.assertLessEqual(len(line), 80, line)
+
+    def test_migrate_zero_caps_no_empty_specs_shim(self):
+        o = self.tmp / 'openspec'
+        shutil.rmtree(o / 'specs')
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=True)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse((o / 'specs').exists())
+        self.assertTrue((o / 'changes' / 'c1' / 'tasks.md').is_file())
+
+    def test_migrate_replaces_old_format_generated_readme(self):
+        (self.tmp / 'specs').mkdir()
+        (self.tmp / 'specs' / '.kit-spec.json').write_text(
+            '{"spec_format": 1}')
+        legacy_gen = ('# specs/\n\nСпек-флоу kit: `changes/<id>/` — активные, '
+                      '`changes/archive/` — завершённые, `<cap>/spec.md` — '
+                      'библиотека. Канон: harness/core/docs/ai/'
+                      'spec-workflow.md; инструмент: `python harness/tools/'
+                      'kit-spec/kit_spec.py`. Вход — скилл `spec-propose`.\n')
+        (self.tmp / 'specs' / 'README.md').write_text(
+            legacy_gen, encoding='utf-8')
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self.tmp / 'specs' / 'README.md').read_text(),
+                         'legacy readme\n')
+
 
 class NameGuardTest(TempConsumer):
     def setUp(self):

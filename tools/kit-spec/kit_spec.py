@@ -68,11 +68,19 @@ SCENARIO_RE = re.compile(r'^##### Scenario:', re.M)
 CAS_MARKER = '<!-- code-as-spec: render -->'
 COMMENT_RE = re.compile(r'<!--.*?-->', re.S)
 GENERATED_README = (
-    '# specs/\n\nСпек-флоу kit: `changes/<id>/` — активные, '
-    '`changes/archive/` — завершённые, `<cap>/spec.md` — библиотека. '
-    'Канон: harness/core/docs/ai/spec-workflow.md; инструмент: '
-    '`python harness/tools/kit-spec/kit_spec.py`. Вход — скилл '
+    '# specs/\n'
+    '\n'
+    'Спек-флоу kit: `changes/<id>/` — активные, `changes/archive/` —\n'
+    'завершённые, `<cap>/spec.md` — библиотека. Канон:\n'
+    'harness/core/docs/ai/spec-workflow.md; инструмент:\n'
+    '`python harness/tools/kit-spec/kit_spec.py`. Вход — скилл\n'
     '`spec-propose`.\n')
+
+
+def is_generated_readme(text):
+    """Совпадение с GENERATED_README с точностью до переносов строк
+    (старые версии генерировали одну длинную строку)."""
+    return ' '.join(text.split()) == ' '.join(GENERATED_README.split())
 
 
 def kit_sha():
@@ -349,7 +357,7 @@ def validate_library(specs):
         if p.name.startswith('.'):
             continue
         if p.is_file():
-            if p.name != 'README.md':
+            if p.name not in ('README.md', 'project.md'):
                 warns.append(f'specs/{p.name}: файл не в capability-каталоге '
                              '(non-capability child)')
             continue
@@ -822,8 +830,8 @@ def plan_migrate(root):
             # перенесённый README имеет приоритет над сгенерированным
             if d.name == 'README.md' and d.is_file():
                 try:
-                    if d.read_text(encoding='utf-8',
-                                   errors='replace') == GENERATED_README:
+                    if is_generated_readme(d.read_text(
+                            encoding='utf-8', errors='replace')):
                         continue  # перезапишем сгенерированный перенесённым
                 except OSError:
                     pass
@@ -852,7 +860,11 @@ def cmd_migrate_root(a):
         print(f'  move {s.relative_to(root)} -> {d.relative_to(root)}')
     for s, d in loose:
         print(f'  move (loose) {s.relative_to(root)} -> {d.relative_to(root)}')
-    print('  shim openspec/specs -> specs, openspec/changes -> specs/changes')
+        if s.name == 'project.md':
+            print('    NOTE: project.md не канон spec-флоу — перенесён в '
+                  'specs/ для сохранности; при желании перемести в docs/')
+    print('  shim openspec/changes -> specs/changes; '
+          'openspec/specs/<cap> -> specs/<cap> (мигрированные)')
     print('  .gitignore += openspec/; маркер specs/.kit-spec.json')
     if not a.apply:
         print('dry-run: --apply для выполнения')
@@ -895,19 +907,25 @@ def cmd_migrate_root(a):
         try:
             # openspec/specs — real dir + per-cap junctions: старые ссылки
             # openspec/specs/<cap> работают, specs/changes не торчит наружу
-            (old / 'specs').mkdir()
-            for cap in caps:
-                make_dir_junction(new / cap, old / 'specs' / cap)
+            if caps:
+                (old / 'specs').mkdir()
+                for cap in caps:
+                    make_dir_junction(new / cap, old / 'specs' / cap)
             make_dir_junction(new / 'changes', old / 'changes')
         except OSError as e:
             print(f'FAIL: shim не создан ({e}). Содержимое уже в specs/ — '
                   'вручную: mklink /J openspec\\changes specs\\changes и '
                   'junction на каждый specs\\<cap> (или symlink на POSIX)')
             return 1
-        print('shim: openspec/changes -> specs/changes; '
-              'openspec/specs/<cap> -> specs/<cap> для мигрированных caps')
-        print('  (capability, созданные позже, в openspec/specs/ не '
-              'появятся — shim точечный, только для мигрированных)')
+        if caps:
+            print('shim: openspec/changes -> specs/changes; '
+                  'openspec/specs/<cap> -> specs/<cap> для мигрированных '
+                  'caps')
+            print('  (capability, созданные позже, в openspec/specs/ не '
+                  'появятся — shim точечный, только для мигрированных)')
+        else:
+            print('shim: openspec/changes -> specs/changes '
+                  '(capability не было — openspec/specs не создан)')
     else:
         print('shim openspec/{specs,changes} уже существует — оставлен')
     readme = new / 'README.md'
