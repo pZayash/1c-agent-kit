@@ -52,11 +52,27 @@ def git(root, *args):
         return None
 
 
+def git_rc(root, *args):
+    if not GIT:
+        return None
+    try:
+        r = subprocess.run(['git', '-C', str(root), *args],
+                           capture_output=True, timeout=15)
+        return r.returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def cmd_session_start(a):
     root = Path(a.root).resolve()
     harness_rel = os.environ.get('HARNESS_REL', a.harness_rel)
     harness = harness_root(root, harness_rel)
     hints = []
+    # stale=True: plan --strict меряется по kit на диске, который старше
+    # целевого (submodule не обновлён до gitlink / behind origin) — pending
+    # врёт, версионный hint уже ведёт к update+bootstrap. При drift «диск
+    # новее gitlink» (свежий bump) план честный — не глушим.
+    stale = False
 
     if not harness.is_dir():
         hints.append(f'harness/ отсутствует в {root} — kit не подключен '
@@ -75,7 +91,12 @@ def cmd_session_start(a):
                 hints.append(
                     f'дрейф сабмодуля: harness HEAD ({head[:7]}) != записанный gitlink '
                     f'({recorded_sha[:7]}). Либо submodule update (откат к gitlink), '
-                    f'либо закоммить bump: git commit -m "chore(harness): bump kit" -- harness')
+                    f'либо закоммить bump: git commit -m "chore(harness): bump kit" '
+                    f'-- harness. После выравнивания: '
+                    f'bash {harness_rel}/scripts/bootstrap-kit.sh .')
+                if git_rc(harness, 'merge-base', '--is-ancestor',
+                          head, recorded_sha) == 0:
+                    stale = True
             upstream = git(harness, 'rev-parse', '--verify', '-q', 'origin/master')
             if upstream and head != upstream:
                 behind = git(harness, 'rev-list', '--count', f'HEAD..origin/master')
@@ -90,12 +111,14 @@ def cmd_session_start(a):
                         f'коммиты. Канон: cherry-pick локальных коммитов на '
                         f'origin/master и push (skill harness-promote), затем '
                         f'bump gitlink.')
+                    stale = True
                 elif behind_n > 0:
                     hints.append(
                         f'harness (kit) отстал от локального origin/master на {behind} '
                         f'коммит(ов). Обнови: git -C {harness_rel} fetch origin && '
                         f'git -C {harness_rel} checkout origin/master && '
                         f'bash {harness_rel}/scripts/bootstrap-kit.sh .')
+                    stale = True
                 elif ahead_n > 0:
                     hints.append(
                         f'harness (kit) впереди origin/master на {ahead} коммит(ов) — '
@@ -104,10 +127,7 @@ def cmd_session_start(a):
     # stale kit links + namespace (engine plan --strict).
     # ВНЕ git-ветки: в sandbox/контейнере git нет, а именно там важно поймать
     # FOREIGN-NS и не отправить агента перезапускать bootstrap не в том месте.
-    # План пропускаем, когда уже есть hint про версию harness: pending-число
-    # меряется по СТАРОМУ kit на диске и врёт (бамп+bootstrap и так снимет его);
     # FOREIGN-NS (exit 2) показываем всегда — он про namespace, не про версию.
-    stale = bool(hints)
     layout = harness / 'tools' / 'kit-layout' / 'kit_layout.py'
     if layout.is_file():
         try:
