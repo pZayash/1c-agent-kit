@@ -1648,26 +1648,34 @@ def write_managed_gitignore(ctx):
         return
     p = ctx.root / '.gitignore'
     old = p.read_text(encoding='utf-8') if p.is_file() else ''
-    kept = []
-    skip = False
+    # Regenerate the block in place: hand-written lines after the kit block
+    # keep their position instead of being pulled above it (diff churn).
+    before, after = [], []
+    in_block = seen_block = False
     for line in old.splitlines():
         s = line.strip()
         if s == GITIGNORE_BEGIN:
-            skip = True
+            in_block = seen_block = True
             continue
         if s == GITIGNORE_END:
-            skip = False
+            in_block = False
             continue
-        if not skip:
-            kept.append(line)
-    while kept and not kept[-1].strip():
-        kept.pop()
+        if in_block:
+            continue
+        (after if seen_block else before).append(line)
+    while before and not before[-1].strip():
+        before.pop()
+    while after and not after[0].strip():
+        after.pop(0)
+    while after and not after[-1].strip():
+        after.pop()
     entries = sorted('/' + r for r in ctx.managed)
     entries.append('/' + ctx.manifest_rel)
     entries.append('/' + LOCK_REL)
-    prefix = kept + ([''] if kept else [])
-    text = '\n'.join(prefix + [GITIGNORE_BEGIN] + entries + [GITIGNORE_END]) + '\n'
-    p.write_text(text, encoding='utf-8')
+    lines = before + ([''] if before else []) + [GITIGNORE_BEGIN] + entries + [GITIGNORE_END]
+    if after:
+        lines += [''] + after
+    p.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
 def main(argv=None):

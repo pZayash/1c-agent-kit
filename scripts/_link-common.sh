@@ -332,35 +332,40 @@ kit_update_gitignore() {
   local begin="# >>> kit-managed: $id (bootstrap-kit) >>>"
   local end="# <<< kit-managed: $id <<<"
   [[ "${DRY_RUN:-0}" == "1" ]] && return 0
-  local kept
-  kept="$(mktemp)"
+  # Regenerate this block in place: hand-written lines after the kit block
+  # keep their position instead of being pulled above it (diff churn).
+  local -a before=() after=()
+  local inb=0 seen=0 line s
   if [[ -f "$gi" ]]; then
-    local skip=0 line s
     while IFS= read -r line || [[ -n "$line" ]]; do
       s="${line#"${line%%[![:space:]]*}"}"
       s="${s%"${s##*[![:space:]]}"}"
-      if [[ "$s" == "$begin" ]]; then skip=1; continue; fi
-      if [[ "$s" == "$end" ]]; then skip=0; continue; fi
-      [[ "$skip" == "1" ]] && continue
-      printf '%s\n' "$line" >> "$kept"
+      if [[ "$s" == "$begin" ]]; then inb=1; seen=1; continue; fi
+      if [[ "$s" == "$end" ]]; then inb=0; continue; fi
+      [[ "$inb" == "1" ]] && continue
+      if [[ "$seen" == "1" ]]; then after+=("$line"); else before+=("$line"); fi
     done < "$gi"
   fi
   {
-    awk '
-      { a[n++] = $0 }
-      END {
-        last = -1
-        for (i = 0; i < n; i++) if (a[i] ~ /[^[:space:]]/) last = i
-        for (i = 0; i <= last; i++) print a[i]
-      }' "$kept"
-    if grep -q '[^[:space:]]' "$kept" 2>/dev/null; then echo; fi
-    echo "$begin"
+    local last=-1 i
+    for ((i=0; i<${#before[@]}; i++)); do
+      [[ "${before[i]}" =~ [^[:space:]] ]] && last=$i
+    done
+    for ((i=0; i<=last; i++)); do printf '%s\n' "${before[i]}"; done
+    if (( last >= 0 )); then printf '\n'; fi
+    printf '%s\n' "$begin"
     printf '%s\n' "$@" | sed 's#\\#/#g' | sed 's#^#/#' | LC_ALL=C sort -u
     echo "/.kit/fallback.txt"
     echo "/.kit/lock"
     echo "$end"
+    local a0=0 a1=$((${#after[@]}-1))
+    while (( a0 <= a1 )) && [[ ! "${after[a0]:-}" =~ [^[:space:]] ]]; do a0=$((a0+1)); done
+    while (( a1 >= a0 )) && [[ ! "${after[a1]:-}" =~ [^[:space:]] ]]; do a1=$((a1-1)); done
+    if (( a1 >= a0 )); then
+      printf '\n'
+      for ((i=a0; i<=a1; i++)); do printf '%s\n' "${after[i]}"; done
+    fi
   } > "$gi"
-  rm -f "$kept"
 }
 
 # Tombstones (idea: teamai .removed) — prune stale kit-owned links.

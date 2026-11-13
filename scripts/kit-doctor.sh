@@ -279,7 +279,7 @@ if [[ -e "$HARNESS_ROOT" ]]; then
     ' "$gi" | sort)"
     if [[ -n "$overlap" ]]; then
       on="$(grep -c . <<<"$overlap")"
-      warn "$on hand-written .gitignore line(s) duplicate the kit-managed block (remove them):"
+      info "$on hand-written .gitignore line(s) also covered by the kit-managed block (harmless; consumer line wins when kit is absent):"
       grep . <<<"$overlap" | head -5 | sed 's/^/       /'
     fi
   fi

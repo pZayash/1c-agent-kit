@@ -288,8 +288,8 @@ if (Test-Path -LiteralPath $harness) {
         }
     }
 
-    # 11. .gitignore hygiene: hand-written paths now covered by the managed block
-    #     (the block is regenerated, the hand lines are dead weight).
+    # 11. .gitignore hygiene: hand-written paths also covered by the managed
+    #     block - INFO only (the consumer line protects a checkout without kit).
     $gi = Join-Path $root ".gitignore"
     if (Test-Path -LiteralPath $gi) {
         $managedKeys = @{}
@@ -306,7 +306,7 @@ if (Test-Path -LiteralPath $harness) {
         }
         $overlap = @($handKeys.Keys | Where-Object { $managedKeys.ContainsKey($_) } | Sort-Object)
         if ($overlap.Count -gt 0) {
-            Write-WarnX "$($overlap.Count) hand-written .gitignore line(s) duplicate the kit-managed block (remove them):"
+            Write-Info "$($overlap.Count) hand-written .gitignore line(s) also covered by the kit-managed block (harmless; consumer line wins when kit is absent):"
             $overlap | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
         }
     }

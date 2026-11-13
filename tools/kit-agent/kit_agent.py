@@ -104,6 +104,10 @@ def cmd_session_start(a):
     # stale kit links + namespace (engine plan --strict).
     # ВНЕ git-ветки: в sandbox/контейнере git нет, а именно там важно поймать
     # FOREIGN-NS и не отправить агента перезапускать bootstrap не в том месте.
+    # План пропускаем, когда уже есть hint про версию harness: pending-число
+    # меряется по СТАРОМУ kit на диске и врёт (бамп+bootstrap и так снимет его);
+    # FOREIGN-NS (exit 2) показываем всегда — он про namespace, не про версию.
+    stale = bool(hints)
     layout = harness / 'tools' / 'kit-layout' / 'kit_layout.py'
     if layout.is_file():
         try:
@@ -119,7 +123,7 @@ def cmd_session_start(a):
                 hints.append(
                     f'kit-layout не может работать в этом namespace ({err}). '
                     f'Запусти на хосте: bash {harness_rel}/scripts/bootstrap-kit.sh .')
-            elif r.returncode != 0:
+            elif r.returncode != 0 and not stale:
                 summary = [l for l in (r.stdout or '').splitlines()
                            if l.startswith('kit-layout plan:')]
                 hints.append(
