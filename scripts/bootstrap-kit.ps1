@@ -36,14 +36,19 @@ if (-not (Test-Path $harness)) {
     throw "missing harness: $harness (git submodule update --init?)"
 }
 
-# Consumer .gitattributes: without "*.sh ... eol=lf" core.autocrlf=true checks
-# out CRLF into *.sh and they fail ("syntax error"). Warn, not fatal.
+# Consumer .gitattributes: without eol=lf on *.sh core.autocrlf=true checks
+# out CRLF into .sh files and they fail ("syntax error"). Warn, not fatal.
+# Effective attr via `git check-attr` covers a global `* text=auto eol=lf`,
+# not only a literal `*.sh`; the grep below is the no-git fallback.
 # The .sh twin checks the same on the Linux-native path. ASCII only (PS 5.1).
 $gitattrFile = Join-Path $root ".gitattributes"
 $hasShLf = $false
-if (Test-Path -LiteralPath $gitattrFile) {
+$eolLine = & git -C $root check-attr eol -- probe.sh 2>$null
+if ($eolLine -match 'eol:\s*lf\s*$') {
+    $hasShLf = $true
+} elseif (Test-Path -LiteralPath $gitattrFile) {
     $hasShLf = [bool](Get-Content -LiteralPath $gitattrFile |
-        Where-Object { $_ -match '^\*\.sh\s.*eol=lf' } |
+        Where-Object { $_ -match '^(\*|\*\.sh)\s.*eol=lf' } |
         Select-Object -First 1)
 }
 if (-not $hasShLf) {

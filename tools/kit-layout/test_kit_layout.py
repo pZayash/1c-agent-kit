@@ -957,6 +957,35 @@ class ConsumerOwnedConflictTest(unittest.TestCase):
         self.assertEqual(mine.read_text(encoding='utf-8'), 'mine differs\n')
         self.assertFalse(kl.is_link(mine))
 
+    def test_consumer_file_shadowing_kit_dir_child_conflicts(self):
+        own = self.tmp / '.cursor' / 'skills' / 'explore'
+        own.parent.mkdir(parents=True)
+        own.write_text('mine\n', encoding='utf-8')
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT consumer-owned file', out)
+        self.assertEqual(own.read_text(encoding='utf-8'), 'mine\n')
+
+    def test_consumer_file_at_alias_target_conflicts(self):
+        # .claude/skills-style: a consumer FILE where the alias wants a dir
+        # link - previously crashed in hash_file(dir), must be CONFLICT.
+        (self.tmp / '.cursor' / 'skills').mkdir(parents=True)
+        mine = self.tmp / '.agents' / 'skills'
+        mine.parent.mkdir(parents=True)
+        mine.write_text('pointer\n', encoding='utf-8')
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT consumer-owned file', out)
+        self.assertEqual(mine.read_text(encoding='utf-8'), 'pointer\n')
+        self.assertFalse(kl.is_link(mine))
+
+    def test_verify_file_at_alias_target_reports_file(self):
+        mine = self.tmp / '.agents' / 'skills'
+        mine.parent.mkdir(parents=True)
+        mine.write_text('pointer\n', encoding='utf-8')
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertIn('CONFLICT consumer-owned file', out)
+
     def test_manifested_pristine_fallback_is_refreshed(self):
         mine = self.tmp / '.cursor' / 'rules' / 'a.mdc'
         mine.parent.mkdir(parents=True)

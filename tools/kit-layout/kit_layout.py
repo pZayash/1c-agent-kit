@@ -982,6 +982,16 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
                            f'{ctx.harness_rel}/README.md)')
             return False
         else:
+            if is_dir:
+                # A regular file where a dir link is wanted (e.g. a
+                # consumer pointer file at an alias target): consumer-owned,
+                # and the dir source cannot be hashed anyway - CONFLICT.
+                ctx.say('FAIL', f'CONFLICT consumer-owned file at kit path: '
+                               f'{rel} (left untouched; remove/rename it or '
+                               f'exclude the resource via .kit.json '
+                               f'"exclude_resources"; see '
+                               f'{ctx.harness_rel}/README.md)')
+                return False
             src_sha = hash_file(target)
             if file_equal(link, target):
                 # In-sync fallback (hardlink/copy). If symlink privilege has
@@ -1118,9 +1128,10 @@ def verify_resource(ctx, res):
             else:
                 ctx.say('OK', f'OK {res["target"]}')
         elif target.exists():
-            ctx.say('FAIL', f'CONFLICT consumer-owned dir at kit path: {rel} '
-                           f'(remove/rename it or exclude the resource via '
-                           f'.kit.json "exclude_resources"; see '
+            kind = 'dir' if target.is_dir() else 'file'
+            ctx.say('FAIL', f'CONFLICT consumer-owned {kind} at kit path: '
+                           f'{rel} (remove/rename it or exclude the resource '
+                           f'via .kit.json "exclude_resources"; see '
                            f'{ctx.harness_rel}/README.md)')
             ok = False
         elif not source.is_dir():
@@ -1156,8 +1167,9 @@ def verify_resource(ctx, res):
             else:
                 ctx.say('OK', f'OK {rel}')
         elif link.exists():
-            if want_dir:
-                ctx.say('FAIL', f'CONFLICT consumer-owned dir at kit path: '
+            if want_dir or link.is_dir():
+                kind = 'dir' if link.is_dir() else 'file'
+                ctx.say('FAIL', f'CONFLICT consumer-owned {kind} at kit path: '
                                f'{rel} (remove/rename it or exclude the '
                                f'resource via .kit.json "exclude_resources"; '
                                f'see {ctx.harness_rel}/README.md)')
@@ -1492,8 +1504,9 @@ def warn_gitignore_overlap(ctx):
     if not overlap:
         return
     show = ', '.join(overlap[:5]) + (' ...' if len(overlap) > 5 else '')
-    ctx.say('WARN', f'WARN {len(overlap)} hand-written .gitignore line(s) duplicate '
-                   f'the kit-managed block (remove them; the block is regenerated): {show}')
+    ctx.say('INFO', f'INFO {len(overlap)} hand-written .gitignore line(s) also '
+                   f'covered by the kit-managed block (harmless; the consumer '
+                   f'line wins when kit is absent): {show}')
 
 
 def load_fallback_manifest(ctx):

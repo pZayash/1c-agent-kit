@@ -36,11 +36,20 @@ if kit_is_windows; then
   exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi
 
-# Consumer .gitattributes: без "*.sh ... eol=lf" при core.autocrlf=true .sh
+# Consumer .gitattributes: без eol=lf на *.sh при core.autocrlf=true .sh
 # чекаутятся с CRLF и падают ("syntax error $'{\r'"). Warn, не отказ.
+# Эффективный атрибут через git check-attr (покрывает и глобальный
+# `* text=auto eol=lf`, не только явный `*.sh`); grep — fallback без git.
 # Здесь, а не до exec-блока: на Windows ветку проверяет bootstrap-kit.ps1.
-if [[ ! -f "$CONSUMER_ROOT/.gitattributes" ]] \
-    || ! grep -Eq '^[[:space:]]*\*\.sh[[:space:]].*eol=lf' "$CONSUMER_ROOT/.gitattributes"; then
+sh_eol_lf=0
+if eol_line="$(git -C "$CONSUMER_ROOT" check-attr eol -- probe.sh 2>/dev/null)" \
+    && [[ "$eol_line" == *"eol: lf"* ]]; then
+  sh_eol_lf=1
+elif [[ -f "$CONSUMER_ROOT/.gitattributes" ]] \
+    && grep -Eq '^[[:space:]]*\*(\.sh)?[[:space:]].*eol=lf' "$CONSUMER_ROOT/.gitattributes"; then
+  sh_eol_lf=1
+fi
+if [[ "$sh_eol_lf" == "0" ]]; then
   cat >&2 <<'EOS'
 WARN: у потребителя нет правила "*.sh text eol=lf" в .gitattributes —
 при core.autocrlf=true .sh чекаутятся с CRLF и падают (syntax error).
