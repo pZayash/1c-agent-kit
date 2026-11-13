@@ -111,7 +111,7 @@ if [[ "${LEGACY_LINKS:-0}" != "1" ]]; then
         && git -C "$HARNESS_ROOT" sparse-checkout list >/dev/null 2>&1; then
       echo "WARN: print-config failed under sparse-checkout — widening to /* and retrying" >&2
       if [[ "$DRY_RUN" != "1" ]]; then
-        git -C "$HARNESS_ROOT" sparse-checkout set --no-cone '/*'
+        MSYS_NO_PATHCONV=1 git -C "$HARNESS_ROOT" sparse-checkout set --no-cone '/*'
       fi
       cfg="$(kit_print_config_json "$CONSUMER_ROOT" "$HARNESS_REL")" || {
         echo "ERROR: .kit.json не проходит валидацию" >&2; exit 1; }
@@ -152,7 +152,9 @@ print("KIT_SPARSE=" + ("1" if c.get("sparse") else "0"))' <<<"$cfg")"
       if [[ "$DRY_RUN" == "1" ]]; then
         echo "WOULD: git -C $HARNESS_REL sparse-checkout set --no-cone ${pats[*]}"
       else
-        git -C "$HARNESS_ROOT" sparse-checkout set --no-cone "${pats[@]}"
+        # MSYS_NO_PATHCONV: в Git Bash паттерны вида /stacks/x/ иначе
+        # превращаются в C:/Program Files/Git/stacks/x/ и прячут стек.
+        MSYS_NO_PATHCONV=1 git -C "$HARNESS_ROOT" sparse-checkout set --no-cone "${pats[@]}"
       fi
     elif sparse_active; then
       if [[ "$DRY_RUN" == "1" ]]; then echo "WOULD: git -C $HARNESS_REL sparse-checkout disable"

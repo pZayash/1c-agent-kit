@@ -69,6 +69,11 @@ sandbox) печатается `WARN: powershell.exe не в PATH - исполь�
 - `.gitattributes` у потребителя без `*.sh text eol=lf` — bootstrap
   предупреждает: иначе при `core.autocrlf=true` `.sh` чекаутятся с CRLF
 - `python` / sandbox ([sandbox.md](sandbox.md))
+- голый `bash` на Windows-хосте может резолвиться в
+  `C:\Windows\System32\bash.exe` (WSL-лаунчер) раньше Git Bash —
+  скрипты уходят в WSL (`/mnt/c`, FOREIGN-NS). Звать `"$BASH"`/полный
+  путь к Git Bash или `.ps1`; `kit-doctor`/`bootstrap-kit` сами
+  отказываются в WSL-сессии (обход — `WSL_ALLOW=1`)
 - Docker Desktop (sandbox, слоты)
 - `qmd`, `uv` / rlm-tools-bsl. Клиент агента: `QMD_CLIENT` / `QMD_MCP_URL`
   ([qmd-search.md](qmd-search.md), шаблон [env-qmd.example](../../../templates/env-qmd.example))

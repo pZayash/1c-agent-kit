@@ -27,6 +27,19 @@ fi
 CONSUMER_ROOT="$(cd "$CONSUMER_ROOT" && pwd)"
 HARNESS_ROOT="$CONSUMER_ROOT/$HARNESS_REL"
 
+if [[ "${WSL_ALLOW:-0}" != "1" ]] && kit_wsl_windows_fs "$CONSUMER_ROOT"; then
+  cat >&2 <<'EOS'
+ERROR: WSL-bash + Windows-проект (/mnt/<drive>/...). Диагностика из WSL
+видит чужой namespace и бесполезна (голый `bash` в Git Bash может
+резолвиться в C:\Windows\System32\bash.exe — WSL-лаунчер).
+Запусти на хосте:
+  Git Bash:   "$BASH" harness/scripts/kit-doctor.sh .
+  PowerShell: powershell -File harness/scripts/kit-doctor.ps1 -ConsumerRoot .
+Осознанно продолжить в WSL: WSL_ALLOW=1.
+EOS
+  exit 1
+fi
+
 FAIL=0
 ok()   { echo "[OK]   $*"; }
 warn() { echo "[WARN] $*"; }
