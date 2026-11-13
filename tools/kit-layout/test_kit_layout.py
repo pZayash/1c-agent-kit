@@ -851,5 +851,204 @@ class ResolveSourceTest(unittest.TestCase):
         self.assertIn('no kit source', err)
 
 
+ALIAS_LAYOUT = {
+    'gitignore': False,
+    'fallback_manifest': '.kit/fallback.txt',
+    'resources': [
+        {'id': 'core-skills', 'kind': 'child-dirs',
+         'source': 'harness/core/cursor/skills', 'target': '.cursor/skills',
+         'local_manifest': '.kit/local-skills.txt'},
+        {'id': 'core-rules', 'kind': 'child-files',
+         'source': 'harness/core/cursor/rules', 'target': '.cursor/rules'},
+        {'id': 'agents-skills', 'kind': 'alias',
+         'source': '.cursor/skills', 'target': '.agents/skills'},
+    ],
+}
+
+
+def build_alias_consumer(root):
+    """Fake kit: two core skills + one rule file + stack registry."""
+    for name in ('explore', 'handoff'):
+        d = root / 'harness' / 'core' / 'cursor' / 'skills' / name
+        d.mkdir(parents=True)
+        (d / 'SKILL.md').write_text(f'core {name}\n', encoding='utf-8')
+    rules = root / 'harness' / 'core' / 'cursor' / 'rules'
+    rules.mkdir(parents=True)
+    (rules / 'a.mdc').write_text('rule-a\n', encoding='utf-8')
+    (root / 'harness' / 'stacks' / '1c' / 'stack.json').parent.mkdir(
+        parents=True, exist_ok=True)
+    (root / 'harness' / 'stacks' / '1c' / 'stack.json').write_text(
+        '{"id": "1c"}', encoding='utf-8')
+
+
+class ConsumerOwnedConflictTest(unittest.TestCase):
+    """An existing non-link path the fallback manifest does not claim is
+    consumer-owned: CONFLICT, never removed/overwritten (regression for
+    REPLACE COPY rmtree-ing a real .agents/skills)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-conflict-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build_alias_consumer(self.tmp)
+        (self.tmp / 'layout.json').write_text(
+            json.dumps(ALIAS_LAYOUT), encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': []})
+        self._env = mock.patch.dict(os.environ)
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        os.environ.pop('KIT_LEGACY', None)
+
+    def args(self, command, *extra):
+        return [command, str(self.tmp), '--layout',
+                str(self.tmp / 'layout.json'), '--no-gitignore',
+                '--no-untrack', *extra]
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = kl.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def _manifest(self, rel, source_rel, sha):
+        (self.tmp / '.kit').mkdir(exist_ok=True)
+        (self.tmp / '.kit' / 'fallback.txt').write_text(
+            f'{rel}\t{source_rel}\t{sha}\n', encoding='utf-8')
+
+    def test_consumer_dir_at_alias_target_conflicts(self):
+        own = self.tmp / '.agents' / 'skills'
+        own.mkdir(parents=True)
+        (own / 'dsh-skill.md').write_text('mine\n', encoding='utf-8')
+        # plan: alias source .cursor/skills does not exist yet (dry-run
+        # creates nothing), so the alias is skipped until apply creates it
+        rc, out, _ = self.call(*self.args('plan'))
+        self.assertIn('SKIP agents-skills', out)
+        # but with the alias source present plan surfaces the conflict too
+        (self.tmp / '.cursor' / 'skills').mkdir(parents=True)
+        rc, out, _ = self.call(*self.args('plan'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT', out)
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT', out)
+        self.assertTrue((own / 'dsh-skill.md').is_file())
+        self.assertFalse(kl.is_link(own))
+        # other resources still applied despite the conflict
+        self.assertTrue(kl.is_link(self.tmp / '.cursor' / 'skills' / 'explore'))
+
+    def test_consumer_dir_shadowing_kit_child_conflicts(self):
+        own = self.tmp / '.cursor' / 'skills' / 'explore'
+        own.mkdir(parents=True)
+        (own / 'SKILL.md').write_text('mine\n', encoding='utf-8')
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT', out)
+        self.assertEqual((own / 'SKILL.md').read_text(encoding='utf-8'),
+                         'mine\n')
+        self.assertFalse(kl.is_link(own))
+        self.assertTrue(kl.is_link(self.tmp / '.cursor' / 'skills' / 'handoff'))
+
+    def test_consumer_file_shadowing_kit_child_conflicts(self):
+        mine = self.tmp / '.cursor' / 'rules' / 'a.mdc'
+        mine.parent.mkdir(parents=True)
+        mine.write_text('mine differs\n', encoding='utf-8')
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 1, out)
+        self.assertIn('CONFLICT', out)
+        self.assertEqual(mine.read_text(encoding='utf-8'), 'mine differs\n')
+        self.assertFalse(kl.is_link(mine))
+
+    def test_manifested_pristine_fallback_is_refreshed(self):
+        mine = self.tmp / '.cursor' / 'rules' / 'a.mdc'
+        mine.parent.mkdir(parents=True)
+        mine.write_text('stale copy\n', encoding='utf-8')
+        self._manifest('.cursor/rules/a.mdc',
+                       'harness/core/cursor/rules/a.mdc',
+                       kl.hash_file(mine))
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('REFRESH', out)
+        self.assertTrue(kl.is_link(mine))
+
+    def test_manifested_edited_fallback_is_kept(self):
+        mine = self.tmp / '.cursor' / 'rules' / 'a.mdc'
+        mine.parent.mkdir(parents=True)
+        mine.write_text('edited\n', encoding='utf-8')
+        self._manifest('.cursor/rules/a.mdc',
+                       'harness/core/cursor/rules/a.mdc', '0' * 64)
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('KEEP LOCAL EDITS', out)
+        self.assertEqual(mine.read_text(encoding='utf-8'), 'edited\n')
+        self.assertFalse(kl.is_link(mine))
+
+
+class ExcludeResourcesTest(unittest.TestCase):
+    """.kit.json "exclude_resources" drops whole layout resources."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='kit-exclude-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build_alias_consumer(self.tmp)
+        (self.tmp / 'layout.json').write_text(
+            json.dumps(ALIAS_LAYOUT), encoding='utf-8')
+        self._env = mock.patch.dict(os.environ)
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        os.environ.pop('KIT_LEGACY', None)
+
+    def args(self, command, *extra):
+        return [command, str(self.tmp), '--layout',
+                str(self.tmp / 'layout.json'), '--no-gitignore',
+                '--no-untrack', *extra]
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = kl.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_exclude_alias_skips_it(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': [],
+                                  'exclude_resources': ['agents-skills']})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(kl.is_link(self.tmp / '.cursor' / 'skills' / 'explore'))
+        self.assertFalse((self.tmp / '.agents').exists())
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertEqual(rc, 0, out)
+
+    def test_exclude_allows_consumer_dir(self):
+        own = self.tmp / '.agents' / 'skills'
+        own.mkdir(parents=True)
+        (own / 'dsh-skill.md').write_text('mine\n', encoding='utf-8')
+        write_kit_json(self.tmp, {'version': 1, 'stacks': [],
+                                  'exclude_resources': ['agents-skills']})
+        rc, out, _ = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('CONFLICT', out)
+        self.assertTrue((own / 'dsh-skill.md').is_file())
+        rc, out, _ = self.call(*self.args('verify'))
+        self.assertEqual(rc, 0, out)
+
+    def test_exclude_unknown_id_warns(self):
+        write_kit_json(self.tmp, {'version': 1, 'stacks': [],
+                                  'exclude_resources': ['nope']})
+        rc, out, err = self.call(*self.args('apply'))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('not a layout resource', err)
+        self.assertTrue(kl.is_link(self.tmp / '.agents' / 'skills'))
+
+    def test_exclude_bad_types_fail(self):
+        for cfg in ({'version': 1, 'stacks': [], 'exclude_resources': 'x'},
+                    {'version': 1, 'stacks': [],
+                     'exclude_resources': ['a', 'a']},
+                    {'version': 1, 'stacks': [], 'exclude_resources': ['']}):
+            write_kit_json(self.tmp, cfg)
+            rc, _, err = self.call(*self.args('apply'))
+            self.assertEqual(rc, 2, cfg)
+            self.assertIn('ERROR', err)
+            self.assertFalse((self.tmp / '.cursor').exists(), cfg)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

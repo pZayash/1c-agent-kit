@@ -49,6 +49,12 @@ host-deps (список id на check-функции `init-kit-deps`).
 - `sparse: true` — bootstrap включает `git sparse-checkout` для
   `harness/`: `/*`, `!/stacks/*`, `/stacks/*/stack.json`,
   `/stacks/<выбранные>/` (stack.json всегда в checkout — валидация имён).
+- `exclude_resources` — id ресурсов layout, которые потребитель не
+  раскладывает вовсе (в отличие от `local-*.txt`, исключающих отдельных
+  детей внутри ресурса). Юзкейс: потребитель сам владеет целевым
+  каталогом алиаса (`.agents/skills`, `.claude/skills`) — без exclusion
+  engine упрётся в `CONFLICT`. Старые kit-ссылки исключённого ресурса
+  свипятся как orphans, как при снятии стека. Неизвестный id — WARN.
 - `options` — reserved.
 - `KIT_LEGACY=1` — force-override `stacks: ["*"]` (env > файл) + WARN;
   для окружений без `.kit.json` до миграции.
@@ -201,6 +207,19 @@ symlink, чей `readlink` указывает внутрь `harness/`, имя н
 удаляется; с правкой потребителя — `WARN` и сохраняется в манифесте
 (иначе 2-й apply забудет). `plan` печатает `WOULD REMOVE`, `verify` — WARN.
 
+**Consumer-owned пути — CONFLICT, не REPLACE.** Существующий не-link путь
+по managed-пути (свой каталог `.agents/skills`, свой файл поверх имени
+ребёнка kit) считается потребительским: `plan`/`apply` печатают
+`FAIL CONFLICT ...` и **не трогают** его (никаких rmtree/перезаписей —
+раньше `REPLACE COPY` мог снести реальный `.agents/skills`). Заменять
+можно только пути из `.kit/fallback.txt`; byte-identical файл апгрейдится
+до ссылки как in-sync fallback. Разрешение: удалить/переименовать путь
+или исключить ресурс — `.kit.json "exclude_resources"`. `verify` по
+конфликтному пути — `FAIL not link (copy?)`, пока не разрешить.
+Legacy link-скрипты (`LEGACY_LINKS=1`) — та же политика: consumer-owned
+путь → `SKIP consumer-owned ...`, перезапись только по явному opt-in
+`-ReplaceCopies` (ps1) / `KIT_REPLACE_COPIES=1` (sh).
+
 **Windows (junction).** Без symlink-привилегии каталоги линкуются через
 `mklink /J`. Git при `core.symlinks=false` идёт **внутрь** junction и трекает
 содержимое kit как обычные blob'ы потребителя — на свежем `git clone` вышли
@@ -325,7 +344,8 @@ ensureSkillFrontmatter): fix инжектирует блок или дописы
 - **Skill «есть», но не из kit** — Win: `ReparsePoint` / `dir /AL`;
   Linux: `readlink` / `kit_layout.py verify`.
 - **Сотни `D` в git после link** — сначала merge ветки, где skills
-  **untrack**; потом bootstrap (иначе REPLACE COPY).
+  **untrack**; потом bootstrap (иначе CONFLICT — потребительский путь
+  не затирается).
   - Linux: kit-ссылка — symlink (mode `120000`), старые трекнутые копии
     дают `D` в `.cursor/skills/*` и `tools/*`.
   - Windows без symlink-привилегии: junction git не считает symlink'ом,

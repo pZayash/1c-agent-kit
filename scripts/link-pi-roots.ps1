@@ -10,7 +10,9 @@ param(
 
     [string]$HarnessRel = "harness",
 
-    [switch]$DryRun
+    [switch]$DryRun,
+
+    [switch]$ReplaceCopies
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,12 +38,19 @@ function New-PiJunction([string]$link, [string]$target, [string]$name) {
         }
     }
     if ($DryRun) {
-        Write-Host "WOULD JUNCTION: $link -> $target"
+        if ((Test-Path -LiteralPath $link) -and -not (Test-KitReparse $link) -and -not $ReplaceCopies) {
+            Write-Host "WOULD SKIP consumer-owned: $link (pass -ReplaceCopies to overwrite)"
+        } else {
+            Write-Host "WOULD JUNCTION: $link -> $target"
+        }
         return
     }
     if (Test-Path -LiteralPath $link) {
         if (Test-KitReparse $link) {
             Remove-KitReparseOrTree $link
+        } elseif (-not $ReplaceCopies) {
+            Write-Host "SKIP consumer-owned exists (-ReplaceCopies to overwrite): $link"
+            return
         } else {
             Write-Host "REPLACE COPY: $name"
             Remove-KitReparseOrTree $link

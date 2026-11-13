@@ -278,9 +278,16 @@ kit_ensure_link_slot() {
       fi
     else
       if [[ "${DRY_RUN:-0}" == "1" ]]; then
-        echo "rm -rf \"$link_path\""
-      else
+        if [[ "${KIT_REPLACE_COPIES:-0}" == "1" ]]; then
+          echo "rm -rf \"$link_path\""
+        else
+          echo "WOULD SKIP consumer-owned: $link_path (KIT_REPLACE_COPIES=1 to overwrite)"
+        fi
+      elif [[ "${KIT_REPLACE_COPIES:-0}" == "1" ]]; then
         rm -rf "$link_path"
+      else
+        echo "SKIP consumer-owned: $link_path (set KIT_REPLACE_COPIES=1 to overwrite)" >&2
+        return 1
       fi
     fi
   fi

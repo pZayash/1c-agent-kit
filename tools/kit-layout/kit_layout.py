@@ -66,9 +66,11 @@ removed, locally edited -> WARN + record kept in the new manifest.
 Behavior (same vocabulary as the legacy scripts):
   LINK / JUNCTION / FILELINK (symlink) / HARDLINK / COPY fallback when no
   symlink privilege (file symlink needs Developer Mode / SeCreateSymbolicLink;
-  a hardlink needs neither, only the same volume), SKIP LOCAL, REPLACE COPY,
-  REFRESH/KEEP stale fallback, PRUNE (tombstones: link into source whose child
-  vanished upstream), WOULD * in --dry-run.
+  a hardlink needs neither, only the same volume), SKIP LOCAL, CONFLICT
+  (existing non-link path the fallback manifest does not claim is
+  consumer-owned - FAIL, never overwritten/removed), REFRESH/KEEP stale
+  fallback (manifested paths only), PRUNE (tombstones: link into source
+  whose child vanished upstream), WOULD * in --dry-run.
   Idempotent: a link already pointing at the right target prints OK, no churn.
 
 Fallback lifecycle (consumer consequences of "no symlink privilege"):
@@ -464,18 +466,19 @@ class Ctx:
 # ── consumer config (.kit.json) ───────────────────────────────────
 
 KNOWN_KIT_KEYS = {'version', 'stacks', 'source_root', 'paths', 'sparse',
-                  'options', 'layout_version'}
+                  'options', 'layout_version', 'exclude_resources'}
 
 
 def load_kit_config(root):
     """Read <root>/.kit.json. Never raises; returns a dict:
-    {version, stacks, source_root, paths, sparse, file, warn, raw}.
+    {version, stacks, source_root, paths, sparse, exclude_resources,
+    file, warn, raw}.
     raw is the parsed JSON (None when the file is absent/broken) -
     validate_kit_config() decides whether raw is usable.
     """
     cfg = {'version': 1, 'stacks': [], 'source_root': None, 'paths': {},
-           'sparse': False, 'file': None, 'warn': [], 'raw': None,
-           'broken': False}
+           'sparse': False, 'exclude_resources': [], 'file': None,
+           'warn': [], 'raw': None, 'broken': False}
     p = Path(root) / KIT_CONFIG_NAME
     if p.is_file():
         cfg['file'] = str(p)
@@ -530,6 +533,21 @@ def _kit_cfg_types_ok(raw, errors):
     if 'sparse' in raw and type(raw['sparse']) is not bool:
         errors.append('.kit.json "sparse" must be bool')
         return False
+    if 'exclude_resources' in raw:
+        er = raw['exclude_resources']
+        if (not isinstance(er, list)
+                or any(type(s) is not str for s in er)):
+            errors.append('.kit.json "exclude_resources" must be a '
+                          'list of strings')
+            return False
+        if any(not s.strip() for s in er):
+            errors.append('.kit.json "exclude_resources" contains an '
+                          'empty name')
+            return False
+        if len(set(er)) != len(er):
+            errors.append('.kit.json "exclude_resources" contains '
+                          'duplicates')
+            return False
     if 'paths' in raw:
         if (not isinstance(raw['paths'], dict)
                 or any(type(k) is not str or type(v) is not str
@@ -822,6 +840,7 @@ def validate_kit_config(ctx, cfg):
     cfg['source_root'] = raw.get('source_root')
     cfg['paths'] = raw.get('paths', {})
     cfg['sparse'] = raw.get('sparse', False)
+    cfg['exclude_resources'] = list(raw.get('exclude_resources') or [])
     if os.environ.get('KIT_LEGACY') != '1':
         cfg['stacks'] = list(raw['stacks'])
         cfg['stacks_source'] = 'file'
@@ -892,6 +911,7 @@ def print_config(ctx, cfg, as_json, resources=None, all_stacks=False):
         'source_root_source': src_origin,
         'sparse': cfg['sparse'],
         'paths': cfg['paths'],
+        'exclude_resources': sorted(cfg.get('exclude_resources') or []),
         'harness_rel': ctx.harness_rel,
         'manifests': {'fallback': ctx.manifest_rel, 'lock': LOCK_REL},
         'resources': [resource_name(r) for r in
@@ -925,7 +945,9 @@ def load_local(ctx, rel):
 
 
 def link_one(ctx, target, link, is_dir, rel, source_rel):
-    """Create/refresh a single link. Returns True on success."""
+    """Create/refresh a single link. False on CONFLICT: an existing
+    non-link path the fallback manifest does not claim is consumer-owned
+    and is left untouched (never removed or overwritten)."""
     label = link.name
     if link.exists() or is_link(link):
         if is_link(link):
@@ -948,9 +970,15 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
                     return True
             ctx.act(f'RELINK: {label} -> {target}',
                     lambda: remove_link_or_tree(link))
-        elif is_dir:
-            ctx.say('WARN', f'REPLACE COPY: {label}')
-            ctx.act(f'remove copy {label}', lambda: remove_link_or_tree(link))
+        elif link.is_dir():
+            # A real (non-link) dir at a managed path is consumer-owned.
+            # Kit fallbacks are files only (dirs always link via
+            # junction/symlink), so a dir here can never be ours - never
+            # rmtree it, report CONFLICT instead.
+            ctx.say('FAIL', f'CONFLICT consumer-owned dir at kit path: {rel} '
+                           f'(left untouched; remove/rename it or exclude the '
+                           f'resource via .kit.json "exclude_resources")')
+            return False
         else:
             src_sha = hash_file(target)
             if file_equal(link, target):
@@ -978,8 +1006,18 @@ def link_one(ctx, target, link, is_dir, rel, source_rel):
                 ctx.note_fallback(rel, source_rel, src_sha)
                 return True
             rec = ctx.old_fallback.get(rel)
+            if rec is None:
+                # A file the fallback manifest does not claim is
+                # consumer-owned: overwriting it would silently destroy
+                # local content. Only recorded kit fallbacks may be
+                # refreshed/replaced.
+                ctx.say('FAIL', f'CONFLICT consumer-owned file at kit path: '
+                               f'{rel} (left untouched; remove/rename it or '
+                               f'exclude the resource via .kit.json '
+                               f'"exclude_resources")')
+                return False
             link_sha = hash_file(link)
-            if rec and link_sha != rec['sha'] and link_sha != src_sha:
+            if link_sha != rec['sha'] and link_sha != src_sha:
                 ctx.say('WARN', f'KEEP LOCAL EDITS in fallback: {label} '
                                f'(not overwritten; move it to local manifest to own it)')
                 return True
@@ -1032,8 +1070,9 @@ def run_child(ctx, res):
             continue
         link = target / child.name
         rel = rel_posix(link, ctx.root)
-        ctx.note_managed(rel)
-        link_one(ctx, child, link, want_dir, rel, rel_posix(child, ctx.root))
+        if link_one(ctx, child, link, want_dir, rel,
+                    rel_posix(child, ctx.root)):
+            ctx.note_managed(rel)
     return True
 
 
@@ -1052,9 +1091,11 @@ def run_alias(ctx, res):
                        f're-run bootstrap-kit to re-fetch)')
         return False
     rel = rel_posix(target, ctx.root)
-    ctx.note_managed(rel)
-    link_one(ctx, source, target, True, rel, rel_posix(source, ctx.root))
-    return True
+    if link_one(ctx, source, target, True, rel,
+                rel_posix(source, ctx.root)):
+        ctx.note_managed(rel)
+        return True
+    return False
 
 
 def verify_resource(ctx, res):
@@ -1666,11 +1707,24 @@ def main(argv=None):
         for e in errors:
             print(f'ERROR {e}', file=sys.stderr)
         return 2
+    # exclude_resources drops whole layout resources (e.g. an alias whose
+    # target dir the consumer owns). The unfiltered `resources` list stays
+    # for namespace/orphan scans so excluded links are still classified
+    # and swept, not silently forgotten.
+    excl = set(cfg.get('exclude_resources') or [])
+    if excl:
+        known_ids = {r['id'] for r in resources}
+        for e in sorted(excl - known_ids):
+            print(f'WARN .kit.json: exclude_resources "{e}" is not a '
+                  f'layout resource (ignored)', file=sys.stderr)
+        resources_cfg = [r for r in resources if r['id'] not in excl]
+    else:
+        resources_cfg = resources
     if a.command == 'print-config':
-        print_config(ctx, cfg, a.json, resources, a.all_stacks)
+        print_config(ctx, cfg, a.json, resources_cfg, a.all_stacks)
         return 0
-    eff = (resources if a.all_stacks or '*' in cfg['stacks']
-           else effective_resources(resources, cfg['stacks']))
+    eff = (resources_cfg if a.all_stacks or '*' in cfg['stacks']
+           else effective_resources(resources_cfg, cfg['stacks']))
     if a.command == 'resolve-source':
         return resolve_source(ctx, eff, a.consumer_root)
 

@@ -15,7 +15,7 @@ param(
 
     [switch]$DryRun,
 
-    [switch]$NoReplaceCopies
+    [switch]$ReplaceCopies
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,8 +40,8 @@ function New-DirJunction([string]$link, [string]$target, [string]$name) {
     if (Test-Path $link) {
         if (Test-KitReparse $link) {
             Remove-KitReparseOrTree $link
-        } elseif ($NoReplaceCopies) {
-            Write-Host "SKIP exists: $link"
+        } elseif (-not $ReplaceCopies) {
+            Write-Host "SKIP consumer-owned exists (-ReplaceCopies to overwrite): $link"
             return
         } else {
             Write-Host "REPLACE COPY: $name"
@@ -65,9 +65,6 @@ function New-FileLink([string]$link, [string]$target, [string]$name, [string]$re
     if (Test-Path $link) {
         if (Test-KitReparse $link) {
             Remove-KitReparseOrTree $link
-        } elseif ($NoReplaceCopies) {
-            Write-Host "SKIP exists: $link"
-            return
         } elseif (Test-KitFileEqual $link $target) {
             Write-Host "OK (fallback, in sync): $name"
             Set-KitFallbackEntry -Map $script:FallbackMap -Rel $rel -Source $sourceRel -Sha (Get-KitFileHash $target)
@@ -77,6 +74,10 @@ function New-FileLink([string]$link, [string]$target, [string]$name, [string]$re
             $linkHash = Get-KitFileHash $link
             if ($rec -and $linkHash -ne $rec.sha -and $linkHash -ne (Get-KitFileHash $target)) {
                 Write-Host "WARN KEEP LOCAL EDITS in fallback: $name (not overwritten; move it to local manifest to own it)"
+                return
+            }
+            if (-not $rec -and -not $ReplaceCopies) {
+                Write-Host "SKIP consumer-owned exists (-ReplaceCopies to overwrite): $link"
                 return
             }
             Write-Host "WARN REFRESH stale fallback: $name"

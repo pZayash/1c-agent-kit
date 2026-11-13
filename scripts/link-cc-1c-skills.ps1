@@ -14,7 +14,7 @@ param(
 
     [switch]$DryRun,
 
-    [switch]$NoReplaceCopies
+    [switch]$ReplaceCopies
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,7 +61,11 @@ Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {
     if ($DryRun) {
         if (Test-Path $link) {
             if (-not (Test-KitReparse $link)) {
-                Write-Host "WOULD REPLACE COPY: $link -> $target"
+                if ($ReplaceCopies) {
+                    Write-Host "WOULD REPLACE COPY: $link -> $target"
+                } else {
+                    Write-Host "WOULD SKIP consumer-owned: $link (pass -ReplaceCopies to overwrite)"
+                }
             } else {
                 Write-Host "WOULD RELINK: $link -> $target"
             }
@@ -73,8 +77,8 @@ Get-ChildItem -LiteralPath $kitSkills -Directory | ForEach-Object {
     if (Test-Path $link) {
         if (Test-KitReparse $link) {
             Remove-KitReparseOrTree $link
-        } elseif ($NoReplaceCopies) {
-            Write-Error "Exists and not junction: $link (omit -NoReplaceCopies or add to LOCAL)"
+        } elseif (-not $ReplaceCopies) {
+            Write-Host "SKIP consumer-owned exists (-ReplaceCopies to overwrite, or add to LOCAL): $link"
             return
         } else {
             Write-Host "REPLACE COPY: $name"

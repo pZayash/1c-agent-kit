@@ -24,6 +24,7 @@ if kit_is_windows; then
   PS1="$SCRIPT_DIR/link-kit-tools.ps1"
   args=(-ConsumerRoot "$CONSUMER_ROOT" -HarnessRel "$HARNESS_REL" -LocalManifest "$MANIFEST")
   [[ "$DRY_RUN" == "1" ]] && args+=(-DryRun)
+  [[ "${KIT_REPLACE_COPIES:-0}" == "1" ]] && args+=(-ReplaceCopies)
   ps_exe="$(kit_powershell)" || { echo "ERROR: PowerShell не найден (Windows-ветка kit идёт через .ps1)" >&2; exit 1; }
   exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$PS1" "${args[@]}"
 fi

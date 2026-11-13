@@ -14,6 +14,7 @@ DRY_RUN="${DRY_RUN:-0}"
 if kit_is_windows; then
   args=(-ConsumerRoot "$(cd "$CONSUMER_ROOT" && pwd)")
   [[ "$DRY_RUN" == "1" ]] && args+=(-DryRun)
+  [[ "${KIT_REPLACE_COPIES:-0}" == "1" ]] && args+=(-ReplaceCopies)
   ps_exe="$(kit_powershell)" || { echo "ERROR: PowerShell не найден (Windows-ветка kit идёт через .ps1)" >&2; exit 1; }
   exec "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$SCRIPT_DIR/link-editor-roots.ps1" "${args[@]}"
 fi
