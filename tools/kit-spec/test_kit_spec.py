@@ -308,6 +308,17 @@ class CleanLegacyTest(TempConsumer):
         self.assertEqual(rc, 0)
         self.assertIn('нет', out)
 
+    def test_clean_legacy_via_main_parser(self):
+        # регрессия: у clean-legacy не было common(ps) — a.root отсутствовал
+        rc, out = run_main(['clean-legacy', '--root', str(self.tmp)],
+                           str(self.tmp))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('dry-run', out)
+        rc, out = run_main(['clean-legacy', '--root', str(self.tmp), '--apply'],
+                           str(self.tmp))
+        self.assertEqual(rc, 0, out)
+        self.assertIn('удалено .openspec.yaml ×2', out)
+
 
 class MigrateTest(TempConsumer):
     def setUp(self):

@@ -1062,6 +1062,7 @@ def main(argv=None):
 
     ps = sub.add_parser('clean-legacy',
                         help='удалить .openspec.yaml из changes/ (dry-run)')
+    common(ps)
     ps.add_argument('--apply', action='store_true')
     ps.set_defaults(fn=cmd_clean_legacy)
 
