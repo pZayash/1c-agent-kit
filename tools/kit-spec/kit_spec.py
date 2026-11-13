@@ -295,7 +295,8 @@ def validate_change(specs, name):
     if (cdir / 'tasks.md').is_file() and tt == 0:
         fails.append('tasks.md без чекбоксов - [ ]')
     if (cdir / '.openspec.yaml').is_file():
-        warns.append('легаси-маркер .openspec.yaml (игнорируется)')
+        warns.append('легаси-маркер .openspec.yaml — удали: '
+                     'kit_spec.py clean-legacy --apply')
     for p in sorted(cdir.iterdir()):
         if p.name.startswith('.') and p.name != '.openspec.yaml':
             continue
@@ -726,6 +727,9 @@ def cmd_archive(a):
                   'sync (spec-sync) до archive?')
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(specs.change_dir(name)), str(target))
+    for f in target.rglob('.openspec.yaml'):
+        f.unlink()
+        print(f'drop {f.relative_to(target)} (легаси-артефакт openspec CLI)')
     print('## Archive Complete')
     print(f'**Change:** {name}')
     print(f'**Archived to:** {target}')
@@ -855,6 +859,8 @@ def cmd_migrate_root(a):
         print('migrate-root: openspec/ без мигрируемого содержимого '
               '(только служебное)')
         return 0
+    legacy_files = sorted((old / 'changes').rglob('.openspec.yaml')) \
+        if (old / 'changes').is_dir() else []
     print('план migrate-root:')
     for s, d in moves:
         print(f'  move {s.relative_to(root)} -> {d.relative_to(root)}')
@@ -863,6 +869,12 @@ def cmd_migrate_root(a):
         if s.name == 'project.md':
             print('    NOTE: project.md не канон spec-флоу — перенесён в '
                   'specs/ для сохранности; при желании перемести в docs/')
+        elif s.name == 'config.yaml':
+            print('    NOTE: config.yaml — конфиг openspec CLI; если там '
+                  'проектные правила — перенеси в docs/ai/, сам файл не канон')
+    if legacy_files:
+        print(f'  rm легаси .openspec.yaml ×{len(legacy_files)} в changes/ '
+              '(clean-legacy)')
     print('  shim openspec/changes -> specs/changes; '
           'openspec/specs/<cap> -> specs/<cap> (мигрированные)')
     print('  .gitignore += openspec/; маркер specs/.kit-spec.json')
@@ -887,6 +899,10 @@ def cmd_migrate_root(a):
                   'openspec/ — разбор вручную, затем повтори migrate-root')
             return 1
         print(f'moved {s.relative_to(root)} -> {d.relative_to(root)}')
+    for f in (new / 'changes').rglob('.openspec.yaml'):
+        f.unlink()
+    if legacy_files:
+        print(f'clean-legacy: удалено .openspec.yaml ×{len(legacy_files)}')
     # опустевшие openspec/{changes/archive,changes,specs} убрать до shim
     for rel in ('changes/archive', 'changes', 'specs'):
         d = old / rel
@@ -957,6 +973,34 @@ def cmd_migrate_root(a):
     return 0
 
 
+# ── clean-legacy ───────────────────────────────────────────────────
+
+def cmd_clean_legacy(a):
+    """Удаляет мёртвые артефакты openspec CLI (.openspec.yaml) из changes/
+    (active + archive). Dry-run по умолчанию, --apply для удаления."""
+    root = Path(a.root).resolve()
+    specs, warns, err = resolve_specs(root, a.spec_root)
+    for w in warns:
+        print(f'WARN: {w}')
+    if err:
+        print(f'FAIL: {err}')
+        return 1
+    found = sorted(specs.changes_dir.rglob('.openspec.yaml')) \
+        if specs.changes_dir.is_dir() else []
+    if not found:
+        print('clean-legacy: легаси-артефактов (.openspec.yaml) нет')
+        return 0
+    for f in found:
+        print(f'  rm {f.relative_to(specs.changes_dir)}')
+    if not a.apply:
+        print(f'dry-run: {len(found)} файл(ов); --apply для удаления')
+        return 0
+    for f in found:
+        f.unlink()
+    print(f'clean-legacy: удалено .openspec.yaml ×{len(found)}')
+    return 0
+
+
 # ── main ────────────────────────────────────────────────────────────
 
 def main(argv=None):
@@ -1015,6 +1059,11 @@ def main(argv=None):
     ps.add_argument('--all', action='store_true')
     ps.add_argument('--archive', action='store_true')
     ps.set_defaults(fn=cmd_validate)
+
+    ps = sub.add_parser('clean-legacy',
+                        help='удалить .openspec.yaml из changes/ (dry-run)')
+    ps.add_argument('--apply', action='store_true')
+    ps.set_defaults(fn=cmd_clean_legacy)
 
     ps = sub.add_parser('archive', help='гейты + move в archive/')
     common(ps)

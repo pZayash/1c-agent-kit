@@ -260,6 +260,54 @@ class ArchiveTest(TempConsumer):
         self.assertEqual(rc, 1)
         self.assertIn('operator-checklist', out)
 
+    def test_archive_drops_openspec_yaml(self):
+        self._close_tasks()
+        (self.tmp / 'specs' / 'changes' / 'my-change' /
+         '.openspec.yaml').write_text('legacy: true\n')
+        rc, out = run(ks.cmd_archive, root=str(self.tmp), spec_root=None,
+                      name='my-change', force=False)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('drop .openspec.yaml', out)
+        adir = self.tmp / 'specs' / 'changes' / 'archive'
+        target = next(adir.iterdir())
+        self.assertFalse((target / '.openspec.yaml').exists())
+
+
+class CleanLegacyTest(TempConsumer):
+    def setUp(self):
+        super().setUp()
+        self.init_specs()
+        c1 = self.tmp / 'specs' / 'changes' / 'c1'
+        c1.mkdir(parents=True)
+        (c1 / '.openspec.yaml').write_text('x\n')
+        old = self.tmp / 'specs' / 'changes' / 'archive' / '2025-01-01-old'
+        old.mkdir(parents=True)
+        (old / '.openspec.yaml').write_text('x\n')
+
+    def test_clean_legacy_dry_run(self):
+        rc, out = run(ks.cmd_clean_legacy, root=str(self.tmp), spec_root=None,
+                      apply=False)
+        self.assertEqual(rc, 0)
+        self.assertIn('dry-run', out)
+        self.assertIn('2', out)
+        self.assertTrue((self.tmp / 'specs' / 'changes' / 'c1' /
+                         '.openspec.yaml').is_file())
+
+    def test_clean_legacy_apply(self):
+        rc, out = run(ks.cmd_clean_legacy, root=str(self.tmp), spec_root=None,
+                      apply=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('удалено .openspec.yaml ×2', out)
+        self.assertEqual(
+            list((self.tmp / 'specs' / 'changes').rglob('.openspec.yaml')), [])
+
+    def test_clean_legacy_noop(self):
+        run(ks.cmd_clean_legacy, root=str(self.tmp), spec_root=None, apply=True)
+        rc, out = run(ks.cmd_clean_legacy, root=str(self.tmp), spec_root=None,
+                      apply=True)
+        self.assertEqual(rc, 0)
+        self.assertIn('нет', out)
+
 
 class MigrateTest(TempConsumer):
     def setUp(self):
@@ -294,6 +342,22 @@ class MigrateTest(TempConsumer):
         self.assertTrue((shim / 'specs' / 'orders' / 'spec.md').is_file())
         self.assertTrue((shim / 'changes' / 'c1' / 'tasks.md').is_file())
         self.assertIn('openspec/', (self.tmp / '.gitignore').read_text())
+
+    def test_migrate_removes_openspec_yaml(self):
+        (self.tmp / 'openspec' / 'changes' / 'c1' /
+         '.openspec.yaml').write_text('x\n')
+        (self.tmp / 'openspec' / 'changes' / 'archive' / '2025-01-01-old' /
+         '.openspec.yaml').write_text('x\n')
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=False)
+        self.assertEqual(rc, 0)
+        self.assertIn('rm легаси .openspec.yaml ×2', out)
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('clean-legacy: удалено .openspec.yaml ×2', out)
+        self.assertEqual(
+            list((self.tmp / 'specs' / 'changes').rglob('.openspec.yaml')), [])
 
     def test_migrate_collision(self):
         (self.tmp / 'specs').mkdir()

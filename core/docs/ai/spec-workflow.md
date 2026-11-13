@@ -42,7 +42,20 @@ python harness/tools/kit-spec/kit_spec.py status <id>     # артефакты/�
 python harness/tools/kit-spec/kit_spec.py validate <id>   # структура (--all, --archive)
 python harness/tools/kit-spec/kit_spec.py archive <id>    # гейты + move
 python harness/tools/kit-spec/kit_spec.py migrate-root    # openspec/ -> specs/
+python harness/tools/kit-spec/kit_spec.py clean-legacy    # rm .openspec.yaml (dry-run, --apply)
 ```
+
+`archive` и `migrate-root --apply` сами удаляют `.openspec.yaml`
+(мёртвый маркер openspec CLI) из затрагиваемых changes — `clean-legacy`
+нужен только для уже-мигрированных деревьев с остатком. Посторонние
+файлы потребителя (`review-*.md` и т.п.) инструмент не трогает: WARN
+validate — сигнал, разбор — за проектом.
+
+Проектные правила спека (роли артефактов, mental test, чек-листы
+постановщика) — не в `rules.json` и не в `specs/`: это конвенции для
+модели, дом им — `docs/ai/` потребителя (напр. `spec-rules-<proj>.md`)
+со ссылкой из AGENTS.md. `rules.json` — kit-owned структурная схема
+артефактов; consumer-overlay'я нет.
 
 `instructions <artifact>` — единственный канал выдачи правил артефакту
 (источник: `tools/kit-spec/templates/rules.json`; этот документ — канон-
