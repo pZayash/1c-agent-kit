@@ -10,7 +10,7 @@
 #   bash tools/answer42/answer42.sh install --fork       # editable-сборка из форка (escape hatch)
 #   bash tools/answer42/answer42.sh start|stop|restart|status|smoke
 #   bash tools/answer42/answer42.sh check                # версия: установленная vs последняя на PyPI
-#   bash tools/answer42/answer42.sh update [--ref v0.5.13] [--push] [--no-restart]
+#   bash tools/answer42/answer42.sh update [--ref v0.11.1] [--push] [--no-restart]
 set -euo pipefail
 
 ACTION="status"
@@ -457,7 +457,7 @@ usage() {
 Использование: bash tools/answer42/answer42.sh <действие> [опции]
 
 Действия:
-  install [--fork]   установить сборку: PyPI >=0.5.13 в .venv-answer42 (по
+  install [--fork]   установить сборку: PyPI >=0.11.1 в .venv-answer42 (по
                      умолчанию) или editable-сборку форка (ANSWER42_FORK_DIR)
   start              запустить HTTP-сервис (ANSWER42_MCP_URL/TOKEN, фоном в .tmp/answer42)
   stop               остановить сервис
@@ -492,7 +492,7 @@ case "$ACTION" in
             DEFAULT_BIN="$(dirname "$PYTHON")/answer42"
             [[ -x "$DEFAULT_BIN" ]] || DEFAULT_BIN="$(dirname "$PYTHON")/answer42.exe"
             "$PYTHON" -m pip install --upgrade pip
-            "$PYTHON" -m pip install "answer42[screenshot,linux-window-control]>=0.5.13"
+            "$PYTHON" -m pip install "answer42[screenshot,linux-window-control]>=0.11.1"
             echo "Готово: $VENV_DIR (проверка: $DEFAULT_BIN --version)"
         fi
         ;;

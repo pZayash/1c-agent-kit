@@ -7,8 +7,8 @@
 
 Вывод (строки key: value):
 
-    installed: 0.5.3
-    latest: 0.5.13
+    installed: 0.5.13
+    latest: 0.11.1
     channel: pypi | editable | local
     verdict: ok | outdated | unknown
     reason: ...          # только при verdict=unknown

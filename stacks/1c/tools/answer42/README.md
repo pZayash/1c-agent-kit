@@ -11,12 +11,13 @@
 
 ## Требования
 
-- Python 3.11–3.13 (проверено на 3.11), пакет `answer42` с PyPI, **>= 0.5.13**.
-  Причина: в 0.5.13 сборщик сирот работает и в HTTP-режиме, добавлена авто-очистка
-  каталогов сессий, а текст ошибок tool-call отдаёт сам upstream
-  (`_visible_tool_error`, с 0.5.7). На старых релизах занятый `session_id`
-  не освобождается сам (сессии-сироты живут вечно), а ошибки выглядят как
-  `Error executing tool <name>` без причины. Проверка: `answer42.sh check`.
+- Python 3.11–3.13 (проверено на 3.11), пакет `answer42` с PyPI, **>= 0.11.1**.
+  Причина: документация kit описывает один целевой релиз — форматы ответов
+  0.9+ (`table_rows`, `ui_tree` outline), RAG выключен по умолчанию (0.10),
+  режим `client_mode="browser"` (0.11). На старых релизах занятый `session_id`
+  может не освобождаться сам (исправлено в 0.5.13), ошибки tool-call
+  выглядят как `Error executing tool <name>` без причины (0.5.7).
+  Проверка: `answer42.sh check`.
 - 1С:Предприятие **8.3.27+** или **8.5+**; нужны `1cv8c` и `ibcmd`, желателен
   `ibsrv` (без него Answer42 уходит в `file-direct`).
 - Windows — **интерактивная desktop-сессия** пользователя: Answer42 запускает
@@ -40,7 +41,7 @@ bash tools/answer42/answer42.sh install --fork   # escape hatch: editable-сбо
 ```
 
 Windows-вариант создаёт `.venv-answer42` в корне проекта-потребителя и ставит
-`answer42[screenshot,windows-window-control]>=0.5.13`; Linux-вариант — то же с
+`answer42[screenshot,windows-window-control]>=0.11.1`; Linux-вариант — то же с
 `[screenshot,linux-window-control]`. Каталог venv обязан быть в
 `.gitignore` потребителя.
 
@@ -106,7 +107,7 @@ editable`) и ответ на заведомо битую ссылку
 | `ANSWER42_MCP_URL` | endpoint сервера, напр. `http://127.0.0.1:9010/mcp` (порт берётся отсюда) |
 | `ANSWER42_ACCOUNT_ID` | namespace credential-стора; **должен совпадать** с account в `~/.answer42-credentials.json` |
 | `ANSWER42_TOKEN` | Bearer для StreamableHTTP; только в `.env` |
-| `ANSWER42_EXTRA_ARGS` | доп. аргументы сервера; по умолчанию `--disable-rag` — RAG задерживает готовность |
+| `ANSWER42_EXTRA_ARGS` | доп. аргументы сервера. RAG с 0.10 выключен по умолчанию — `--disable-rag` не нужен (deprecated); включение — `--enable-rag` |
 | `ONEC_MCP_SESSION_SCOPE_ID` | scope-режим: свой state-файл и lock на scope (v0.4.77+) |
 | `ONEC_MCP_WINDOWS_DESKTOP` | `hidden` — 1С на скрытых рабочих столах Windows (фон, без фокуса); см. «Фоновый режим» |
 | `ANSWER42_BIN` | опционально: путь к `answer42(.exe)` — напр. бинарь venv форк-сборки (escape hatch) |
@@ -144,7 +145,7 @@ bash tools/answer42/answer42.sh start|status|stop|restart|smoke|check
 
 ```bash
 bash tools/answer42/answer42.sh check
-# installed: 0.5.3 / latest: 0.5.13 / channel: editable / verdict: outdated
+# installed: 0.5.13 / latest: 0.11.1 / channel: editable / verdict: outdated
 # exit 0 — актуально, 1 — есть новее, 2 — не удалось определить (offline / нет пакета)
 ```
 

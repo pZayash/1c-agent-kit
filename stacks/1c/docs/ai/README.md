@@ -79,7 +79,7 @@ web/build/autotest:
 Tool: `harness/stacks/1c/tools/answer42/` (`answer42.ps1` / `answer42.sh`, `smoke.py`,
 `version_check.py`), skill: `harness/stacks/1c/cursor/skills/answer42-ui/`. Потребитель:
 `.env` ключи `ANSWER42_*`, запись в `.mcp.json`, сервис на `127.0.0.1:9010`.
-Минимум `answer42>=0.5.13`; свежесть сборки — `answer42.sh check` (и строка
+Минимум `answer42>=0.11.1`; свежесть сборки — `answer42.sh check` (и строка
 `version` в `status`), диагностика в `kit-doctor` (проверка 12).
 
 ## Срез integrator

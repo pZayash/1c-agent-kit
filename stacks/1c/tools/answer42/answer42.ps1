@@ -386,7 +386,7 @@ switch ($Action) {
         }
         $python = Join-Path $venvDir "Scripts\python.exe"
         & $python -m pip install --upgrade pip
-        & $python -m pip install "answer42[screenshot,windows-window-control]>=0.5.13"
+        & $python -m pip install "answer42[screenshot,windows-window-control]>=0.11.1"
         Write-Host "Готово. Проверка: .venv-answer42\Scripts\answer42.exe --version"
     }
     "start" {

@@ -74,7 +74,7 @@ bash tools/mcp-call/mcp-call.sh --server answer42 ui_tree "{\"session_id\":\"$SI
 # 4. открыть список и прочитать строки (только чтение)
 bash tools/mcp-call/mcp-call.sh --server answer42 open_navigation_link \
   "{\"session_id\":\"$SID\",\"navigation_link\":\"e1cib/list/Документ.ЗаказПокупателя\"}"
-bash tools/mcp-call/mcp-call.sh --server answer42 table_rows "{\"session_id\":\"$SID\",\"name\":\"Список\"}"
+bash tools/mcp-call/mcp-call.sh --server answer42 table_rows "{\"session_id\":\"$SID\",\"name\":\"Список\",\"columns\":[\"Номер\",\"Дата\",\"Контрагент\"]}"
 
 # 5. завершить обязательно
 bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 120 \
@@ -85,6 +85,9 @@ bash tools/mcp-call/mcp-call.sh --server answer42 --timeout 120 \
 
 - Не угадывать технические имена элементов: сначала `ui_tree`, затем
   `find_object` или `ui_tree` с фильтром `name`/`title`/`type`.
+- `ui_tree` по умолчанию отдаёт `outline` (строка на узел) — читать построчно;
+  вложенные объекты: `format="json"`. `table_rows` — `columns`+`rows`;
+  нужные колонки — параметр `columns`, длинные ячейки — `max_cell_chars`.
 - Действия: `focus_object`, `set_field_value`, `click_button`, `save_form`,
   `close_form`; таблицы — `table_*`; динамические списки — `dynamic_list_*`.
 - После действия проверять состояние: `form_state`, `field_value_text`,
