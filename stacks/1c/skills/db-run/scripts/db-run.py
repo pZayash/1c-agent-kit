@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# db-run v1.10 — Launch 1C:Enterprise
+# db-run v1.18 — Launch 1C:Enterprise
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 
 import argparse
@@ -34,8 +34,93 @@ def ci_parse_args(parser, argv=None):
 
 
 
-def _find_project_v8path():
-    """Walk up from CWD to find .v8-project.json and read its v8path."""
+# --- Запись базы в .v8-project.json ---
+# Модель не передаёт ни путь к платформе конкретной базы, ни реквизиты хранилища: скрипт
+# сопоставляет параметры соединения с записью в databases[] и берёт их оттуда. Тот же приём,
+# что в cf-edit.py (сопоставление по configSrc).
+def _sg_find_v8project(start_dir):
+    d = start_dir
+    for _ in range(20):
+        if not d:
+            break
+        pj = os.path.join(d, ".v8-project.json")
+        if os.path.isfile(pj):
+            return pj
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+def same_path(a, b):
+    if not a or not b:
+        return False
+    try:
+        return os.path.abspath(a).rstrip("\\/").lower() == os.path.abspath(b).rstrip("\\/").lower()
+    except Exception:
+        return False
+
+
+def resolve_infobase_path(path):
+    """Относительный путь к базе — от корня проекта (каталог .v8-project.json, вверх от рабочего
+    каталога), как configSrc; без файла проекта — от рабочего каталога. Платформе уходит только
+    абсолютный: ibcmd считает относительный --db-path от каталога --data, а он у навыков временный."""
+    if not path:
+        return path
+    # Абсолютный на Windows — только с диском и разделителем или UNC, как в PS-порте; «\\x» берёт
+    # диск базового каталога (os.path.join); «C:x» отклоняет ещё clean_path. На POSIX — os.path.isabs.
+    absolute = re.match(r"^([A-Za-z]:[\\/]|[\\/]{2})", path) if os.name == "nt" else os.path.isabs(path)
+    if not absolute:
+        cwd = os.getcwd()
+        base = cwd
+        d = cwd
+        for _ in range(20):
+            if not d:
+                break
+            if os.path.isfile(os.path.join(d, ".v8-project.json")):
+                base = d
+                break
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+        path = os.path.abspath(os.path.join(base, path))
+    # Хвостовые разделители срезаются, но корень («C:\\», на POSIX «/») остаётся корнем
+    seps, keep = ("\\/", 3) if os.name == "nt" else ("/", 1)
+    while len(path) > keep and path[-1] in seps:
+        path = path[:-1]
+    return path
+
+
+def find_project_database(args):
+    """Запись базы в реестре, соответствующая переданному соединению. None, если не найдена."""
+    pf = _sg_find_v8project(os.getcwd())
+    if not pf:
+        return None
+    try:
+        with open(pf, encoding="utf-8-sig") as f:
+            proj = json.load(f)
+    except Exception:
+        return None
+    for db in proj.get("databases") or []:
+        if args.InfoBasePath and db.get("path") and same_path(os.path.join(os.path.dirname(pf), db["path"]), args.InfoBasePath):
+            return db
+        if args.InfoBaseServer and args.InfoBaseRef and db.get("server") and db.get("ref"):
+            if (db["server"].lower() == args.InfoBaseServer.lower()
+                    and db["ref"].lower() == args.InfoBaseRef.lower()):
+                return db
+    return None
+
+
+def _find_project_v8path(args):
+    """Walk up from CWD to find .v8-project.json and read its v8path.
+
+    v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
+    платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
+    """
+    db = find_project_database(args)
+    if db and db.get("v8path"):
+        return db["v8path"]
     d = os.getcwd()
     while True:
         pf = os.path.join(d, ".v8-project.json")
@@ -108,6 +193,9 @@ def project_extra_args(name):
                     data = json.load(f)
                 v = data.get(name)
                 if v:
+                    # Строка вместо массива — один аргумент, как у PS (@($x)), а не список символов
+                    if not isinstance(v, list):
+                        v = [v]
                     return [str(x) for x in v]
             except Exception:
                 pass
@@ -237,6 +325,13 @@ def clean_path(value, param=""):
     v = value.strip()
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
         v = v[1:-1].strip()
+    # «C:x» — от текущего каталога диска C, своего у каждого процесса: смысл не угадать, почти
+    # всегда это опечатка в «C:\x». Отказ с подсказкой, а не путь «где-то» у платформы.
+    if os.name == "nt" and re.match(r"^[A-Za-z]:(?![\\/])", v):
+        drive = v[:2]
+        print(f"Error: {param or 'path'} is relative to the current directory of drive {drive} ({value})"
+              f" - use {drive}\\{v[2:]} or a path without a drive")
+        sys.exit(1)
     if len(v) > 3 and v[-1] in "\\/":
         v = v[:-1]
     if '"' in v:
@@ -258,10 +353,10 @@ def _version_key(p):
     return [int(x) for x in re.findall(r"\d+", _version_dir(p))]
 
 
-def resolve_v8path(v8path):
+def resolve_v8path(v8path, args):
     """Resolve path to a 1C executable (1cv8; ibcmd only when given explicitly)."""
     if not v8path:
-        v8path = _find_project_v8path()
+        v8path = _find_project_v8path(args)
     if not v8path:
         if os.name == "nt":
             candidates = (
@@ -290,10 +385,39 @@ def resolve_v8path(v8path):
 def _redact(text, *secrets):
     """Redact literal secret values (password, user) from a display string —
     precise, never touches lookalike paths."""
-    for s in secrets:
-        if s:
-            text = text.replace(s, "***")
+    # A secret with a quote reaches the command line doubled (quote_text), so both forms
+    # are redacted. Longest first: a shorter form replaced earlier could break a longer one
+    # that contains it and leave part of that secret visible.
+    forms = {f for s in secrets if s for f in (str(s), str(s).replace('"', '""'))}
+    for f in sorted(forms, key=len, reverse=True):
+        text = text.replace(f, "***")
     return text
+
+
+def quote_if_needed(token):
+    """Extra arguments come from the caller unquoted; the 1cv8 command line is joined
+    verbatim, so a token with a space needs quotes of its own."""
+    if token and (" " in token or "\t" in token) and '"' not in token:
+        return f'"{token}"'
+    return token
+
+
+def quote_text(value):
+    """Free text (user, password, comment, label, list name) framed in quotes for the 1cv8
+    command line. A lone quote inside the value ends it, and the rest is dropped silently
+    (замер 2026-11-14: «-comment» хранилища сохраняется до кавычки, exit 0); 1C reads a
+    doubled quote as one, «\\"» не понимает. On POSIX too: 1cv8 parses quotes inside each
+    argv element the same way (замер на darwin, 8.3.27), so the quote is doubled on every OS;
+    there run_v8 strips only the framing pair and leaves the doubled quote inside."""
+    value = str(value)    # a registry value may be a JSON number
+    return '"%s"' % value.replace('"', '""')
+
+
+def v8_value(value):
+    """A value for the 1cv8 command line. On Windows the line is joined here verbatim (see
+    main), so the value is framed; on POSIX it goes as its own argv element, unframed. A quote
+    inside is doubled on both: 1cv8 parses quotes inside an argv element too."""
+    return quote_text(value) if os.name == "nt" else str(value).replace('"', '""')
 
 
 def main():
@@ -322,9 +446,10 @@ def main():
 
     args.V8Path = clean_path(args.V8Path, "-V8Path")
     args.InfoBasePath = clean_path(args.InfoBasePath, "-InfoBasePath")
+    args.InfoBasePath = resolve_infobase_path(args.InfoBasePath)
     args.Execute = clean_path(args.Execute, "-Execute")
 
-    v8path = resolve_v8path(args.V8Path)
+    v8path = resolve_v8path(args.V8Path, args)
 
     # --- Resolve additional arguments ---
     # 1C:Enterprise is always launched by 1cv8 — ibcmd has no interactive mode.
@@ -349,14 +474,14 @@ def main():
     arguments = ["ENTERPRISE"]
 
     if args.InfoBaseServer and args.InfoBaseRef:
-        arguments.extend(["/S", f"{args.InfoBaseServer}/{args.InfoBaseRef}"])
+        arguments.extend(["/S", v8_value(f"{args.InfoBaseServer}/{args.InfoBaseRef}")])
     else:
-        arguments.extend(["/F", args.InfoBasePath])
+        arguments.extend(["/F", v8_value(args.InfoBasePath)])
 
     if args.UserName:
-        arguments.append(f"/N{args.UserName}")
+        arguments.append("/N" + v8_value(args.UserName))
     if args.Password:
-        arguments.append(f"/P{args.Password}")
+        arguments.append("/P" + v8_value(args.Password))
 
     # --- Optional params ---
     execute = args.Execute
@@ -369,19 +494,26 @@ def main():
             execute = ""
 
     if execute:
-        arguments.extend(["/Execute", execute])
+        arguments.extend(["/Execute", v8_value(execute)])
     if args.CParam:
-        arguments.extend(["/C", args.CParam])
+        # Параметр запуска — свободный текст (часто JSON): кавычка внутри удваивается, иначе
+        # Предприятие молча обрезает его на ней (замер 2026-11-14).
+        arguments.extend(["/C", v8_value(args.CParam)])
     if args.URL:
-        arguments.extend(["/URL", args.URL])
+        arguments.extend(["/URL", v8_value(args.URL)])
 
     arguments.append("/DisableStartupDialogs")
-    arguments.extend(extra_args)
+    arguments.extend(quote_if_needed(a) if os.name == "nt" else a for a in extra_args)
 
     # --- Execute (background) ---
     # Redact the password/user before printing the command line — never leak secrets.
     print(f"Running: 1cv8.exe {_redact(' '.join(format_args_for_display(arguments, engine)), args.Password, args.UserName)}")
-    proc = subprocess.Popen([v8path] + arguments)
+    # On Windows list2cmdline would turn a quote inside a value into «\\"», which 1cv8 does not
+    # read (замер 2026-11-14) — the command line is handed over ready-made, as in run_v8.
+    if os.name == "nt":
+        proc = subprocess.Popen('"' + v8path + '" ' + " ".join(arguments))
+    else:
+        proc = subprocess.Popen([v8path] + arguments)
 
     # --- Bounded early-exit check ---
     # The launch is a background GUI process, so we don't wait for completion. But a process

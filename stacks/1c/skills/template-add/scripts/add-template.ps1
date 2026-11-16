@@ -1,4 +1,4 @@
-﻿# template-add v1.23 — Add template to 1C object (+write_xml_file/write_utf8_bom: общий эталон записи)
+﻿# template-add v1.30 — Add template to 1C object (+write_xml_file/write_utf8_bom: общий эталон записи)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 param(
 	[Parameter(Mandatory)]
@@ -13,6 +13,8 @@ param(
 	[string]$TemplateType,
 
 	[string]$Synonym = $TemplateName,
+
+	[string]$Lang = "ru",
 
 	[string]$SrcDir = "src",
 
@@ -61,16 +63,20 @@ function Find-V8Project([string]$startDir) {
 }
 function Get-EditMode([string]$cfgDir) {
 	try {
-		$pj = Find-V8Project (Get-Location).Path
-		if (-not $pj) { $pj = Find-V8Project $cfgDir }
+		$pj = Find-V8Project (Get-Location).ProviderPath
+		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return 'deny' }
-		$proj = Get-Content -Raw $pj | ConvertFrom-Json
+		# UTF-8 явно: PS 5.1 читает файл без BOM как ANSI, и configSrc с кириллицей не совпал бы
+		$proj = Get-Content -Raw -Encoding UTF8 $pj | ConvertFrom-Json
+		# configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+		# проекта база не сопоставляется и берётся правило проекта.
+		$projDir = [System.IO.Path]::GetDirectoryName($pj)
 		$cfgFull = [System.IO.Path]::GetFullPath($cfgDir).TrimEnd('\', '/')
 		if ($proj.databases) {
 			foreach ($db in $proj.databases) {
 				if ($db.configSrc) {
-					$src = [System.IO.Path]::GetFullPath($db.configSrc).TrimEnd('\', '/')
-					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar)) {
+					$src = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($projDir, $db.configSrc)).TrimEnd('\', '/')
+					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
 						if ($db.editingAllowedCheck) { return $db.editingAllowedCheck }
 					}
 				}
@@ -83,7 +89,7 @@ function Get-EditMode([string]$cfgDir) {
 function Assert-EditAllowed([string]$targetPath, [string]$require) {
 	try {
 		$rp = $targetPath
-		try { $rp = (Resolve-Path $targetPath -ErrorAction Stop).Path } catch {}
+		try { $rp = (Resolve-Path $targetPath -ErrorAction Stop).ProviderPath } catch {}
 		# Autonomous external object (EPF/ERF): never part of a config on support (issue #39).
 		if (Test-ExternalObjectRoot $rp) { return }
 		$elemUuid = Get-RootUuid $rp
@@ -157,7 +163,7 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 # --- Маппинг типов ---
 
 $typeMap = @{
-	"HTML"                = @{ TemplateType = "HTMLDocument";        Ext = ".html" }
+	"HTML"                = @{ TemplateType = "HTMLDocument";        Ext = ".xml" }
 	"Text"                = @{ TemplateType = "TextDocument";        Ext = ".txt" }
 	"SpreadsheetDocument" = @{ TemplateType = "SpreadsheetDocument"; Ext = ".xml" }
 	"BinaryData"          = @{ TemplateType = "BinaryData";          Ext = ".bin" }
@@ -199,9 +205,45 @@ $processorDir = Join-Path $SrcDir $ObjectName
 $templatesDir = Join-Path $processorDir "Templates"
 $templateMetaPath = Join-Path $templatesDir "$TemplateName.xml"
 
-if (Test-Path $templateMetaPath) {
-	Write-Error "Макет уже существует: $templateMetaPath"
+# Код языка идёт и в текст XML, и в имя файла страницы, поэтому проверяем его до записи:
+# пустое значение дало бы файл «.html» и пустой <Page></Page>, разделитель пути — запись мимо
+# каталога страниц, а зарезервированное имя устройства (nul, con, prn, aux, com1…, lpt1…) на
+# Windows уводит запись в само устройство: py-порт при -Lang nul молча писал <Page>nul</Page>
+# и пустой каталог с кодом 0. Все отказы платформы были бы тихими.
+#
+# Якоря `\A…\z`, а не `^…$`: последние в обоих языках допускают перевод строки в конце.
+#
+# Копия этой функции есть в help-add (навыки автономны, формат «дескриптор + страница» у них
+# общий). Держать копии одинаковыми — сознательно; за дрейфом следит check-inline-drift.
+function Test-LangCode([string]$code) {
+	if ($code -notmatch '\A[A-Za-z0-9_-]+\z') { return $false }
+	if ($code -match '\A(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])\z') { return $false }
+	return $true
+}
+
+if (-not (Test-LangCode $Lang)) {
+	Write-Error "Недопустимый код языка: '$Lang'`nОжидается код вида ru, en (буквы, цифры, дефис, подчёркивание; имена устройств Windows недопустимы)"
 	exit 1
+}
+
+# Существующий HTML-макет — не всегда повод отказать: в один макет платформа кладёт
+# несколько языков (<Page> на каждый, страницы рядом), и повторный вызов с другим -Lang
+# добавляет страницу. Для остальных типов поведение прежнее — отказ.
+$addLangMode = $false
+if (Test-Path $templateMetaPath) {
+	$existingType = $null
+	$metaText = [System.IO.File]::ReadAllText((Resolve-Path $templateMetaPath).ProviderPath, [System.Text.Encoding]::UTF8)
+	if ($metaText -match '<TemplateType>([^<]+)</TemplateType>') { $existingType = $Matches[1] }
+
+	if ($TemplateType -eq "HTML" -and $existingType -eq "HTMLDocument") {
+		$addLangMode = $true
+	} elseif ($TemplateType -eq "HTML") {
+		Write-Error "Макет уже существует: $templateMetaPath`nЕго тип — $existingType, страницу на языке можно добавить только к HTML-макету"
+		exit 1
+	} else {
+		Write-Error "Макет уже существует: $templateMetaPath"
+		exit 1
+	}
 }
 
 Assert-EditAllowed $rootXmlPath 'editable'
@@ -214,6 +256,14 @@ New-Item -ItemType Directory -Path $templateExtDir -Force | Out-Null
 # --- Кодировка ---
 
 $encBom = New-Object System.Text.UTF8Encoding($true)
+
+# Скелет HTML-страницы макета — в том же виде, в каком его пишет редактор платформы
+# (одной строкой, парный </meta>): первое сохранение в Конфигураторе даст минимальный
+# дифф. Нужен в двух местах (новый макет и добавление языка) — поэтому одной переменной.
+$htmlSkeleton = @"
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"><html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></meta></head><body>
+</body></html>
+"@
 
 # --- Detect format version ---
 
@@ -246,10 +296,10 @@ function Detect-FormatVersion([string]$dir) {
 # Версию берём прежде всего из корня самого объекта — он её несёт всегда, а у автономной
 # внешней обработки/отчёта подниматься к Configuration.xml просто некуда.
 $formatVersion = $null
-$objHead = [System.IO.File]::ReadAllText((Resolve-Path $rootXmlPath).Path, [System.Text.Encoding]::UTF8)
+$objHead = [System.IO.File]::ReadAllText((Resolve-Path $rootXmlPath).ProviderPath, [System.Text.Encoding]::UTF8)
 $objHead = $objHead.Substring(0, [Math]::Min(2000, $objHead.Length))
 if ($objHead -match '<MetaDataObject[^>]+version="(\d+\.\d+)"') { $formatVersion = $Matches[1] }
-if (-not $formatVersion) { $formatVersion = Detect-FormatVersion (Resolve-Path $SrcDir).Path }
+if (-not $formatVersion) { $formatVersion = Detect-FormatVersion (Resolve-Path $SrcDir).ProviderPath }
 
 # Объявления пространств имён — одной переменной: место эмиссии её только интерполирует.
 # Правки шапки (как xmlns:pal в формате 2.21) делаются здесь, в одном месте.
@@ -297,10 +347,94 @@ $templateMetaXml = @"
 # Копия этой функции есть в каждом навыке-эмиттере (навыки автономны). Держать
 # копии одинаковыми — сознательно: разошедшиеся копии сводят на нет весь смысл.
 #
-# HTML-макет сюда НЕ идёт — платформа хранит его с LF.
+# HTML-страница макета сюда НЕ идёт — платформа хранит её с LF.
 function Write-XmlFile([string]$path, [string]$text, $encoding) {
 	$t = ($text -replace "`r`n", "`n") -replace "`n", "`r`n"
 	[System.IO.File]::WriteAllText($path, $t.TrimEnd("`r", "`n"), $encoding)
+}
+
+# --- 1a. Добавление страницы на другом языке в существующий HTML-макет ---
+# Метаданные макета и ChildObjects здесь НЕ трогаем: и то и другое уже на месте,
+# перезапись сменила бы UUID. Язык, не объявленный в Languages/ конфигурации, платформа
+# принимает и возвращает при выгрузке (проверено на 8.3.27) — состав языков не проверяем.
+if ($addLangMode) {
+	$descPath = Join-Path $templateExtDir "Template.xml"
+	$pageDir = Join-Path $templateExtDir "Template"
+	$legacyPagePath = Join-Path $templateExtDir "Template.html"
+	$langs = @()
+	$descVersion = $formatVersion
+
+	# Сначала РАЗБОР состояния, и только в самом конце запись: иначе отказ на полпути
+	# оставляет макет разобранным (страница есть, дескриптора нет) — а такую раскладку
+	# платформа снова молча игнорирует.
+	$legacyPending = $false
+	$pagePath = Join-Path $pageDir "$Lang.html"
+
+	if (Test-Path $descPath) {
+		$descText = [System.IO.File]::ReadAllText((Resolve-Path $descPath).ProviderPath, [System.Text.Encoding]::UTF8)
+		# Версию берём из самого дескриптора: правка чужой выгрузки не должна менять формат.
+		if ($descText -match '<Help[^>]+version="(\d+\.\d+)"') { $descVersion = $Matches[1] }
+		$langs = @([regex]::Matches($descText, '<Page>([^<]+)</Page>') | ForEach-Object { $_.Groups[1].Value })
+		# Полумигрированное дерево: дескриптор уже есть, а старый Ext/Template.html остался рядом.
+		# Платформа его игнорирует, поэтому текст в нём пропадёт незаметно — говорим вслух.
+		if (Test-Path $legacyPagePath) {
+			Write-Host "[WARN] Рядом лежит старый Ext/Template.html — платформа его игнорирует."
+			Write-Host "       Перенесите нужное в Template/<язык>.html и удалите его."
+		}
+	} elseif (Test-Path $legacyPagePath) {
+		# Раскладка до v1.24 — одиночный Ext/Template.html, который платформа молча игнорирует.
+		# Языка у него нет, но создать его могла только версия навыка без параметра -Lang,
+		# то есть это страница на языке по умолчанию.
+		if (Test-Path (Join-Path $pageDir "ru.html")) {
+			Write-Error "Макет разобран: есть и старый Ext/Template.html, и Template/ru.html — что из них актуально, решать не навыку.`nОставьте один файл и повторите."
+			exit 1
+		}
+		$legacyPending = $true
+		$langs = @("ru")
+	}
+
+	# Файл страницы НИКОГДА не перезаписываем: в нём может лежать текст макета.
+	# Ошибка — только когда добавлять нечего: язык уже в дескрипторе И страница на диске.
+	# При миграции проверять нечего: langs там задан нами же, а страница появится переносом.
+	if (($langs -contains $Lang) -and (Test-Path $pagePath) -and -not $legacyPending) {
+		Write-Error "Страница макета на языке '$Lang' уже существует: $pagePath"
+		exit 1
+	}
+
+	# Порядок страниц — по коду языка (в выгрузке ERP так во всех 54 двуязычных макетах).
+	# Сравнение ordinal, а не культурное: иначе порты разойдутся на ровном месте.
+	if (-not ($langs -contains $Lang)) { $langs = @($langs + $Lang) }
+	[Array]::Sort($langs, [System.StringComparer]::Ordinal)
+
+	$pagesXml = ($langs | ForEach-Object { "`t<Page>$_</Page>" }) -join "`n"
+	$descXml = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<Help xmlns="http://v8.1c.ru/8.3/xcf/extrnprops" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="$descVersion">
+$pagesXml
+</Help>
+"@
+
+	# --- запись ---
+	New-Item -ItemType Directory -Path $pageDir -Force | Out-Null
+	if ($legacyPending) {
+		Move-Item -LiteralPath $legacyPagePath -Destination (Join-Path $pageDir "ru.html")
+		Write-Host "[WARN] Макет был в старой раскладке (Ext/Template.html) — платформа её игнорирует."
+		Write-Host "       Страница считана как ru и перенесена в Template/ru.html."
+	}
+	Write-XmlFile $descPath $descXml $encBom
+	if (Test-Path $pagePath) {
+		# При миграции про сохранённое содержимое уже сказано выше — не повторяемся.
+		if (-not $legacyPending) {
+			Write-Host "[WARN] Страница $Lang.html уже лежала на диске — содержимое сохранено, дописан только <Page>."
+		}
+	} else {
+		[System.IO.File]::WriteAllText($pagePath, ($htmlSkeleton -replace "`r`n", "`n"), $encBom)
+	}
+
+	Write-Host "[OK] Добавлена страница макета: $TemplateName ($Lang)"
+	Write-Host "     Содержимое: $pagePath"
+	Write-Host "     Дескриптор: $descPath"
+	exit 0
 }
 
 Write-XmlFile $templateMetaPath $templateMetaXml $encBom
@@ -308,21 +442,31 @@ Write-XmlFile $templateMetaPath $templateMetaXml $encBom
 # --- 2. Содержимое макета (Templates/<TemplateName>/Ext/Template.<ext>) ---
 
 $templateFilePath = Join-Path $templateExtDir "Template$($tmpl.Ext)"
+# Куда класть текст макета. Совпадает с $templateFilePath у всех типов, кроме HTML:
+# там содержимое живёт в отдельной странице, а Template.xml — только дескриптор.
+$templateBodyPath = $templateFilePath
 
 switch ($TemplateType) {
 	"HTML" {
-		$content = @"
-<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="UTF-8">
-	<title></title>
-</head>
-<body>
-</body>
-</html>
+		# HTML-макет платформа хранит парой, как справку: дескриптор Ext/Template.xml
+		# со списком страниц и сама страница Ext/Template/<язык>.html (картинки —
+		# рядом в _files/). Одиночный Ext/Template.html платформа молча игнорирует:
+		# загрузка проходит без ошибок, а макет в базе пустой.
+		$pageXml = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<Help xmlns="http://v8.1c.ru/8.3/xcf/extrnprops" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="$formatVersion">
+	<Page>$Lang</Page>
+</Help>
 "@
-		[System.IO.File]::WriteAllText($templateFilePath, $content, $encBom)
+		Write-XmlFile $templateFilePath $pageXml $encBom
+
+		$pageDir = Join-Path $templateExtDir "Template"
+		New-Item -ItemType Directory -Path $pageDir -Force | Out-Null
+		$templateBodyPath = Join-Path $pageDir "$Lang.html"
+
+		# Страница — с LF: платформа хранит HTML именно так.
+		$content = ($htmlSkeleton -replace "`r`n", "`n")
+		[System.IO.File]::WriteAllText($templateBodyPath, $content, $encBom)
 	}
 	"Text" {
 		[System.IO.File]::WriteAllText($templateFilePath, "", $encBom)
@@ -361,12 +505,70 @@ switch ($TemplateType) {
 	}
 }
 
+# Порядок групп в <ChildObjects> объекта по виду. Это xs:sequence <Вид>ChildObjects из MDClasses XSD,
+# сверенный выгрузкой платформы: выгрузка сама ставит группы в этот порядок, так что вставка не на место
+# даёт дифф при следующей выгрузке. Единого порядка нет — у документа Form стоит до TabularSection.
+function Get-ObjectChildOrder {
+	return @{
+		"Catalog"                    = @("Attribute", "TabularSection", "Form", "Template", "Command")
+		"Document"                   = @("Attribute", "Form", "TabularSection", "Template", "Command")
+		"ExchangePlan"               = @("Attribute", "TabularSection", "Form", "Template", "Command")
+		"ChartOfCharacteristicTypes" = @("Attribute", "TabularSection", "Form", "Template", "Command")
+		"ChartOfAccounts"            = @("Attribute", "TabularSection", "AccountingFlag", "ExtDimensionAccountingFlag", "Form", "Template", "Command")
+		"ChartOfCalculationTypes"    = @("Attribute", "TabularSection", "Form", "Template", "Command")
+		"BusinessProcess"            = @("Attribute", "TabularSection", "Form", "Template", "Command")
+		"Task"                       = @("Attribute", "TabularSection", "Form", "Template", "AddressingAttribute", "Command")
+		"DataProcessor"              = @("Attribute", "TabularSection", "Form", "Template", "Command")
+		"Report"                     = @("Attribute", "TabularSection", "Form", "Template", "Command")
+		"ExternalDataProcessor"      = @("Attribute", "TabularSection", "Form", "Template")
+		"ExternalReport"             = @("Attribute", "TabularSection", "Form", "Template")
+		"Enum"                       = @("EnumValue", "Form", "Template", "Command")
+		"InformationRegister"        = @("Resource", "Attribute", "Dimension", "Form", "Template", "Command")
+		"AccumulationRegister"       = @("Resource", "Attribute", "Dimension", "Form", "Template", "Command")
+		"AccountingRegister"         = @("Dimension", "Resource", "Attribute", "Form", "Template", "Command")
+		"CalculationRegister"        = @("Resource", "Attribute", "Dimension", "Recalculation", "Form", "Template", "Command")
+		"DocumentJournal"            = @("Column", "Form", "Template", "Command")
+		"Table"                      = @("Field", "Form", "Command", "Template")
+		"ExternalDataSource"         = @("Table", "Cube", "Function")
+		"Cube"                       = @("DimensionTable", "Dimension", "Resource", "Form", "Command", "Template")
+		"DimensionTable"             = @("Field", "Form", "Command", "Template")
+		"FilterCriterion"            = @("Form", "Command")
+		"SettingsStorage"            = @("Form", "Template")
+		"TabularSection"             = @("Attribute")
+	}
+}
+
+# Элемент <ChildObjects>, ПЕРЕД которым встаёт новый <tag>; $null — дописать в конец.
+# Сразу за последним элементом своего тега, иначе перед первым элементом группы, идущей
+# по канону вида позже. Вид или тег вне канона — $null, как раньше.
+function Find-ChildAnchor($container, [string]$tag, [string]$objType) {
+	$children = New-Object System.Collections.Generic.List[object]
+	foreach ($c in $container.ChildNodes) { if ($c.NodeType -eq 'Element') { $children.Add($c) } }
+	$lastIdx = -1
+	for ($i = 0; $i -lt $children.Count; $i++) {
+		if ($children[$i].LocalName -ceq $tag) { $lastIdx = $i }
+	}
+	if ($lastIdx -ge 0) {
+		if ($lastIdx + 1 -lt $children.Count) { return $children[$lastIdx + 1] }
+		return $null
+	}
+	$order = (Get-ObjectChildOrder)[$objType]
+	if (-not $order) { return $null }
+	$tagIdx = [array]::IndexOf([string[]]$order, $tag)
+	if ($tagIdx -lt 0) { return $null }
+	$later = @($order | Select-Object -Skip ($tagIdx + 1))
+	foreach ($c in $children) {
+		if ($later -ccontains $c.LocalName) { return $c }
+	}
+	return $null
+}
+
 # --- 3. Модификация корневого XML ---
 
 $rootXmlFull = Resolve-Path $rootXmlPath
 $xmlDoc = New-Object System.Xml.XmlDocument
 $xmlDoc.PreserveWhitespace = $true
-$xmlDoc.Load($rootXmlFull.Path)
+$xmlDoc.Load($rootXmlFull.ProviderPath)
 
 $nsMgr = New-Object System.Xml.XmlNamespaceManager($xmlDoc.NameTable)
 $nsMgr.AddNamespace("md", "http://v8.1c.ru/8.3/MDClasses")
@@ -377,14 +579,20 @@ if (-not $childObjects) {
 	exit 1
 }
 
-# Добавить <Template> в конец ChildObjects — идемпотентно (не дублировать уже зарегистрированный)
+# Добавить <Template> в ChildObjects — идемпотентно (не дублировать уже зарегистрированный)
 $alreadyRegistered = [bool]$childObjects.SelectSingleNode("md:Template[text()='$TemplateName']", $nsMgr)
 
 if (-not $alreadyRegistered) {
 $templateElem = $xmlDoc.CreateElement("Template", "http://v8.1c.ru/8.3/MDClasses")
 $templateElem.InnerText = $TemplateName
 
-if ($childObjects.ChildNodes.Count -eq 0) {
+# Место — по канону вида владельца: макет встаёт перед командами (у таблицы внешнего источника — после)
+$insertBefore = Find-ChildAnchor $childObjects "Template" $childObjects.ParentNode.LocalName
+
+if ($insertBefore) {
+	$childObjects.InsertBefore($templateElem, $insertBefore) | Out-Null
+	$childObjects.InsertBefore($xmlDoc.CreateWhitespace("`n`t`t`t"), $insertBefore) | Out-Null
+} elseif ($childObjects.ChildNodes.Count -eq 0) {
 	$childObjects.AppendChild($xmlDoc.CreateWhitespace("`n`t`t`t")) | Out-Null
 	$childObjects.AppendChild($templateElem) | Out-Null
 	$childObjects.AppendChild($xmlDoc.CreateWhitespace("`n`t`t")) | Out-Null
@@ -454,16 +662,19 @@ $xmlText = $xmlText.Replace('encoding="utf-8"', 'encoding="UTF-8"')
 $xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 # Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
 # новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
-$targetEol = if ((Test-Path -LiteralPath $rootXmlFull.Path) -and ([System.IO.File]::ReadAllText($rootXmlFull.Path) -notmatch "`r`n")) { "`n" } else { "`r`n" }
+$targetEol = if ((Test-Path -LiteralPath $rootXmlFull.ProviderPath) -and ([System.IO.File]::ReadAllText($rootXmlFull.ProviderPath) -notmatch "`r`n")) { "`n" } else { "`r`n" }
 $xmlText = ($xmlText -replace "`r`n", "`n") -replace "`n", $targetEol
-[System.IO.File]::WriteAllText($rootXmlFull.Path, $xmlText, $encBom)
+[System.IO.File]::WriteAllText($rootXmlFull.ProviderPath, $xmlText, $encBom)
 
 Write-Host "[OK] Создан макет: $TemplateName ($TemplateType)"
 if ($alreadyRegistered) {
 	Write-Host "     Already registered: <Template>$TemplateName</Template> in ChildObjects (skipped duplicate)"
 }
 Write-Host "     Метаданные: $templateMetaPath"
-Write-Host "     Содержимое: $templateFilePath"
+Write-Host "     Содержимое: $templateBodyPath"
+if ($TemplateType -eq "HTML") {
+	Write-Host "     Дескриптор: $templateFilePath"
+}
 if ($mainDCSUpdated) {
 	Write-Host "     MainDataCompositionSchema: $($mainDCS.InnerText)"
 }

@@ -44,12 +44,13 @@ bash tools/sandbox/run.sh python ".cursor/skills/role-compile/scripts/role-compi
   "Document.Реализация: @edit",
   "DataProcessor.Загрузка: @view",
   "InformationRegister.Цены: Read, Update",
-  { "name": "Document.Продажа", "preset": "view", "rights": {"Delete": false}, "rls": {"Read": "#Шаблон(\"\")"} }
+  { "name": "Document.Продажа", "preset": "view", "rls": {"Read": "#Шаблон(\"\")"} },
+  { "name": "Catalog.Номенклатура.Attribute.Цена", "rights": {"View": false} }
 ]
 ```
 
 - Shorthand: `"Тип.Имя: @пресет"` или `"Тип.Имя: Право1, Право2"`
-- Объектная форма: `preset` + `rights` (переопределения) + `rls` (ограничения)
+- Объектная форма: `preset` + `rights` (точечные значения прав) + `rls` (ограничения)
 
 ### Пресеты
 
@@ -60,11 +61,10 @@ bash tools/sandbox/run.sh python ".cursor/skills/role-compile/scripts/role-compi
 
 `@` обязателен в shorthand. В объектной форме — `"preset": "view"` без `@`.
 
+
 ### Сервисы
 
-Платформа проверяет право на **вложенном объекте** сервиса — методе шаблона URL, операции, канале. Права на сервис целиком не существует.
-
-Весь сервис — короткая запись, навык раскроет её по метаданным сервиса в `OutputDir`:
+Право живёт на **вложенном объекте** сервиса — методе шаблона URL, операции, канале; на сервисе целиком его не бывает. Весь сервис — короткая запись, навык раскроет её по метаданным в `OutputDir`:
 
 ```json
 "objects": ["HTTPService.ЭДО: Use"]
@@ -73,9 +73,6 @@ bash tools/sandbox/run.sh python ".cursor/skills/role-compile/scripts/role-compi
 
 Часть маршрутов — полным путём: `"HTTPService.ЭДО.URLTemplate.ЕстьНовыеДокументы.Method.POST: Use"`.
 
-### Русские синонимы
-
-Поддерживаются русские типы (`Справочник`→Catalog, `Документ`→Document) и права (`Чтение`→Read, `Просмотр`→View). Каноничная форма — английская.
 
 ### Шаблоны RLS
 
@@ -84,6 +81,14 @@ bash tools/sandbox/run.sh python ".cursor/skills/role-compile/scripts/role-compi
 ```
 
 Ссылка в `rls`: `"#ДляОбъекта(\"\")"`. Символ `&` автоматически экранируется в XML.
+
+Длинное условие держи в файле — в значении пишется `@путь`. Относительный путь ищется рядом
+с JSON-описанием роли, затем в текущем каталоге:
+
+```json
+"objects": [{"name": "Document.Продажа", "preset": "view", "rls": {"Read": "@условие.txt"}}],
+"templates": [{"name": "ДляОбъекта(Мод)", "condition": "@шаблон.txt"}]
+```
 
 ## Примеры
 
@@ -112,9 +117,16 @@ bash tools/sandbox/run.sh python ".cursor/skills/role-compile/scripts/role-compi
 
 ## Что можно писать в `objects`
 
-Права имеют 27 типов объектов; тип или имя права вне списка — ошибка: роль не создаётся, файлы не пишутся, `Configuration.xml` не меняется. Права нельзя назначить на `Enum`, `CommonModule`, `DefinedType`, `CommonPicture`, `CommonTemplate`, `Language`, `FunctionalOption`, `EventSubscription`, `ScheduledJob`, `StyleItem`, `SettingsStorage` и подобные — в дереве редактора ролей их нет.
+Прав не бывает у `Enum`, `CommonModule`, `DefinedType`, `CommonPicture`, `CommonTemplate`, `Language`, `FunctionalOption`, `EventSubscription`, `ScheduledJob`, `StyleItem`, `SettingsStorage` и подобных — в дереве редактора ролей их нет. Ошибка в описании — отказ до записи: файлы не создаются, `Configuration.xml` не меняется.
 
 Права на части объекта задаются точечным путём: `Catalog.Контрагенты.Attribute.ИНН: View, Edit`, `WebService.Обмен.Operation.Загрузить: Use`, `HTTPService.ЭДО.URLTemplate.ЕстьНовыеДокументы.Method.POST: Use`.
+
+Реквизиты, табличные части, измерения и ресурсы наследуют права своего объекта — им задают
+запрет, чтобы закрыть унаследованное:
+
+```json
+{"name": "Catalog.Товары.Attribute.Цена", "rights": {"View": false}}
+```
 
 Роль расширения, включённая в основные (`DefaultRoles`), прав на заимствованные объекты давать не может — платформа это запрещает. Такие права выноси в отдельную роль вне основных.
 

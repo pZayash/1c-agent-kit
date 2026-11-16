@@ -1,4 +1,4 @@
-﻿# stub-db-create v1.10 — Create temp 1C infobase with metadata stubs for EPF/ERF build
+﻿# stub-db-create v1.23 — Create temp 1C infobase with metadata stubs for EPF/ERF build
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 param(
 	[Parameter(Mandatory)]
@@ -13,10 +13,19 @@ param(
 	# смогла проверить его штатными проверками. Без параметра стаб работает как раньше.
 	[string]$EmbedSourceFile,
 
+	# Выгрузка целевой конфигурации: общие модули, к которым обращается код, получают в заглушке
+	# пустых двойников с настоящими флагами контекста.
+	[string]$ConfigSrc,
+
 	[string[]]$AdditionalV8Arguments = @(),
 
 	[string[]]$AdditionalIbcmdArguments = @()
 )
+
+# Необработанная ошибка (напр. привязка параметра) внутри try/finally без catch завершала
+# скрипт с кодом 0 — ложный успех без запуска платформы. Любая такая ошибка — код 1.
+# py-порт: необработанное исключение и так даёт код 1.
+trap { Write-Host "Error: $($_.Exception.Message) ($($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber))" -ForegroundColor Red; exit 1 }
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -32,6 +41,13 @@ function ConvertTo-CleanPath {
     if ($v.Length -ge 2 -and $v[0] -eq $v[-1] -and ($v[0] -eq '"' -or $v[0] -eq "'")) {
         $v = $v.Substring(1, $v.Length - 2).Trim()
     }
+    # «C:x» — от текущего каталога диска C, своего у каждого процесса: смысл не угадать, почти
+    # всегда это опечатка в «C:\x». Отказ с подсказкой, а не путь «где-то» у платформы.
+    if ($v -match '^[A-Za-z]:(?![\\/])') {
+        $drive = $v.Substring(0, 2)
+        Write-Host "Error: $ParamName is relative to the current directory of drive $drive ($Value) - use $drive\$($v.Substring(2)) or a path without a drive" -ForegroundColor Red
+        exit 1
+    }
     if ($v.Length -gt 3 -and ($v[-1] -eq '\' -or $v[-1] -eq '/')) { $v = $v.Substring(0, $v.Length - 1) }
     if ($v.Contains('"')) {
         Write-Host "Error: $ParamName contains a quote character: $Value" -ForegroundColor Red
@@ -43,6 +59,8 @@ function ConvertTo-CleanPath {
 $SourceDir = ConvertTo-CleanPath $SourceDir '-SourceDir'
 $V8Path = ConvertTo-CleanPath $V8Path '-V8Path'
 $TempBasePath = ConvertTo-CleanPath $TempBasePath '-TempBasePath'
+$EmbedSourceFile = ConvertTo-CleanPath $EmbedSourceFile '-EmbedSourceFile'
+$ConfigSrc = ConvertTo-CleanPath $ConfigSrc '-ConfigSrc'
 
 # --- Additional platform arguments ---
 $script:V8OwnedKeys = @(
@@ -86,7 +104,7 @@ function Test-ArgKeyMatch {
 function Get-ProjectExtraArgs {
     # v8args / ibcmdargs from .v8-project.json — same upward walk as v8path.
     param([string]$Name)
-    $dir = (Get-Location).Path
+    $dir = (Get-Location).ProviderPath
     while ($dir) {
         $pf = Join-Path $dir ".v8-project.json"
         if (Test-Path $pf) {
@@ -101,6 +119,17 @@ function Get-ProjectExtraArgs {
         $dir = $parent
     }
     return @()
+}
+
+function ConvertTo-QuotedIfNeeded {
+    # Extra arguments come from the caller unquoted; the 1cv8 command line is joined
+    # verbatim, so a token with a space needs quotes of its own. Без кавычек платформа молча
+    # режет значение по пробелу (замер 2026-11-10: «/Out C:\a b\x.txt» пишет лог в «C:\a»).
+    param([string]$Token)
+    if ($Token -and ($Token.Contains(' ') -or $Token.Contains("`t")) -and -not $Token.Contains('"')) {
+        return '"' + $Token + '"'
+    }
+    return $Token
 }
 
 function Assert-ExtraArgs {
@@ -353,14 +382,332 @@ foreach ($f in $xmlFiles) {
 	}
 }
 
+$stdAttrsByType = @{
+	"Catalog" = @("PredefinedDataName","Predefined","Ref","DeletionMark","IsFolder","Owner","Parent","Description","Code")
+	"Document" = @("Posted","Ref","DeletionMark","Date","Number")
+	"Enum" = @("Order","Ref")
+	"ChartOfAccounts" = @("PredefinedDataName","Predefined","Ref","DeletionMark","Description","Code","Parent","Order","Type","OffBalance")
+	"ChartOfCharacteristicTypes" = @("PredefinedDataName","Predefined","Ref","DeletionMark","Description","Code","Parent","ValueType")
+	"ChartOfCalculationTypes" = @("PredefinedDataName","Predefined","Ref","DeletionMark","Description","Code","ActionPeriodIsBasic")
+	"ExchangePlan" = @("Ref","DeletionMark","Code","Description","ThisNode","SentNo","ReceivedNo")
+	"BusinessProcess" = @("Ref","DeletionMark","Date","Number","Started","Completed","HeadTask")
+	"Task" = @("Ref","DeletionMark","Date","Number","Executed","Description","RoutePoint","BusinessProcess")
+	"InformationRegister" = @("Active","LineNumber","Recorder","Period")
+	"AccumulationRegister" = @("Active","LineNumber","Recorder","Period")
+	"AccountingRegister" = @("Active","Period","Recorder","LineNumber","Account")
+	"CalculationRegister" = @("Active","Recorder","LineNumber","RegistrationPeriod","CalculationType","ReversingEntry")
+}
+$stdAttrRu = @{
+	Ref='Ссылка'; DeletionMark='ПометкаУдаления'; Code='Код'; Description='Наименование'; IsFolder='ЭтоГруппа'
+	Predefined='Предопределенный'; PredefinedDataName='ИмяПредопределенныхДанных'; Parent='Родитель'; Owner='Владелец'
+	Number='Номер'; Date='Дата'; Posted='Проведен'; Order='Порядок'; Type='Вид'; OffBalance='Забалансовый'
+	ValueType='ТипЗначения'; ThisNode='ЭтотУзел'; SentNo='НомерОтправленного'; ReceivedNo='НомерПринятого'
+	Started='Стартован'; Completed='Завершен'; HeadTask='ВедущаяЗадача'; Executed='Выполнена'; RoutePoint='ТочкаМаршрута'
+	BusinessProcess='БизнесПроцесс'; ActionPeriodIsBasic='ПериодДействияБазовый'
+}
+$stdTabularByType = @{
+	ChartOfAccounts = @('ExtDimensionTypes','ВидыСубконто')
+	ChartOfCalculationTypes = @('BaseCalculationTypes','LeadingCalculationTypes','DisplacingCalculationTypes','БазовыеВидыРасчета','ВедущиеВидыРасчета','ВытесняющиеВидыРасчета')
+}
+
+# --- 1b2. Реквизиты объектов, на которые ссылаются пути формы ---
+# Платформа сверяет DataPath формы с метаданными, поэтому заглушке нужны реквизиты, к которым
+# форма обращается. Настоящие типы не нужны (замер 8.3.24): листу подходит строка при любом виде
+# поля. Промежуточному звену пути строка не подходит, ему нужен ссылочный тип — на справочник-пустышку.
+$formPathKinds = 'Catalog|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|ExchangePlan|BusinessProcess|Task'
+$tsMark = '*ts'   # метка узла-табличной части: в имени реквизита такого символа быть не может
+$objectPaths = [ordered]@{}   # "Вид.Имя" -> дерево путей
+
+function Get-PathNode($node, [string]$name) {
+	if (-not $node.Contains($name)) { $node[$name] = [ordered]@{} }
+	return $node[$name]
+}
+
+function Get-ConfigTypeKeys($TypeTexts) {
+	$keys = @()
+	foreach ($tx in $TypeTexts) {
+		$tm = [regex]::Match([string]$tx, "^(?:cfg:|d\dp1:)($formPathKinds)(?:Object|Ref)\.(\w+)$")
+		if ($tm.Success) { $keys += "$($tm.Groups[1].Value).$($tm.Groups[2].Value)" }
+	}
+	return ,$keys
+}
+
+# Реквизиты самой обработки/отчёта: путь Объект.Контрагент.ИНН идёт через её реквизит ссылочного типа
+$ownMembers = @{}   # имя объекта -> @{ "Реквизит" | "ТЧ.Колонка" -> ключи объектов }
+foreach ($f in $xmlFiles) {
+	if ($f.Name -eq "Form.xml") { continue }
+	$content = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+	if ($content -notmatch '<(ExternalDataProcessor|ExternalReport)[ >]') { continue }
+	try { $xml = New-Object System.Xml.XmlDocument; $xml.LoadXml($content) } catch { continue }
+	$nsMgr = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+	$nsMgr.AddNamespace("m", "http://v8.1c.ru/8.3/MDClasses")
+	$nsMgr.AddNamespace("v8", "http://v8.1c.ru/8.1/data/core")
+	$own = $xml.SelectSingleNode("/m:MetaDataObject/*", $nsMgr)
+	if (-not $own) { continue }
+	$members = @{}
+	foreach ($a in $own.SelectNodes("m:ChildObjects/m:Attribute", $nsMgr)) {
+		$keys = Get-ConfigTypeKeys @($a.SelectNodes("m:Properties/m:Type/v8:Type", $nsMgr) | ForEach-Object { $_.InnerText })
+		if ($keys.Count -gt 0) { $members[$a.SelectSingleNode("m:Properties/m:Name", $nsMgr).InnerText] = $keys }
+	}
+	foreach ($ts in $own.SelectNodes("m:ChildObjects/m:TabularSection", $nsMgr)) {
+		$tsName = $ts.SelectSingleNode("m:Properties/m:Name", $nsMgr).InnerText
+		foreach ($a in $ts.SelectNodes("m:ChildObjects/m:Attribute", $nsMgr)) {
+			$keys = Get-ConfigTypeKeys @($a.SelectNodes("m:Properties/m:Type/v8:Type", $nsMgr) | ForEach-Object { $_.InnerText })
+			if ($keys.Count -gt 0) { $members["$tsName.$($a.SelectSingleNode('m:Properties/m:Name', $nsMgr).InnerText)"] = $keys }
+		}
+	}
+	$ownMembers[$own.SelectSingleNode("m:Properties/m:Name", $nsMgr).InnerText] = $members
+}
+
+foreach ($f in $xmlFiles) {
+	if ($f.Name -ne "Form.xml") { continue }
+	$content = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+	if ($content -notmatch '<Attributes>') { continue }
+	try {
+		$xml = New-Object System.Xml.XmlDocument
+		$xml.LoadXml($content)
+	} catch { continue }
+	$nsMgr = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+	$nsMgr.AddNamespace("v8", "http://v8.1c.ru/8.1/data/core")
+	$nsMgr.AddNamespace("f", "http://v8.1c.ru/8.3/xcf/logform")
+
+	# Начало пути ("Реквизит", "Объект.Контрагент", "Таблица.Колонка") -> куда ведёт: объект,
+	# или регистр
+	$roots = @{}
+	$addRoot = {
+		param([string]$Prefix, [string]$Key, [bool]$IsRegister)
+		if (-not $roots.ContainsKey($Prefix)) { $roots[$Prefix] = @() }
+		$roots[$Prefix] += @{ key = $Key; register = $IsRegister }
+	}
+	foreach ($attrNode in $xml.SelectNodes("//f:Attributes/f:Attribute", $nsMgr)) {
+		$attrName = $attrNode.GetAttribute("name")
+		$typeTexts = @($attrNode.SelectNodes("f:Type/v8:Type", $nsMgr) | ForEach-Object { $_.InnerText })
+		foreach ($k in (Get-ConfigTypeKeys $typeTexts)) { & $addRoot $attrName $k $false }
+		foreach ($tx in $typeTexts) {
+			$tm = [regex]::Match($tx, '(?:External)?(?:DataProcessor|Report)Object\.(\w+)$')
+			if ($tm.Success -and $ownMembers.ContainsKey($tm.Groups[1].Value)) {
+				$members = $ownMembers[$tm.Groups[1].Value]
+				foreach ($mn in $members.Keys) { foreach ($k in $members[$mn]) { & $addRoot "$attrName.$mn" $k $false } }
+			}
+		}
+		foreach ($col in $attrNode.SelectNodes("f:Columns/f:Column", $nsMgr)) {
+			$colTypes = @($col.SelectNodes("f:Type/v8:Type", $nsMgr) | ForEach-Object { $_.InnerText })
+			foreach ($k in (Get-ConfigTypeKeys $colTypes)) { & $addRoot "$attrName.$($col.GetAttribute('name'))" $k $false }
+		}
+		# Основная таблица динамического списка должна существовать, поля списка — её реквизиты
+		$mt = $attrNode.SelectSingleNode("f:Settings/f:MainTable", $nsMgr)
+		if ($mt) {
+			$tm = [regex]::Match($mt.InnerText, "^($formPathKinds)\.(\w+)$")
+			$rm = [regex]::Match($mt.InnerText, '^(InformationRegister|AccumulationRegister|AccountingRegister|CalculationRegister)\.(\w+)$')
+			if ($tm.Success) {
+				$k = "$($tm.Groups[1].Value).$($tm.Groups[2].Value)"
+				& $addRoot $attrName $k $false
+			} elseif ($rm.Success) {
+				$k = "$($rm.Groups[1].Value).$($rm.Groups[2].Value)"
+				if (-not $typeMap.ContainsKey($rm.Groups[1].Value)) { $typeMap[$rm.Groups[1].Value] = @{} }
+				$typeMap[$rm.Groups[1].Value][$rm.Groups[2].Value] = $true
+				if (-not $registerColumns.ContainsKey($k)) { $registerColumns[$k] = @{} }
+				& $addRoot $attrName $k $true
+			}
+		}
+	}
+	if ($roots.Count -eq 0) { continue }
+	foreach ($p in $roots.Keys) { foreach ($e in $roots[$p]) { if (-not $e.register -and -not $objectPaths.Contains($e.key)) { $objectPaths[$e.key] = [ordered]@{} } } }
+
+	foreach ($m in [regex]::Matches($content, '<(?:\w+:)?\w*DataPath>([^<]+)<')) {
+		$segs = @($m.Groups[1].Value.Replace('~', '').Split('.'))
+		if (@($segs | Where-Object { $_ -notmatch '^\w+$' }).Count -gt 0) { continue }
+		# Самое длинное начало пути: остаток — реквизиты того объекта, куда оно ведёт
+		for ($n = [Math]::Min($segs.Count - 1, 3); $n -ge 1; $n--) {
+			$prefix = $segs[0..($n - 1)] -join '.'
+			if (-not $roots.ContainsKey($prefix)) { continue }
+			foreach ($e in $roots[$prefix]) {
+				if ($e.register) {
+					if ($segs[$n] -notin $stdRegCols) { $registerColumns[$e.key][$segs[$n]] = $true }
+					continue
+				}
+				$node = $objectPaths[$e.key]
+				foreach ($s in $segs[$n..($segs.Count - 1)]) { $node = Get-PathNode $node $s }
+			}
+			break
+		}
+	}
+	# Таблица на <корень>.<имя> — табличная часть; иная вложенность — реквизит-ссылка
+	foreach ($tb in $xml.SelectNodes("//f:Table/f:DataPath", $nsMgr)) {
+		$segs = @($tb.InnerText.Replace('~', '').Split('.'))
+		if ($segs.Count -lt 2) { continue }
+		$prefix = $segs[0..($segs.Count - 2)] -join '.'
+		if (-not $roots.ContainsKey($prefix)) { continue }
+		foreach ($e in $roots[$prefix]) {
+			if (-not $e.register) { (Get-PathNode $objectPaths[$e.key] $segs[-1])[$tsMark] = $true }
+		}
+	}
+}
+
+function Get-StubCatalogName([string]$Seed) {
+	$md5 = [System.Security.Cryptography.MD5]::Create()
+	$hash = $md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Seed))
+	return "Заглушка_" + (-join ($hash[0..3] | ForEach-Object { $_.ToString("x2") }))
+}
+
+function Get-OrAddCatalog([string]$Name) {
+	if (-not $typeMap.ContainsKey("Catalog")) { $typeMap["Catalog"] = @{} }
+	$typeMap["Catalog"][$Name] = $true
+}
+
+function Merge-PathTree($target, $source) {
+	foreach ($k in @($source.Keys)) {
+		if ($k -eq $tsMark) { $target[$tsMark] = $true; continue }
+		Merge-PathTree (Get-PathNode $target $k) $source[$k]
+	}
+}
+
+# Тип звена: лист — строка, иначе ссылка на пустышку со своим деревом
+function Resolve-MemberType([string]$OwnerKey, [string]$Member, $Node) {
+	$real = @($Node.Keys | Where-Object { $_ -ne $tsMark })
+	if ($real.Count -eq 0) { return "xs:string" }
+	$dummy = Get-StubCatalogName "$OwnerKey.$Member"
+	Get-OrAddCatalog $dummy
+	Add-ObjectChildren "Catalog.$dummy" $Node
+	return "cfg:CatalogRef.$dummy"
+}
+
+$objectChildren = @{}   # "Вид.Имя" -> @{ attrs; tabular; hierarchical; owner }
+
+function Add-ObjectChildren([string]$Key, $Tree) {
+	$kind = $Key.Substring(0, $Key.IndexOf('.'))
+	$std = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+	foreach ($a in $stdAttrsByType[$kind]) {
+		[void]$std.Add($a)
+		if ($stdAttrRu.ContainsKey($a)) { [void]$std.Add($stdAttrRu[$a]) }
+	}
+	foreach ($a in @($stdTabularByType[$kind])) { if ($a) { [void]$std.Add($a) } }
+	[void]$std.Add('DefaultPicture')
+	if ($kind -eq 'ChartOfCharacteristicTypes') { [void]$std.Add('IsFolder'); [void]$std.Add('ЭтоГруппа') }
+
+	# Родитель и ссылка — тот же объект: их реквизиты принадлежат ему
+	do {
+		$merged = $false
+		foreach ($selfName in @('Parent', 'Родитель', 'Ref', 'Ссылка')) {
+			if ($std.Contains($selfName) -and $Tree.Contains($selfName) -and @($Tree[$selfName].Keys).Count -gt 0) {
+				$sub = $Tree[$selfName]
+				$Tree[$selfName] = [ordered]@{}
+				Merge-PathTree $Tree $sub
+				$merged = $true
+			}
+		}
+	} while ($merged)
+
+	if (-not $objectChildren.ContainsKey($Key)) {
+		$objectChildren[$Key] = @{ attrs = [ordered]@{}; tabular = [ordered]@{}; hierarchical = $false; owner = $null }
+	}
+	$info = $objectChildren[$Key]
+	foreach ($name in @($Tree.Keys)) {
+		if ($name -eq $tsMark) { continue }
+		$node = $Tree[$name]
+		if ($std.Contains($name)) {
+			if ($name -in @('Parent', 'Родитель', 'IsFolder', 'ЭтоГруппа')) { $info.hierarchical = $true }
+			if ($name -in @('Owner', 'Владелец') -and $kind -eq 'Catalog') {
+				if (-not $info.owner) {
+					$info.owner = Get-StubCatalogName "$Key.Owner"
+					Get-OrAddCatalog $info.owner
+				}
+				Add-ObjectChildren "Catalog.$($info.owner)" $node
+			}
+			continue
+		}
+		if ($node.Contains($tsMark)) {
+			if (-not $info.tabular.Contains($name)) { $info.tabular[$name] = [ordered]@{} }
+			foreach ($col in @($node.Keys)) {
+				if ($col -eq $tsMark -or $col -in @('LineNumber', 'НомерСтроки', 'Ref', 'Ссылка')) { continue }
+				$info.tabular[$name][$col] = Resolve-MemberType "$Key.$name" $col $node[$col]
+			}
+		} else {
+			$info.attrs[$name] = Resolve-MemberType $Key $name $node
+		}
+	}
+}
+
+foreach ($k in @($objectPaths.Keys)) {
+	$dot = $k.IndexOf('.')
+	$kind = $k.Substring(0, $dot)
+	if (-not $typeMap.ContainsKey($kind)) { $typeMap[$kind] = @{} }
+	$typeMap[$kind][$k.Substring($dot + 1)] = $true
+	Add-ObjectChildren $k $objectPaths[$k]
+}
+
+# Бизнес-процесс без задачи платформа не загружает
+$stubTaskName = "ЗаглушкаЗадачи"
+if ($typeMap.ContainsKey("BusinessProcess") -and $typeMap["BusinessProcess"].Count -gt 0) {
+	if (-not $typeMap.ContainsKey("Task")) { $typeMap["Task"] = @{} }
+	$typeMap["Task"][$stubTaskName] = $true
+}
+
+# --- 1c. Общие модули целевой конфигурации, к которым обращается код ---
+# Проверка модулей (замер 8.3.24, 8.3.27) требует от общего модуля только двух вещей: чтобы он
+# существовал и был доступен в контексте вызова. Методы, их экспорт и число параметров она не
+# сверяет. Поэтому двойнику хватает имени и флагов контекста из настоящей выгрузки, тело пустое,
+# и зависимости модуля за ним не тянутся. Двойник получает только имя, которое есть в выгрузке:
+# неизвестное имя остаётся ошибкой проверки, а не угадывается.
+
+# Код без строковых литералов и комментариев: слова в них — не обращения к модулям.
+function Remove-BslNoise {
+	param([string]$Code)
+	$out = New-Object System.Text.StringBuilder
+	foreach ($line in ($Code -split "`r?`n")) {
+		# Продолжение многострочной строки («|ВЫБРАТЬ …»): литерал до закрывающей кавычки, после
+		# неё может идти код («|ГДЕ …"; Х = Модуль.Метод();»).
+		$l = [regex]::Replace($line, '^\s*\|(?:[^"]|"")*("|$)', '""')
+		# Литерал до закрывающей кавычки или, если строка продолжится ниже, до конца строки.
+		$l = [regex]::Replace($l, '"(?:[^"]|"")*("|$)', '""')
+		$ci = $l.IndexOf('//')
+		if ($ci -ge 0) { $l = $l.Substring(0, $ci) }
+		[void]$out.AppendLine($l)
+	}
+	return $out.ToString()
+}
+
+$commonModuleFlags = @('Global', 'ClientManagedApplication', 'Server', 'ExternalConnection', 'ClientOrdinaryApplication', 'ServerCall', 'Privileged')
+$commonModules = [ordered]@{}   # имя из выгрузки -> @{ флаг = 'true'|'false' }
+if ($ConfigSrc) {
+	$cmDir = Join-Path $ConfigSrc "CommonModules"
+	if (-not (Test-Path -LiteralPath $cmDir -PathType Container)) {
+		Write-Host "WARNING: в -ConfigSrc нет каталога CommonModules: $ConfigSrc" -ForegroundColor Yellow
+	} else {
+		# Идентификаторы 1С регистронезависимы — и имена модулей в коде тоже.
+		$known = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+		foreach ($f in (Get-ChildItem -LiteralPath $cmDir -Filter "*.xml" -File)) { $known[$f.BaseName] = $f.FullName }
+		$used = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+		foreach ($f in (Get-ChildItem -LiteralPath $SourceDir -Filter "*.bsl" -Recurse -File)) {
+			$code = Remove-BslNoise ([System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8))
+			foreach ($m in [regex]::Matches($code, '(?<![\w.])([^\W\d]\w*)\s*\.')) { [void]$used.Add($m.Groups[1].Value) }
+		}
+		$names = @($used | Where-Object { $known.ContainsKey($_) } | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($known[$_]) })
+		[Array]::Sort($names, [StringComparer]::Ordinal)
+		foreach ($n in $names) {
+			$t = [System.IO.File]::ReadAllText($known[$n], [System.Text.Encoding]::UTF8)
+			$flags = @{}
+			foreach ($fl in $commonModuleFlags) {
+				$flags[$fl] = if ($t -match "<$fl>(true|false)</$fl>") { $Matches[1].ToLower() } else { 'false' }
+			}
+			$commonModules[$n] = $flags
+		}
+		if ($commonModules.Count -gt 0) {
+			Write-Host "Общие модули из configSrc: $(@($commonModules.Keys) -join ', ')"
+		} else {
+			Write-Host "Общие модули из configSrc: не понадобились"
+		}
+	}
+}
+
 $hasRefTypes = $typeMap.Count -gt 0
 # Конфигурация нужна и тогда, когда ссылочных типов нет: в неё кладётся сам объект.
 $embedRequested = -not [string]::IsNullOrWhiteSpace($EmbedSourceFile)
-$needCfg = $hasRefTypes -or $embedRequested
+$needCfg = $hasRefTypes -or $embedRequested -or $commonModules.Count -gt 0
 
 # --- 2. Determine TempBasePath ---
 if (-not $TempBasePath) {
-	$TempBasePath = Join-Path $env:TEMP "epf_stub_db_$(Get-Random)"
+	$TempBasePath = Join-Path ([IO.Path]::GetTempPath()) "epf_stub_db_$(Get-Random)"
 }
 
 # --- 3. If registers need a registrator, add stub document ---
@@ -387,6 +734,38 @@ if ($needsRegistrator) {
 #
 # Подстановка типа делается ТОЛЬКО в .xml (это DefaultForm и основной реквизит формы); в .bsl
 # такой же текст был бы кодом, и трогать его нельзя.
+function Convert-RefTags {
+	param([string]$Text, [string]$ExtTag, [string]$CfgTag)
+
+	# Только префикс вида объекта в начале квалифицированного имени. Глобальная замена подстроки
+	# резала бы и имя самого объекта, если оно оканчивается так же (ПриёмкаExternalReport), —
+	# ссылка расходилась с именем, и заглушка не грузилась. [regex]::Replace, а не -replace:
+	# оператор регистронезависим, а теги 1С регистрозависимы.
+	return [regex]::Replace($Text, "(?<![\w.])$ExtTag(Object)?\.", ($CfgTag + '$1.'))
+}
+
+# Запрос динамического списка платформа сверяет по типам настоящих таблиц, и на заглушке исправная
+# форма получила бы отказ. В проверочной копии запрос заменяется запросом-константой с теми же
+# колонками: модули проверяются как обычно, а сам запрос сверит сборка на настоящей базе.
+function Convert-ManualQueryLists([string]$Text) {
+	# Ключ строки у запроса-константы — номер, и стандартной картинки у списка нет
+	foreach ($m in [regex]::Matches($Text, '(?s)<Attribute name="([^"]+)"(?:(?!</Attribute>).)*?<ManualQuery>true</ManualQuery>')) {
+		$Text = [regex]::Replace($Text, "\s*<RowPictureDataPath>~?$([regex]::Escape($m.Groups[1].Value))\.DefaultPicture</RowPictureDataPath>", '')
+	}
+	return [regex]::Replace($Text, '(?s)<Attribute name="([^"]+)"(?:(?!</Attribute>).)*?<ManualQuery>true</ManualQuery>(?:(?!</Attribute>).)*?</Attribute>', {
+		param($m)
+		$attr = [regex]::Escape($m.Groups[1].Value)
+		$columns = [ordered]@{}
+		foreach ($p in [regex]::Matches($Text, "<(?:\w+:)?\w*DataPath>~?$attr\.(\w+)")) {
+			if ($p.Groups[1].Value -ne 'DefaultPicture') { $columns[$p.Groups[1].Value] = $true }
+		}
+		$fields = if ($columns.Count -gt 0) { @($columns.Keys | ForEach-Object { "&quot;&quot; КАК $_" }) -join ', ' } else { '&quot;&quot; КАК Поле' }
+		$block = [regex]::Replace($m.Value, '(?s)<QueryText>.*?</QueryText>|<QueryText/>', "<QueryText>ВЫБРАТЬ $fields</QueryText>")
+		$block = [regex]::Replace($block, '(?s)\s*<MainTable>.*?</MainTable>|\s*<KeyFields>.*?</KeyFields>|\s*<KeyType>.*?</KeyType>', '')
+		return $block.Replace('</QueryText>', '</QueryText><KeyType>RowNumber</KeyType>')
+	})
+}
+
 function Add-SourceObjectToConfig {
 	param([string]$SourceXml, [string]$CfgDir)
 
@@ -416,7 +795,7 @@ function Add-SourceObjectToConfig {
 
 	$conv = $reGuid.Replace($text, $reissue)
 	$conv = $conv.Replace("<$extTag ", "<$cfgTag ").Replace("<$extTag>", "<$cfgTag>").Replace("</$extTag>", "</$cfgTag>")
-	$conv = $conv.Replace("${extTag}Object.", "${cfgTag}Object.").Replace("$extTag.", "$cfgTag.")
+	$conv = Convert-RefTags $conv $extTag $cfgTag
 
 	# Тип менеджера у внешней обработки не объявлен, а объекту конфигурации он обязателен:
 	# без него платформа отвечает «отсутствует один или более типов объекта».
@@ -454,7 +833,8 @@ function Add-SourceObjectToConfig {
 			if ($f.Extension -ieq '.xml') {
 				$t = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::UTF8)
 				$t = $reGuid.Replace($t, $reissue)
-				$t = $t.Replace("${extTag}Object.", "${cfgTag}Object.").Replace("$extTag.", "$cfgTag.")
+				$t = Convert-RefTags $t $extTag $cfgTag
+				if ($f.Name -eq 'Form.xml') { $t = Convert-ManualQueryLists $t }
 				[IO.File]::WriteAllText($dst, $t, $encBom)
 			} else {
 				Copy-Item -Path $f.FullName -Destination $dst -Force
@@ -515,7 +895,7 @@ if ($needCfg) {
 		)
 		"ChartOfAccounts" = @(
 			@{p="ChartOfAccountsObject";c="Object"},@{p="ChartOfAccountsRef";c="Ref"},@{p="ChartOfAccountsSelection";c="Selection"},
-			@{p="ChartOfAccountsList";c="List"},@{p="ChartOfAccountsManager";c="Manager"}
+			@{p="ChartOfAccountsList";c="List"},@{p="ChartOfAccountsManager";c="Manager"},@{p="ChartOfAccountsExtDimensionTypes";c="ExtDimensionTypes"},@{p="ChartOfAccountsExtDimensionTypesRow";c="ExtDimensionTypesRow"}
 		)
 		"ChartOfCharacteristicTypes" = @(
 			@{p="ChartOfCharacteristicTypesObject";c="Object"},@{p="ChartOfCharacteristicTypesRef";c="Ref"},@{p="ChartOfCharacteristicTypesSelection";c="Selection"},
@@ -523,7 +903,7 @@ if ($needCfg) {
 		)
 		"ChartOfCalculationTypes" = @(
 			@{p="ChartOfCalculationTypesObject";c="Object"},@{p="ChartOfCalculationTypesRef";c="Ref"},@{p="ChartOfCalculationTypesSelection";c="Selection"},
-			@{p="ChartOfCalculationTypesList";c="List"},@{p="ChartOfCalculationTypesManager";c="Manager"}
+			@{p="ChartOfCalculationTypesList";c="List"},@{p="ChartOfCalculationTypesManager";c="Manager"},@{p="DisplacingCalculationTypes";c="DisplacingCalculationTypes"},@{p="DisplacingCalculationTypesRow";c="DisplacingCalculationTypesRow"},@{p="BaseCalculationTypes";c="BaseCalculationTypes"},@{p="BaseCalculationTypesRow";c="BaseCalculationTypesRow"},@{p="LeadingCalculationTypes";c="LeadingCalculationTypes"},@{p="LeadingCalculationTypesRow";c="LeadingCalculationTypesRow"}
 		)
 		"ExchangePlan" = @(
 			@{p="ExchangePlanObject";c="Object"},@{p="ExchangePlanRef";c="Ref"},@{p="ExchangePlanSelection";c="Selection"},
@@ -531,7 +911,7 @@ if ($needCfg) {
 		)
 		"BusinessProcess" = @(
 			@{p="BusinessProcessObject";c="Object"},@{p="BusinessProcessRef";c="Ref"},@{p="BusinessProcessSelection";c="Selection"},
-			@{p="BusinessProcessList";c="List"},@{p="BusinessProcessManager";c="Manager"}
+			@{p="BusinessProcessList";c="List"},@{p="BusinessProcessManager";c="Manager"},@{p="BusinessProcessRoutePointRef";c="RoutePointRef"}
 		)
 		"Task" = @(
 			@{p="TaskObject";c="Object"},@{p="TaskRef";c="Ref"},@{p="TaskSelection";c="Selection"},
@@ -610,21 +990,6 @@ if ($needCfg) {
 				<xr:ChoiceParameters/>
 '@
 
-	$stdAttrsByType = @{
-		"Catalog" = @("PredefinedDataName","Predefined","Ref","DeletionMark","IsFolder","Owner","Parent","Description","Code")
-		"Document" = @("Posted","Ref","DeletionMark","Date","Number")
-		"Enum" = @("Order","Ref")
-		"ChartOfAccounts" = @("PredefinedDataName","Predefined","Ref","DeletionMark","Description","Code","Parent","Order","Type","OffBalance")
-		"ChartOfCharacteristicTypes" = @("PredefinedDataName","Predefined","Ref","DeletionMark","Description","Code","Parent","ValueType")
-		"ChartOfCalculationTypes" = @("PredefinedDataName","Predefined","Ref","DeletionMark","Description","Code","ActionPeriodIsBasic")
-		"ExchangePlan" = @("Ref","DeletionMark","Code","Description","ThisNode","SentNo","ReceivedNo")
-		"BusinessProcess" = @("Ref","DeletionMark","Date","Number","Started","Completed","HeadTask")
-		"Task" = @("Ref","DeletionMark","Date","Number","Executed","Description","RoutePoint","BusinessProcess")
-		"InformationRegister" = @("Active","LineNumber","Recorder","Period")
-		"AccumulationRegister" = @("Active","LineNumber","Recorder","Period")
-		"AccountingRegister" = @("Active","Period","Recorder","LineNumber","Account")
-		"CalculationRegister" = @("Active","Recorder","LineNumber","RegistrationPeriod","CalculationType","ReversingEntry")
-	}
 
 	function Build-StdAttrs([string]$metaType) {
 		$attrs = $stdAttrsByType[$metaType]
@@ -663,6 +1028,7 @@ if ($needCfg) {
 
 	# ChildObjects entries
 	$childXml = "`r`n`t`t`t<Language>Русский</Language>"
+	foreach ($cmName in $commonModules.Keys) { $childXml += "`r`n`t`t`t<CommonModule>$cmName</CommonModule>" }
 	foreach ($metaType in $typeMap.Keys) {
 		if (-not $metaInfo.ContainsKey($metaType)) { continue }
 		$tag = $metaInfo[$metaType].tag
@@ -768,6 +1134,53 @@ if ($needCfg) {
 </MetaDataObject>
 "@
 	[System.IO.File]::WriteAllText((Join-Path $langDir "Русский.xml"), $langXml, $enc)
+
+	# --- 4b'. Common modules: пустые двойники с флагами контекста из выгрузки ---
+	if ($commonModules.Count -gt 0) {
+		$cmOutDir = Join-Path $cfgDir "CommonModules"
+		New-Item -ItemType Directory -Path $cmOutDir -Force | Out-Null
+		foreach ($cmName in $commonModules.Keys) {
+			$flags = $commonModules[$cmName]
+			$flagXml = ""
+			foreach ($fl in $commonModuleFlags) { $flagXml += "`r`n`t`t`t<$fl>$($flags[$fl])</$fl>" }
+			$cmXml = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject $ns>
+	<CommonModule uuid="$([guid]::NewGuid().ToString())">
+		<Properties>
+			<Name>$cmName</Name>
+			<Synonym/>
+			<Comment/>$flagXml
+			<ReturnValuesReuse>DontUse</ReturnValuesReuse>
+		</Properties>
+	</CommonModule>
+</MetaDataObject>
+"@
+			[System.IO.File]::WriteAllText((Join-Path $cmOutDir "$cmName.xml"), $cmXml, $enc)
+			$cmExt = Join-Path $cmOutDir (Join-Path $cmName "Ext")
+			New-Item -ItemType Directory -Path $cmExt -Force | Out-Null
+			[System.IO.File]::WriteAllText((Join-Path $cmExt "Module.bsl"), "", $enc)
+		}
+	}
+
+	function Build-StubAttribute([string]$Name, [string]$Type, [bool]$IsColumn) {
+		$typeXml = if ($Type -eq 'xs:string') {
+			'<v8:Type>xs:string</v8:Type><v8:StringQualifiers><v8:Length>10</v8:Length><v8:AllowedLength>Variable</v8:AllowedLength></v8:StringQualifiers>'
+		} else { "<v8:Type>$Type</v8:Type>" }
+		# У колонок табличной части значения заполнения нет: бизнес-процесс такое отвергает
+		$fill = if ($IsColumn) { '' } else { '<FillFromFillingValue>false</FillFromFillingValue><FillValue xsi:nil="true"/>' }
+		return "<Attribute uuid=`"$([guid]::NewGuid().ToString())`"><Properties><Name>$Name</Name><Synonym/><Comment/><Type>$typeXml</Type><PasswordMode>false</PasswordMode><Format/><EditFormat/><ToolTip/><MarkNegatives>false</MarkNegatives><Mask/><MultiLine>false</MultiLine><ExtendedEdit>false</ExtendedEdit><MinValue xsi:nil=`"true`"/><MaxValue xsi:nil=`"true`"/>$fill<FillChecking>DontCheck</FillChecking><ChoiceFoldersAndItems>Items</ChoiceFoldersAndItems><ChoiceParameterLinks/><ChoiceParameters/><QuickChoice>Auto</QuickChoice><CreateOnInput>Auto</CreateOnInput><ChoiceForm/><LinkByType/><ChoiceHistoryOnInput>Auto</ChoiceHistoryOnInput><Indexing>DontIndex</Indexing><FullTextSearch>Use</FullTextSearch><DataHistory>Use</DataHistory></Properties></Attribute>"
+	}
+
+	function Build-StubTabularSection([string]$Kind, [string]$Obj, [string]$Name, $Columns) {
+		$gt = ''
+		foreach ($c in @('TabularSection', 'TabularSectionRow')) {
+			$gt += "<xr:GeneratedType name=`"$Kind$c.$Obj.$Name`" category=`"$c`"><xr:TypeId>$([guid]::NewGuid().ToString())</xr:TypeId><xr:ValueId>$([guid]::NewGuid().ToString())</xr:ValueId></xr:GeneratedType>"
+		}
+		$cols = ''
+		foreach ($c in $Columns.Keys) { $cols += Build-StubAttribute $c $Columns[$c] $true }
+		return "<TabularSection uuid=`"$([guid]::NewGuid().ToString())`"><InternalInfo>$gt</InternalInfo><Properties><Name>$Name</Name><Synonym/><Comment/><ToolTip/><FillChecking>DontCheck</FillChecking></Properties><ChildObjects>$cols</ChildObjects></TabularSection>"
+	}
 
 	# --- 4c. Metadata object stubs ---
 	foreach ($metaType in $typeMap.Keys) {
@@ -1044,9 +1457,8 @@ $stdAttrs			<DataLockControlMode>Automatic</DataLockControlMode>
 			<CodeMask/>
 			<CodeLength>20</CodeLength>
 			<DescriptionLength>100</DescriptionLength>
-			<CodeSeries>WholeCatalog</CodeSeries>
+			<CodeSeries>WholeChartOfAccounts</CodeSeries>
 			<CheckUnique>false</CheckUnique>
-			<Autonumbering>true</Autonumbering>
 			<DefaultPresentation>AsDescription</DefaultPresentation>
 $stdAttrs			<Characteristics/>
 			<PredefinedDataUpdate>Auto</PredefinedDataUpdate>
@@ -1060,18 +1472,15 @@ $stdAttrs			<Characteristics/>
 			<DefaultObjectForm/>
 			<DefaultListForm/>
 			<DefaultChoiceForm/>
-			<DefaultFolderForm/>
-			<DefaultFolderChoiceForm/>
 			<AuxiliaryObjectForm/>
 			<AuxiliaryListForm/>
 			<AuxiliaryChoiceForm/>
-			<AuxiliaryFolderForm/>
-			<AuxiliaryFolderChoiceForm/>
 			<AutoOrderByCode>true</AutoOrderByCode>
 			<OrderLength>5</OrderLength>
 			<MaxExtDimensionCount>0</MaxExtDimensionCount>
 			<IncludeHelpInContents>false</IncludeHelpInContents>
 			<BasedOn/>
+			<ExtDimensionTypes/>
 			<DataLockFields/>
 			<DataLockControlMode>Automatic</DataLockControlMode>
 			<FullTextSearch>Use</FullTextSearch>
@@ -1168,9 +1577,6 @@ $stdAttrs			<Characteristics/>
 			<DescriptionLength>25</DescriptionLength>
 			<CodeType>String</CodeType>
 			<CodeAllowedLength>Variable</CodeAllowedLength>
-			<CodeSeries>WholeCatalog</CodeSeries>
-			<CheckUnique>false</CheckUnique>
-			<Autonumbering>true</Autonumbering>
 			<DefaultPresentation>AsDescription</DefaultPresentation>
 $stdAttrs			<Characteristics/>
 			<PredefinedDataUpdate>Auto</PredefinedDataUpdate>
@@ -1181,7 +1587,7 @@ $stdAttrs			<Characteristics/>
 			<SearchStringModeOnInputByString>Begin</SearchStringModeOnInputByString>
 			<FullTextSearchOnInputByString>DontUse</FullTextSearchOnInputByString>
 			<ChoiceDataGetModeOnInputByString>Directly</ChoiceDataGetModeOnInputByString>
-			<DependenceOnCalculationTypes>NotDepend</DependenceOnCalculationTypes>
+			<DependenceOnCalculationTypes>DontUse</DependenceOnCalculationTypes>
 			<BaseCalculationTypes/>
 			<ActionPeriodUse>false</ActionPeriodUse>
 			<DefaultObjectForm/>
@@ -1258,7 +1664,6 @@ $stdAttrs			<DefaultPresentation>AsDescription</DefaultPresentation>
 			<Synonym/>
 			<Comment/>
 			<UseStandardCommands>false</UseStandardCommands>
-			<Numerator/>
 			<NumberType>String</NumberType>
 			<NumberLength>11</NumberLength>
 			<NumberAllowedLength>Variable</NumberAllowedLength>
@@ -1266,7 +1671,7 @@ $stdAttrs			<DefaultPresentation>AsDescription</DefaultPresentation>
 			<CheckUnique>false</CheckUnique>
 			<Autonumbering>true</Autonumbering>
 $stdAttrs			<Characteristics/>
-			<Task/>
+			<Task>Task.$stubTaskName</Task>
 			<CreateTaskInPrivilegedMode>false</CreateTaskInPrivilegedMode>
 			<DefaultObjectForm/>
 			<DefaultListForm/>
@@ -1545,6 +1950,18 @@ $stdAttrs			<Characteristics/>
 			}
 			$childObjLine = "`r`n`t`t<ChildObjects>`r`n$($childParts -join "`r`n")`r`n`t`t</ChildObjects>"
 		}
+		$childKey = "$metaType.$objName"
+		if ($objectChildren.ContainsKey($childKey)) {
+			$ci = $objectChildren[$childKey]
+			if ($ci.hierarchical) { $propsXml = $propsXml.Replace('<Hierarchical>false<', '<Hierarchical>true<') }
+			if ($ci.owner) { $propsXml = $propsXml.Replace('<Owners/>', "<Owners><xr:Item xsi:type=`"xr:MDObjectRef`">Catalog.$($ci.owner)</xr:Item></Owners>") }
+			$childParts = @()
+			foreach ($a in $ci.attrs.Keys) { $childParts += Build-StubAttribute $a $ci.attrs[$a] $false }
+			foreach ($t in $ci.tabular.Keys) { $childParts += Build-StubTabularSection $metaType $objName $t $ci.tabular[$t] }
+			if ($childParts.Count -gt 0) {
+				$childObjLine = "`r`n`t`t<ChildObjects>`r`n$($childParts -join "`r`n")`r`n`t`t</ChildObjects>"
+			}
+		}
 		$objXml = @"
 <?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject $ns>
@@ -1579,6 +1996,165 @@ function ConvertFrom-PlatformBytes {
     }
 }
 
+function Initialize-PlatformProcess {
+    # Process.Start hands the child EVERY inheritable handle we hold, not only the pipes made
+    # for it, and PowerShell keeps copies of its own stdout among them. A process the platform
+    # leaves behind (crashpad_handler on 8.5) would then hold our caller's pipe open long after
+    # we exit, and the caller hangs. PlatformProcess starts the platform the way Python does:
+    # with an explicit list of the three handles it may inherit. Compiled once per run; if the
+    # compiler is unavailable, $false sends the caller back to Process.Start.
+    if ($null -ne $script:platformProcessReady) { return $script:platformProcessReady }
+    $script:platformProcessReady = $false
+    try {
+        Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using Microsoft.Win32.SafeHandles;
+
+public static class PlatformProcess {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO {
+        public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public bool bInheritHandle; }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref SECURITY_ATTRIBUTES sa, int size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetHandleInformation(IntPtr h, int mask, int flags);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UpdateProcThreadAttribute(IntPtr list, int flags, IntPtr attr, IntPtr value, IntPtr size, IntPtr prev, IntPtr retSize);
+    [DllImport("kernel32.dll")]
+    static extern void DeleteProcThreadAttributeList(IntPtr list);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcess(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, int flags, IntPtr env, string cwd, ref STARTUPINFOEX si, out PROCESS_INFORMATION pi);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern int WaitForSingleObject(IntPtr h, int ms);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetExitCodeProcess(IntPtr h, out int code);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr h);
+
+    const int HANDLE_FLAG_INHERIT = 1;
+    const int STARTF_USESTDHANDLES = 0x100;
+    const int EXTENDED_STARTUPINFO_PRESENT = 0x80000;
+    const int CREATE_NO_WINDOW = 0x8000000;
+    static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = (IntPtr)0x20002;
+
+    // Runs "exe" arguments with stdin at EOF and both output pipes captured. Waits for the
+    // process itself, then gives the readers drainMs to collect what is already buffered.
+    public static int Run(string exe, string arguments, int drainMs, out byte[] stdout, out byte[] stderr) {
+        var sa = new SECURITY_ATTRIBUTES();
+        sa.nLength = Marshal.SizeOf(sa);
+        sa.bInheritHandle = true;
+        IntPtr inR = IntPtr.Zero, inW = IntPtr.Zero, outR = IntPtr.Zero, outW = IntPtr.Zero, errR = IntPtr.Zero, errW = IntPtr.Zero;
+        IntPtr attrs = IntPtr.Zero, handles = IntPtr.Zero;
+        bool attrsReady = false, started = false;
+        var pi = new PROCESS_INFORMATION();
+        try {
+            if (!CreatePipe(out inR, out inW, ref sa, 0) || !CreatePipe(out outR, out outW, ref sa, 0)
+                || !CreatePipe(out errR, out errW, ref sa, 0)) throw new Win32Exception();
+            // Our ends of the pipes stay with us
+            SetHandleInformation(inW, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0);
+
+            var size = IntPtr.Zero;
+            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+            attrs = Marshal.AllocHGlobal(size);
+            if (!InitializeProcThreadAttributeList(attrs, 1, 0, ref size)) throw new Win32Exception();
+            attrsReady = true;
+            handles = Marshal.AllocHGlobal(3 * IntPtr.Size);
+            Marshal.WriteIntPtr(handles, 0, inR);
+            Marshal.WriteIntPtr(handles, IntPtr.Size, outW);
+            Marshal.WriteIntPtr(handles, 2 * IntPtr.Size, errW);
+            if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles,
+                (IntPtr)(3 * IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+
+            var si = new STARTUPINFOEX();
+            si.StartupInfo.cb = Marshal.SizeOf(si);
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput = inR;
+            si.StartupInfo.hStdOutput = outW;
+            si.StartupInfo.hStdError = errW;
+            si.lpAttributeList = attrs;
+            // Same command line as Process.Start builds: quoted program (left as is if already
+            // quoted), then the arguments
+            var program = exe.Length > 1 && exe[0] == '"' && exe[exe.Length - 1] == '"' ? exe : "\"" + exe + "\"";
+            var cmd = new StringBuilder(program + (string.IsNullOrEmpty(arguments) ? "" : " " + arguments));
+            if (!CreateProcess(null, cmd, IntPtr.Zero, IntPtr.Zero, true,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, IntPtr.Zero, null, ref si, out pi)) {
+                // System messages for a bad executable carry a %1 placeholder for its name
+                var e = new Win32Exception();
+                throw new Win32Exception(e.NativeErrorCode, e.Message.Replace("%1", exe));
+            }
+            started = true;
+        } finally {
+            // The child's ends are its own now; closing stdin's write end gives it EOF
+            foreach (var h in new[] { inR, outW, errW, inW }) if (h != IntPtr.Zero) CloseHandle(h);
+            if (!started) {
+                if (outR != IntPtr.Zero) CloseHandle(outR);
+                if (errR != IntPtr.Zero) CloseHandle(errR);
+            }
+            if (attrsReady) DeleteProcThreadAttributeList(attrs);
+            if (attrs != IntPtr.Zero) Marshal.FreeHGlobal(attrs);
+            if (handles != IntPtr.Zero) Marshal.FreeHGlobal(handles);
+        }
+        CloseHandle(pi.hThread);
+
+        var outBuf = new MemoryStream();
+        var errBuf = new MemoryStream();
+        var readers = new[] { Drain(outR, outBuf), Drain(errR, errBuf) };
+        int code;
+        try {
+            WaitForSingleObject(pi.hProcess, -1);
+            if (!GetExitCodeProcess(pi.hProcess, out code)) throw new Win32Exception();
+        } finally {
+            CloseHandle(pi.hProcess);
+        }
+        var deadline = DateTime.UtcNow.AddMilliseconds(drainMs);
+        foreach (var t in readers) t.Join(Math.Max(0, (int)(deadline - DateTime.UtcNow).TotalMilliseconds));
+        lock (outBuf) stdout = outBuf.ToArray();
+        lock (errBuf) stderr = errBuf.ToArray();
+        return code;
+    }
+
+    // Reads in chunks: a held pipe never reaches EOF, so whatever arrived must already be in buf
+    static Thread Drain(IntPtr handle, MemoryStream buf) {
+        var t = new Thread(() => {
+            try {
+                using (var fs = new FileStream(new SafeFileHandle(handle, true), FileAccess.Read, 4096, false)) {
+                    var chunk = new byte[65536];
+                    int n;
+                    while ((n = fs.Read(chunk, 0, chunk.Length)) > 0) lock (buf) buf.Write(chunk, 0, n);
+                }
+            } catch (Exception) { }   // anything escaping a background thread kills powershell
+        });
+        t.IsBackground = true;
+        t.Start();
+        return t;
+    }
+}
+'@
+        $script:platformProcessReady = $true
+    } catch { }
+    return $script:platformProcessReady
+}
+
 function Invoke-PlatformProcess {
     # Run the platform non-interactively and capture its console output. A closed stdin pipe
     # (EOF) makes an auth prompt fast-fail instead of hanging; capturing keeps the child's
@@ -1590,32 +2166,47 @@ function Invoke-PlatformProcess {
     #   1cv8     — -PreQuoted: the caller already put quotes inside the token (File="C:\a b"),
     #              which is where 1C's own parser expects them; quoting again breaks the value.
     param([string]$Exe, [string[]]$ProcArgs, [switch]$PreQuoted)
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $Exe
-    $psi.Arguments = if ($PreQuoted) {
+    $arguments = if ($PreQuoted) {
         $ProcArgs -join ' '
     } else {
         ($ProcArgs | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
     }
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $p = [System.Diagnostics.Process]::Start($psi)
-    $p.StandardInput.Close()
-    # stderr is drained in parallel: reading the streams one after another deadlocks
-    # as soon as the other one fills its pipe buffer.
-    $errMs = New-Object System.IO.MemoryStream
-    $errTask = $p.StandardError.BaseStream.CopyToAsync($errMs)
-    $outMs = New-Object System.IO.MemoryStream
-    $p.StandardOutput.BaseStream.CopyTo($outMs)
-    $errTask.Wait()
-    $p.WaitForExit()
-    $out = ConvertFrom-PlatformBytes $outMs.ToArray()
-    $err = ConvertFrom-PlatformBytes $errMs.ToArray()
+    # Wait for the process, not for EOF: a child it leaves behind (crashpad_handler on 8.5)
+    # inherits the pipes and keeps them open. By the time the platform exits, what it wrote
+    # is already buffered and drains at once; the 1 s only covers a held pipe.
+    if (Initialize-PlatformProcess) {
+        $outBytes = $null
+        $errBytes = $null
+        $code = [PlatformProcess]::Run($Exe, $arguments, 1000, [ref]$outBytes, [ref]$errBytes)
+    } else {
+        # No compiler: Process.Start leaks our handles to the platform, but we still never
+        # hang on a held pipe ourselves.
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Exe
+        $psi.Arguments = $arguments
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.Close()
+        # Both streams are drained in parallel: reading them one after another deadlocks
+        # as soon as the other one fills its pipe buffer.
+        $errMs = New-Object System.IO.MemoryStream
+        $errTask = $p.StandardError.BaseStream.CopyToAsync($errMs)
+        $outMs = New-Object System.IO.MemoryStream
+        $outTask = $p.StandardOutput.BaseStream.CopyToAsync($outMs)
+        $p.WaitForExit()
+        [void][System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 1000)
+        $outBytes = $outMs.ToArray()
+        $errBytes = $errMs.ToArray()
+        $code = $p.ExitCode
+    }
+    $out = ConvertFrom-PlatformBytes $outBytes
+    $err = ConvertFrom-PlatformBytes $errBytes
     if ($err) { $out += $err }
-    return [pscustomobject]@{ Output = $out; ExitCode = $p.ExitCode }
+    return [pscustomobject]@{ Output = $out; ExitCode = $code }
 }
 
 function Write-PlatformOutput {
@@ -1641,16 +2232,10 @@ $stubEngine = if ((Split-Path $V8Path -Leaf) -match '^ibcmd') { "ibcmd" } else {
 $argHints = @{ '/F' = '-TempBasePath'; '--db-path' = '-TempBasePath' }
 $extraArgs = @(Resolve-ExtraArgs $stubEngine $AdditionalV8Arguments $AdditionalIbcmdArguments $argHints)
 
-function Format-ArgToken {
-	# Start-Process takes these argument lists as one string, so quote each token that needs it.
-	param([string]$Token)
-	if ($Token -match '[\s"]') { return ' "' + ($Token -replace '"', '\"') + '"' }
-	return " $Token"
-}
-$extraArgString = -join ($extraArgs | ForEach-Object { Format-ArgToken $_ })
+$extraArgString = -join ($extraArgs | ForEach-Object { ' ' + (ConvertTo-QuotedIfNeeded $_) })
 if ($stubEngine -eq "ibcmd") {
 	Write-Host "Creating infobase (ibcmd): $TempBasePath"
-	$ibData = Join-Path $env:TEMP "stub_data_$(Get-Random)"
+	$ibData = Join-Path ([IO.Path]::GetTempPath()) "stub_data_$(Get-Random)"
 	New-Item -ItemType Directory -Path $ibData -Force | Out-Null
 	$ibArgs = @("infobase", "create", "--db-path=$TempBasePath", "--create-database")
 	if ($needCfg) { $ibArgs += "--import=$(Join-Path $TempBasePath 'cfg')", "--apply", "--force" }
@@ -1686,7 +2271,7 @@ if ($needCfg) {
 	$cfgDir = Join-Path $TempBasePath "cfg"
 	# LoadConfigFromFiles
 	Write-Host "Loading configuration from files..."
-	$loadLog = Join-Path $env:TEMP "stub_load_log.txt"
+	$loadLog = Join-Path $TempBasePath "load_log.txt"
 	$loadArgs = "DESIGNER /F`"$TempBasePath`" /LoadConfigFromFiles `"$cfgDir`" /Out `"$loadLog`" /DisableStartupDialogs" + $extraArgString
 	$proc = Invoke-PlatformProcess $V8Path @($loadArgs) -PreQuoted
 	if ($proc.ExitCode -ne 0) {
@@ -1698,7 +2283,7 @@ if ($needCfg) {
 
 	# UpdateDBCfg
 	Write-Host "Updating database configuration..."
-	$updateLog = Join-Path $env:TEMP "stub_update_log.txt"
+	$updateLog = Join-Path $TempBasePath "update_log.txt"
 	$updateArgs = "DESIGNER /F`"$TempBasePath`" /UpdateDBCfg /Out `"$updateLog`" /DisableStartupDialogs" + $extraArgString
 	$proc = Invoke-PlatformProcess $V8Path @($updateArgs) -PreQuoted
 	if ($proc.ExitCode -ne 0) {

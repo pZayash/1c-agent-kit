@@ -23,7 +23,7 @@
 | `SynchronousPlatformExtensionAndAddInCallUseMode` | `DontUse`, `Use`, `UseWithWarnings` |
 | `InterfaceCompatibilityMode` | `Version8_2`, `Version8_2EnableTaxi`, `Taxi`, `TaxiEnableVersion8_2`, `TaxiEnableVersion8_5`, `Version8_5EnableTaxi`, `Version8_5` |
 | `DatabaseTablespacesUseMode` | `DontUse`, `Use` |
-| `MainClientApplicationWindowMode` | `Normal`, `Fullscreen`, `Kiosk` |
+| `MainClientApplicationWindowMode` | `Normal`, `Workplace`, `FullscreenWorkplace`, `Kiosk`, `EmbeddedWorkplace` |
 
 ### Ref
 `DefaultLanguage` — значение вида `Language.Русский`
@@ -109,7 +109,7 @@ Batch: `"Catalog.Товары ;; Document.Заказ ;; Enum.ВидыОплат"
 | Ключ | Канонич. (XML) | Описание |
 |------|----------------|----------|
 | `template` | `WorkingAreaTemplate` | `OneColumn` / `TwoColumnsEqualWidth` (дефолт) / `TwoColumnsVariableWidth` |
-| `left` | `LeftColumn` | массив записей форм |
+| `left` | `LeftColumn` (при `OneColumn` — `Column`) | массив записей форм |
 | `right` | `RightColumn` | массив записей форм (запрещён при `OneColumn`) |
 
 Принимаются и короткие и канонич. ключи (XML-имена) — оба работают.

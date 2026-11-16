@@ -1,4 +1,4 @@
-﻿# epf-build v1.17 — Build external data processor or report (EPF/ERF) from XML sources
+﻿# epf-build v1.32 — Build external data processor or report (EPF/ERF) from XML sources
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 # NB: *nix-раскладку платформы (/opt/1cv8/<ver>/1cv8, без .exe) знает только .py-порт — PS на *nix не исполняется.
 <#
@@ -32,6 +32,9 @@
 
 .PARAMETER OutputFile
     Путь к выходному EPF/ERF-файлу
+
+.PARAMETER ConfigSrc
+    Каталог XML-выгрузки целевой конфигурации (общие модули для проверки исходников)
 
 .PARAMETER AdditionalV8Arguments
     Дополнительные аргументы запуска 1cv8.exe (например /UseHwLicenses+)
@@ -80,6 +83,10 @@ param(
     # Контексты синтаксической проверки. По умолчанию ThinClient,Server.
     [Parameter(Mandatory=$false)]
     [string]$Context,
+    # Выгрузка конфигурации, в которой будет работать обработка: её общие модули видны проверке.
+    # Без параметра берётся configSrc базы из .v8-project.json.
+    [Parameter(Mandatory=$false)]
+    [string]$ConfigSrc,
 
     [Parameter(Mandatory=$false)]
     [string[]]$AdditionalV8Arguments = @(),
@@ -88,13 +95,22 @@ param(
     [string[]]$AdditionalIbcmdArguments = @()
 )
 
+# Необработанная ошибка (напр. привязка параметра) внутри try/finally без catch завершала
+# скрипт с кодом 0 — ложный успех без запуска платформы. Любая такая ошибка — код 1.
+# py-порт: необработанное исключение и так даёт код 1.
+trap { Write-Host "Error: $($_.Exception.Message) ($($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber))" -ForegroundColor Red; exit 1 }
+
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Protect-Secrets {
     # Redact literal secret values from a display string (String.Replace is literal, not regex).
     param([string]$Text, [string[]]$Secrets)
-    foreach ($s in $Secrets) { if ($s) { $Text = $Text.Replace($s, '***') } }
+    # A secret with a quote reaches the command line doubled (ConvertTo-QuotedText), so both
+    # forms are redacted. Longest first: a shorter form replaced earlier could break a longer
+    # one that contains it and leave part of that secret visible. (No -Unique: it ignores case.)
+    $forms = @(foreach ($s in $Secrets) { if ($s) { $s; $s.Replace('"', '""') } }) | Sort-Object -Property Length -Descending
+    foreach ($f in $forms) { $Text = $Text.Replace($f, '***') }
     return $Text
 }
 
@@ -140,7 +156,7 @@ function Test-ArgKeyMatch {
 function Get-ProjectExtraArgs {
     # v8args / ibcmdargs from .v8-project.json — same upward walk as v8path.
     param([string]$Name)
-    $dir = (Get-Location).Path
+    $dir = (Get-Location).ProviderPath
     while ($dir) {
         $pf = Join-Path $dir ".v8-project.json"
         if (Test-Path $pf) {
@@ -155,6 +171,26 @@ function Get-ProjectExtraArgs {
         $dir = $parent
     }
     return @()
+}
+
+function ConvertTo-QuotedIfNeeded {
+    # Extra arguments come from the caller unquoted; the 1cv8 command line is joined
+    # verbatim, so a token with a space needs quotes of its own. Без кавычек платформа молча
+    # режет значение по пробелу (замер 2026-11-10: «/Out C:\a b\x.txt» пишет лог в «C:\a»).
+    param([string]$Token)
+    if ($Token -and ($Token.Contains(' ') -or $Token.Contains("`t")) -and -not $Token.Contains('"')) {
+        return '"' + $Token + '"'
+    }
+    return $Token
+}
+
+function ConvertTo-QuotedText {
+    # Free text (user, password, comment, label, list name) framed in quotes for the 1cv8
+    # command line. 1C reads a doubled quote inside the value as one; a lone quote ends the
+    # value, and the rest is dropped silently (замер 2026-11-14: «-comment» хранилища
+    # сохраняется до кавычки, exit 0). «\"» 1C не понимает.
+    param([string]$Value)
+    return '"' + $Value.Replace('"', '""') + '"'
 }
 
 function Assert-ExtraArgs {
@@ -250,6 +286,13 @@ function ConvertTo-CleanPath {
     if ($v.Length -ge 2 -and $v[0] -eq $v[-1] -and ($v[0] -eq '"' -or $v[0] -eq "'")) {
         $v = $v.Substring(1, $v.Length - 2).Trim()
     }
+    # «C:x» — от текущего каталога диска C, своего у каждого процесса: смысл не угадать, почти
+    # всегда это опечатка в «C:\x». Отказ с подсказкой, а не путь «где-то» у платформы.
+    if ($v -match '^[A-Za-z]:(?![\\/])') {
+        $drive = $v.Substring(0, 2)
+        Write-Host "Error: $ParamName is relative to the current directory of drive $drive ($Value) - use $drive\$($v.Substring(2)) or a path without a drive" -ForegroundColor Red
+        exit 1
+    }
     if ($v.Length -gt 3 -and ($v[-1] -eq '\' -or $v[-1] -eq '/')) { $v = $v.Substring(0, $v.Length - 1) }
     if ($v.Contains('"')) {
         Write-Host "Error: $ParamName contains a quote character: $Value" -ForegroundColor Red
@@ -260,8 +303,54 @@ function ConvertTo-CleanPath {
 
 $V8Path = ConvertTo-CleanPath $V8Path '-V8Path'
 $InfoBasePath = ConvertTo-CleanPath $InfoBasePath '-InfoBasePath'
+function Resolve-InfoBasePath {
+    # Относительный путь к базе — от корня проекта (каталог .v8-project.json, вверх от рабочего
+    # каталога), как configSrc; без файла проекта — от рабочего каталога. Платформе уходит только
+    # абсолютный: ibcmd считает относительный --db-path от каталога --data, а он у навыков временный.
+    # Абсолютный — только с диском и разделителем или UNC: «\x» .NET считает корневым, а платформа
+    # разрешила бы его от своего каталога; «\x» берёт диск базового каталога. «C:x» отклоняет ещё
+    # ConvertTo-CleanPath. Хвостовые разделители срезаются, но корень («C:\») остаётся корнем.
+    param([string]$Path)
+    if (-not $Path) { return $Path }
+    if ($Path -notmatch '^([A-Za-z]:[\\/]|[\\/]{2})') {
+        $cwd = (Get-Location).ProviderPath
+        $base = $cwd
+        $d = $cwd
+        for ($i = 0; $i -lt 20 -and $d; $i++) {
+            if (Test-Path -LiteralPath (Join-Path $d ".v8-project.json")) { $base = $d; break }
+            $parent = [System.IO.Path]::GetDirectoryName($d)
+            if ($parent -eq $d) { break }
+            $d = $parent
+        }
+        $joined = if ($Path -match '^[\\/]') { [System.IO.Path]::GetPathRoot($base).TrimEnd('\', '/') + $Path }
+            else { [System.IO.Path]::Combine($base, $Path) }
+        $Path = [System.IO.Path]::GetFullPath($joined)
+    }
+    while ($Path.Length -gt 3 -and ($Path[-1] -eq '\' -or $Path[-1] -eq '/')) { $Path = $Path.Substring(0, $Path.Length - 1) }
+    return $Path
+}
+$InfoBasePath = Resolve-InfoBasePath $InfoBasePath
+function Resolve-WorkPath {
+    # Путь файла или каталога — от рабочего каталога. Платформе уходит только абсолютный: ibcmd
+    # отбрасывает ведущие «..» относительного пути и читает или пишет не там.
+    # Абсолютный — как в Resolve-InfoBasePath: диск с разделителем или UNC.
+    param([string]$Path)
+    if (-not $Path) { return $Path }
+    if ($Path -notmatch '^([A-Za-z]:[\\/]|[\\/]{2})') {
+        $cwd = (Get-Location).ProviderPath
+        $joined = if ($Path -match '^[\\/]') { [System.IO.Path]::GetPathRoot($cwd).TrimEnd('\', '/') + $Path }
+            else { [System.IO.Path]::Combine($cwd, $Path) }
+        $Path = [System.IO.Path]::GetFullPath($joined)
+    }
+    while ($Path.Length -gt 3 -and ($Path[-1] -eq '\' -or $Path[-1] -eq '/')) { $Path = $Path.Substring(0, $Path.Length - 1) }
+    return $Path
+}
 $SourceFile = ConvertTo-CleanPath $SourceFile '-SourceFile'
+$SourceFile = Resolve-WorkPath $SourceFile
 $OutputFile = ConvertTo-CleanPath $OutputFile '-OutputFile'
+$OutputFile = Resolve-WorkPath $OutputFile
+$ConfigSrc = ConvertTo-CleanPath $ConfigSrc '-ConfigSrc'
+$ConfigSrc = Resolve-WorkPath $ConfigSrc
 
 function Assert-InfoBaseExists {
     # These skills work on a ready infobase. Saying so up front beats the platform's
@@ -276,9 +365,56 @@ function Assert-InfoBaseExists {
 
 Assert-InfoBaseExists $InfoBasePath
 
+# --- Запись базы в .v8-project.json ---
+# Модель не передаёт ни путь к платформе конкретной базы, ни реквизиты хранилища: скрипт
+# сопоставляет параметры соединения с записью в databases[] и берёт их оттуда. Тот же приём,
+# что в cf-edit.ps1 (сопоставление по configSrc).
+function Find-V8Project([string]$startDir) {
+	$d = $startDir
+	for ($i = 0; $i -lt 20 -and $d; $i++) {
+		$pj = Join-Path $d ".v8-project.json"
+		if (Test-Path $pj) { return $pj }
+		$parent = [System.IO.Path]::GetDirectoryName($d)
+		if ($parent -eq $d) { break }
+		$d = $parent
+	}
+	return $null
+}
+function Test-SamePath {
+    param([string]$A, [string]$B)
+    if (-not $A -or -not $B) { return $false }
+    try {
+        $na = [System.IO.Path]::GetFullPath($A).TrimEnd('\', '/')
+        $nb = [System.IO.Path]::GetFullPath($B).TrimEnd('\', '/')
+        return $na.Equals($nb, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch { return $false }
+}
+function Find-ProjectDatabase {
+    # Запись базы в реестре, соответствующая переданному соединению. $null, если не найдена.
+    $pf = Find-V8Project (Get-Location).ProviderPath
+    if (-not $pf) { return $null }
+    try { $proj = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    if (-not $proj.databases) { return $null }
+    foreach ($db in $proj.databases) {
+        if ($InfoBasePath -and $db.path) {
+            try { $dbPath = [System.IO.Path]::Combine((Split-Path $pf -Parent), $db.path) } catch { $dbPath = $null }
+            if ($dbPath -and (Test-SamePath $dbPath $InfoBasePath)) { return $db }
+        }
+        if ($InfoBaseServer -and $InfoBaseRef -and $db.server -and $db.ref) {
+            if ($db.server.Equals($InfoBaseServer, [System.StringComparison]::OrdinalIgnoreCase) -and
+                $db.ref.Equals($InfoBaseRef, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+        }
+    }
+    return $null
+}
+
 # --- Resolve V8Path ---
 function Find-ProjectV8Path {
-    $dir = (Get-Location).Path
+    # v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
+    # платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
+    $dbRec = Find-ProjectDatabase
+    if ($dbRec -and $dbRec.v8path) { return [string]$dbRec.v8path }
+    $dir = (Get-Location).ProviderPath
     while ($dir) {
         $pf = Join-Path $dir ".v8-project.json"
         if (Test-Path $pf) {
@@ -334,6 +470,165 @@ function ConvertFrom-PlatformBytes {
     }
 }
 
+function Initialize-PlatformProcess {
+    # Process.Start hands the child EVERY inheritable handle we hold, not only the pipes made
+    # for it, and PowerShell keeps copies of its own stdout among them. A process the platform
+    # leaves behind (crashpad_handler on 8.5) would then hold our caller's pipe open long after
+    # we exit, and the caller hangs. PlatformProcess starts the platform the way Python does:
+    # with an explicit list of the three handles it may inherit. Compiled once per run; if the
+    # compiler is unavailable, $false sends the caller back to Process.Start.
+    if ($null -ne $script:platformProcessReady) { return $script:platformProcessReady }
+    $script:platformProcessReady = $false
+    try {
+        Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using Microsoft.Win32.SafeHandles;
+
+public static class PlatformProcess {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO {
+        public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public bool bInheritHandle; }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref SECURITY_ATTRIBUTES sa, int size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetHandleInformation(IntPtr h, int mask, int flags);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UpdateProcThreadAttribute(IntPtr list, int flags, IntPtr attr, IntPtr value, IntPtr size, IntPtr prev, IntPtr retSize);
+    [DllImport("kernel32.dll")]
+    static extern void DeleteProcThreadAttributeList(IntPtr list);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcess(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, int flags, IntPtr env, string cwd, ref STARTUPINFOEX si, out PROCESS_INFORMATION pi);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern int WaitForSingleObject(IntPtr h, int ms);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetExitCodeProcess(IntPtr h, out int code);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr h);
+
+    const int HANDLE_FLAG_INHERIT = 1;
+    const int STARTF_USESTDHANDLES = 0x100;
+    const int EXTENDED_STARTUPINFO_PRESENT = 0x80000;
+    const int CREATE_NO_WINDOW = 0x8000000;
+    static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = (IntPtr)0x20002;
+
+    // Runs "exe" arguments with stdin at EOF and both output pipes captured. Waits for the
+    // process itself, then gives the readers drainMs to collect what is already buffered.
+    public static int Run(string exe, string arguments, int drainMs, out byte[] stdout, out byte[] stderr) {
+        var sa = new SECURITY_ATTRIBUTES();
+        sa.nLength = Marshal.SizeOf(sa);
+        sa.bInheritHandle = true;
+        IntPtr inR = IntPtr.Zero, inW = IntPtr.Zero, outR = IntPtr.Zero, outW = IntPtr.Zero, errR = IntPtr.Zero, errW = IntPtr.Zero;
+        IntPtr attrs = IntPtr.Zero, handles = IntPtr.Zero;
+        bool attrsReady = false, started = false;
+        var pi = new PROCESS_INFORMATION();
+        try {
+            if (!CreatePipe(out inR, out inW, ref sa, 0) || !CreatePipe(out outR, out outW, ref sa, 0)
+                || !CreatePipe(out errR, out errW, ref sa, 0)) throw new Win32Exception();
+            // Our ends of the pipes stay with us
+            SetHandleInformation(inW, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(outR, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(errR, HANDLE_FLAG_INHERIT, 0);
+
+            var size = IntPtr.Zero;
+            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+            attrs = Marshal.AllocHGlobal(size);
+            if (!InitializeProcThreadAttributeList(attrs, 1, 0, ref size)) throw new Win32Exception();
+            attrsReady = true;
+            handles = Marshal.AllocHGlobal(3 * IntPtr.Size);
+            Marshal.WriteIntPtr(handles, 0, inR);
+            Marshal.WriteIntPtr(handles, IntPtr.Size, outW);
+            Marshal.WriteIntPtr(handles, 2 * IntPtr.Size, errW);
+            if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles,
+                (IntPtr)(3 * IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+
+            var si = new STARTUPINFOEX();
+            si.StartupInfo.cb = Marshal.SizeOf(si);
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput = inR;
+            si.StartupInfo.hStdOutput = outW;
+            si.StartupInfo.hStdError = errW;
+            si.lpAttributeList = attrs;
+            // Same command line as Process.Start builds: quoted program (left as is if already
+            // quoted), then the arguments
+            var program = exe.Length > 1 && exe[0] == '"' && exe[exe.Length - 1] == '"' ? exe : "\"" + exe + "\"";
+            var cmd = new StringBuilder(program + (string.IsNullOrEmpty(arguments) ? "" : " " + arguments));
+            if (!CreateProcess(null, cmd, IntPtr.Zero, IntPtr.Zero, true,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, IntPtr.Zero, null, ref si, out pi)) {
+                // System messages for a bad executable carry a %1 placeholder for its name
+                var e = new Win32Exception();
+                throw new Win32Exception(e.NativeErrorCode, e.Message.Replace("%1", exe));
+            }
+            started = true;
+        } finally {
+            // The child's ends are its own now; closing stdin's write end gives it EOF
+            foreach (var h in new[] { inR, outW, errW, inW }) if (h != IntPtr.Zero) CloseHandle(h);
+            if (!started) {
+                if (outR != IntPtr.Zero) CloseHandle(outR);
+                if (errR != IntPtr.Zero) CloseHandle(errR);
+            }
+            if (attrsReady) DeleteProcThreadAttributeList(attrs);
+            if (attrs != IntPtr.Zero) Marshal.FreeHGlobal(attrs);
+            if (handles != IntPtr.Zero) Marshal.FreeHGlobal(handles);
+        }
+        CloseHandle(pi.hThread);
+
+        var outBuf = new MemoryStream();
+        var errBuf = new MemoryStream();
+        var readers = new[] { Drain(outR, outBuf), Drain(errR, errBuf) };
+        int code;
+        try {
+            WaitForSingleObject(pi.hProcess, -1);
+            if (!GetExitCodeProcess(pi.hProcess, out code)) throw new Win32Exception();
+        } finally {
+            CloseHandle(pi.hProcess);
+        }
+        var deadline = DateTime.UtcNow.AddMilliseconds(drainMs);
+        foreach (var t in readers) t.Join(Math.Max(0, (int)(deadline - DateTime.UtcNow).TotalMilliseconds));
+        lock (outBuf) stdout = outBuf.ToArray();
+        lock (errBuf) stderr = errBuf.ToArray();
+        return code;
+    }
+
+    // Reads in chunks: a held pipe never reaches EOF, so whatever arrived must already be in buf
+    static Thread Drain(IntPtr handle, MemoryStream buf) {
+        var t = new Thread(() => {
+            try {
+                using (var fs = new FileStream(new SafeFileHandle(handle, true), FileAccess.Read, 4096, false)) {
+                    var chunk = new byte[65536];
+                    int n;
+                    while ((n = fs.Read(chunk, 0, chunk.Length)) > 0) lock (buf) buf.Write(chunk, 0, n);
+                }
+            } catch (Exception) { }   // anything escaping a background thread kills powershell
+        });
+        t.IsBackground = true;
+        t.Start();
+        return t;
+    }
+}
+'@
+        $script:platformProcessReady = $true
+    } catch { }
+    return $script:platformProcessReady
+}
+
 function Invoke-PlatformProcess {
     # Run the platform non-interactively and capture its console output. A closed stdin pipe
     # (EOF) makes an auth prompt fast-fail instead of hanging; capturing keeps the child's
@@ -345,32 +640,47 @@ function Invoke-PlatformProcess {
     #   1cv8     — -PreQuoted: the caller already put quotes inside the token (File="C:\a b"),
     #              which is where 1C's own parser expects them; quoting again breaks the value.
     param([string]$Exe, [string[]]$ProcArgs, [switch]$PreQuoted)
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $Exe
-    $psi.Arguments = if ($PreQuoted) {
+    $arguments = if ($PreQuoted) {
         $ProcArgs -join ' '
     } else {
         ($ProcArgs | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
     }
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $p = [System.Diagnostics.Process]::Start($psi)
-    $p.StandardInput.Close()
-    # stderr is drained in parallel: reading the streams one after another deadlocks
-    # as soon as the other one fills its pipe buffer.
-    $errMs = New-Object System.IO.MemoryStream
-    $errTask = $p.StandardError.BaseStream.CopyToAsync($errMs)
-    $outMs = New-Object System.IO.MemoryStream
-    $p.StandardOutput.BaseStream.CopyTo($outMs)
-    $errTask.Wait()
-    $p.WaitForExit()
-    $out = ConvertFrom-PlatformBytes $outMs.ToArray()
-    $err = ConvertFrom-PlatformBytes $errMs.ToArray()
+    # Wait for the process, not for EOF: a child it leaves behind (crashpad_handler on 8.5)
+    # inherits the pipes and keeps them open. By the time the platform exits, what it wrote
+    # is already buffered and drains at once; the 1 s only covers a held pipe.
+    if (Initialize-PlatformProcess) {
+        $outBytes = $null
+        $errBytes = $null
+        $code = [PlatformProcess]::Run($Exe, $arguments, 1000, [ref]$outBytes, [ref]$errBytes)
+    } else {
+        # No compiler: Process.Start leaks our handles to the platform, but we still never
+        # hang on a held pipe ourselves.
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Exe
+        $psi.Arguments = $arguments
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.Close()
+        # Both streams are drained in parallel: reading them one after another deadlocks
+        # as soon as the other one fills its pipe buffer.
+        $errMs = New-Object System.IO.MemoryStream
+        $errTask = $p.StandardError.BaseStream.CopyToAsync($errMs)
+        $outMs = New-Object System.IO.MemoryStream
+        $outTask = $p.StandardOutput.BaseStream.CopyToAsync($outMs)
+        $p.WaitForExit()
+        [void][System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 1000)
+        $outBytes = $outMs.ToArray()
+        $errBytes = $errMs.ToArray()
+        $code = $p.ExitCode
+    }
+    $out = ConvertFrom-PlatformBytes $outBytes
+    $err = ConvertFrom-PlatformBytes $errBytes
     if ($err) { $out += $err }
-    return [pscustomobject]@{ Output = $out; ExitCode = $p.ExitCode }
+    return [pscustomobject]@{ Output = $out; ExitCode = $code }
 }
 
 function Write-PlatformOutput {
@@ -395,18 +705,6 @@ function Test-OutputNonEmpty {
     # Exit code 0 without it (broken/headless env) is a false success — reject it.
     param([string]$Path)
     return (Test-Path $Path -PathType Leaf) -and ((Get-Item $Path -ErrorAction SilentlyContinue).Length -gt 0)
-}
-
-function Find-V8Project([string]$startDir) {
-	$d = $startDir
-	for ($i = 0; $i -lt 20 -and $d; $i++) {
-		$pj = Join-Path $d ".v8-project.json"
-		if (Test-Path $pj) { return $pj }
-		$parent = [System.IO.Path]::GetDirectoryName($d)
-		if ($parent -eq $d) { break }
-		$d = $parent
-	}
-	return $null
 }
 
 # --- Проверка исходников платформой ---
@@ -449,6 +747,24 @@ function Resolve-SourcePath {
 	return $null
 }
 
+# «Переменная не определена (X)» при обращении X.… — чаще всего общий модуль конфигурации, которого
+# проверке не показали. Платформа печатает строку кода следующей строкой лога с меткой <<?>> перед X.
+# Подсказка одна на имя; сама ошибка остаётся ошибкой.
+function Get-UndefinedModuleHint {
+	param([string]$Line, [string]$CodeLine, $Hinted)
+	$m = [regex]::Match($Line, 'Переменная не определена \(([^)]+)\)')
+	if (-not $m.Success) { return $null }
+	$name = $m.Groups[1].Value
+	if (-not [regex]::IsMatch($CodeLine, '<<\?>>\s*' + [regex]::Escape($name) + '\s*\.')) { return $null }
+	if (-not $Hinted.Add($name)) { return $null }
+	if (-not $checkConfigSrc) { return "похоже на общий модуль конфигурации — выгрузка конфигурации проверке не передана" }
+	$cmDir = Join-Path $checkConfigSrc "CommonModules"
+	$inCfg = (Test-Path -LiteralPath $cmDir -PathType Container) -and
+		@(Get-ChildItem -LiteralPath $cmDir -Filter "*.xml" -File | Where-Object { $_.BaseName.Equals($name, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+	if ($inCfg) { return "общий модуль $name есть в configSrc, но недоступен в контексте проверки (см. «Проверка: …» в строке выше)" }
+	return "общего модуля $name нет в configSrc ($checkConfigSrc)"
+}
+
 # $true, если платформа нашла проблемы — вызывающий не собирает артефакт.
 function Invoke-SourceCheck {
 	param([string]$Exe, [string]$BasePath, [string[]]$Flags, [string]$SourceDir, [string[]]$ExtraArgs)
@@ -459,11 +775,11 @@ function Invoke-SourceCheck {
 		Write-Host "[note] source check skipped: 1cv8 not found at $v8" -ForegroundColor Yellow
 		return $false
 	}
-	$dir = Join-Path $env:TEMP "epf_check_$(Get-Random)"
+	$dir = Join-Path ([IO.Path]::GetTempPath()) "epf_check_$(Get-Random)"
 	New-Item -ItemType Directory -Path $dir -Force | Out-Null
 	try {
 		$outFile = Join-Path $dir "check_log.txt"
-		$a = @("DESIGNER", "/F", "`"$BasePath`"", "/CheckConfig") + $Flags + @("/Out", "`"$outFile`"", "/DisableStartupDialogs") + $ExtraArgs
+		$a = @("DESIGNER", "/F", "`"$BasePath`"", "/CheckConfig") + $Flags + @("/Out", "`"$outFile`"", "/DisableStartupDialogs") + @($ExtraArgs | ForEach-Object { ConvertTo-QuotedIfNeeded $_ })
 		Write-Host "Running: 1cv8.exe $($a -join ' ')"
 		$res = Invoke-PlatformProcess $v8 $a -PreQuoted
 		$lines = @()
@@ -476,14 +792,23 @@ function Invoke-SourceCheck {
 		Write-Host "Error: платформа нашла проблемы в исходниках — сборка отменена" -ForegroundColor Red
 		# Пустой лог при ненулевом коде — отказ не по находкам (база занята, нет лицензии); молчать нельзя.
 		if ($lines.Count -eq 0) { Write-Host "  платформа вернула код $($res.ExitCode) без сообщений" -ForegroundColor Red }
-		foreach ($l in $lines) {
+		$hinted = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+		for ($i = 0; $i -lt $lines.Count; $i++) {
+			$l = $lines[$i]
 			Write-Host "  $($l.TrimEnd())" -ForegroundColor Red
 			$srcPath = Resolve-SourcePath $l $SourceDir
 			if ($srcPath) { Write-Host "    -> $srcPath" -ForegroundColor Red }
+			# Подсказка — под строкой кода, которую платформа печатает следом за ошибкой.
+			$hint = if ($i -gt 0) { Get-UndefinedModuleHint $lines[$i - 1] $l $hinted } else { $null }
+			if ($hint) { Write-Host "    [hint] $hint" -ForegroundColor Yellow }
+		}
+		if ($hinted.Count -gt 0 -and -not $checkConfigSrc) {
+			Write-Host "[hint] Общие модули конфигурации проверке не видны: $(@($hinted) -join ', ')." -ForegroundColor Yellow
+			Write-Host "       Укажите -ConfigSrc (каталог выгрузки конфигурации) или базу с configSrc в .v8-project.json; либо соберите без проверки: -Checks off" -ForegroundColor Yellow
 		}
 		return $true
 	} finally {
-		if (Test-Path $dir) { Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue }
+		if ($dir -and (Test-Path $dir)) { Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue }
 	}
 }
 
@@ -502,7 +827,7 @@ function Get-SourceCheckList {
 		}
 		return $list
 	}
-	$pf = Find-V8Project (Get-Location).Path
+	$pf = Find-V8Project (Get-Location).ProviderPath
 	if ($pf) {
 		try {
 			$proj = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -533,6 +858,46 @@ elseif ($checkList.Count -gt 0 -and $checkList -notcontains 'modules') {
     exit 1
 }
 $sourceDir = Split-Path $SourceFile -Parent
+# Запросный список проверочная копия проверяет запросом-константой, а без базы запрос сверить не с чем
+$objectSrcDir = Join-Path $sourceDir ([IO.Path]::GetFileNameWithoutExtension($SourceFile))
+$manualQueryLists = @()
+if (Test-Path -LiteralPath $objectSrcDir -PathType Container) {
+    foreach ($ff in (Get-ChildItem -LiteralPath $objectSrcDir -Filter "Form.xml" -Recurse -File)) {
+        foreach ($m in [regex]::Matches([System.IO.File]::ReadAllText($ff.FullName, [System.Text.Encoding]::UTF8), '(?s)<Attribute name="([^"]+)"(?:(?!</Attribute>).)*?<ManualQuery>true</ManualQuery>')) { $manualQueryLists += $m.Groups[1].Value }
+    }
+}
+
+function Write-ManualQueryHint([string]$PlatformText) {
+    if (-not $autoCreatedBase -or $manualQueryLists.Count -eq 0 -or -not $PlatformText) { return }
+    $listError = $PlatformText -match 'Неверно указана главная таблица'
+    foreach ($n in $manualQueryLists) { if ($PlatformText.Contains("Неверный путь к данным: `"$n.")) { $listError = $true } }
+    if ($listError) { Write-Host "[note] A form with a manual-query dynamic list cannot be built without an infobase: specify the database" -ForegroundColor Yellow }
+}
+
+# Выгрузка целевой конфигурации для проверки: явный -ConfigSrc, иначе configSrc базы из реестра.
+# Без неё обращения к общим модулям конфигурации проверка считает неопределёнными переменными.
+function Resolve-ConfigSrc {
+    if ($ConfigSrc) {
+        if (-not (Test-Path -LiteralPath $ConfigSrc -PathType Container)) {
+            Write-Host "Error: -ConfigSrc not found: $ConfigSrc" -ForegroundColor Red
+            exit 1
+        }
+        return (Resolve-Path -LiteralPath $ConfigSrc).ProviderPath
+    }
+    $db = Find-ProjectDatabase
+    if (-not $db -or -not $db.configSrc) { return $null }
+    $p = [string]$db.configSrc
+    if (-not [System.IO.Path]::IsPathRooted($p)) {
+        $pf = Find-V8Project (Get-Location).ProviderPath
+        $p = Join-Path (Split-Path $pf -Parent) $p
+    }
+    if (-not (Test-Path -LiteralPath $p -PathType Container)) {
+        Write-Host "WARNING: configSrc базы не найден: $p — общие модули конфигурации проверке недоступны" -ForegroundColor Yellow
+        return $null
+    }
+    return $p
+}
+$checkConfigSrc = if ($checkList.Count -gt 0) { Resolve-ConfigSrc } else { $null }
 
 function New-StubBase {
     # Стаб запускает свои процессы платформы (CREATEINFOBASE, LoadConfigFromFiles, UpdateDBCfg) —
@@ -544,13 +909,19 @@ function New-StubBase {
     $q = { param($s) "'" + ($s -replace "'", "''") + "'" }
     $stubCmd = "& $(& $q $stubScript) -SourceDir $(& $q $sourceDir) -V8Path $(& $q $V8Path) -TempBasePath $(& $q $BasePath)"
     if ($Embed) { $stubCmd += " -EmbedSourceFile $(& $q $SourceFile)" }
+    if ($Embed -and $checkConfigSrc) { $stubCmd += " -ConfigSrc $(& $q $checkConfigSrc)" }
     if ($AdditionalV8Arguments.Count -gt 0) {
         $stubCmd += " -AdditionalV8Arguments " + (($AdditionalV8Arguments | ForEach-Object { & $q $_ }) -join ',')
     }
     if ($AdditionalIbcmdArguments.Count -gt 0) {
         $stubCmd += " -AdditionalIbcmdArguments " + (($AdditionalIbcmdArguments | ForEach-Object { & $q $_ }) -join ',')
     }
-    $p = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command `"$stubCmd`"" -NoNewWindow -Wait -PassThru
+    # Wait for the stub itself, not -Wait: that one waits for the whole process tree, and a
+    # child the platform leaves behind (crashpad_handler on 8.5) would hold us. Touching
+    # Handle keeps the exit code readable after the process is gone.
+    $p = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command `"$stubCmd`"" -NoNewWindow -PassThru
+    $null = $p.Handle
+    $p.WaitForExit()
     return $p.ExitCode
 }
 
@@ -559,7 +930,7 @@ $autoCreatedBase = $null
 $checkBase = $null
 $checkBasePath = $null
 if (-not $InfoBasePath -and (-not $InfoBaseServer -or -not $InfoBaseRef)) {
-    $autoBasePath = Join-Path $env:TEMP "epf_stub_db_$(Get-Random)"
+    $autoBasePath = Join-Path ([IO.Path]::GetTempPath()) "epf_stub_db_$(Get-Random)"
     Write-Host "No database specified. Creating temporary stub database..."
     if ((New-StubBase $autoBasePath -Embed:($checkList.Count -gt 0)) -ne 0) {
         # С внедрённой обработкой база падает прежде всего из-за самих исходников
@@ -578,7 +949,7 @@ if (-not $InfoBasePath -and (-not $InfoBaseServer -or -not $InfoBaseRef)) {
 } elseif ($checkList.Count -gt 0) {
     # Базу указали снаружи: класть проверяемую обработку в чужую конфигурацию нельзя, поэтому под
     # проверку поднимается своя временная база, а сборка идёт на указанной.
-    $checkBase = Join-Path $env:TEMP "epf_check_db_$(Get-Random)"
+    $checkBase = Join-Path ([IO.Path]::GetTempPath()) "epf_check_db_$(Get-Random)"
     Write-Host "Creating temporary database for the source check..."
     if ((New-StubBase $checkBase -Embed) -ne 0) {
         Write-Host "Error: платформа не приняла исходники при подготовке проверки — сборка отменена" -ForegroundColor Red
@@ -613,7 +984,7 @@ if ($outDir -and -not (Test-Path $outDir)) {
 }
 
 # --- Temp dir ---
-$tempDir = Join-Path $env:TEMP "epf_build_$(Get-Random)"
+$tempDir = Join-Path ([IO.Path]::GetTempPath()) "epf_build_$(Get-Random)"
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
 try {
@@ -639,6 +1010,7 @@ try {
             Write-Host "Error building external data processor/report (code: $exitCode)" -ForegroundColor Red
         }
         Write-PlatformOutput $output
+        if ($exitCode -ne 0) { Write-ManualQueryHint ($output -join "`n") }
         exit $exitCode
     }
 
@@ -652,8 +1024,8 @@ try {
         $arguments += "/F", "`"$InfoBasePath`""
     }
 
-    if ($UserName) { $arguments += "/N`"$UserName`"" }
-    if ($Password) { $arguments += "/P`"$Password`"" }
+    if ($UserName) { $arguments += ("/N" + (ConvertTo-QuotedText $UserName)) }
+    if ($Password) { $arguments += ("/P" + (ConvertTo-QuotedText $Password)) }
 
     $arguments += "/LoadExternalDataProcessorOrReportFromFiles", "`"$SourceFile`"", "`"$OutputFile`""
 
@@ -661,7 +1033,7 @@ try {
     $outFile = Join-Path $tempDir "build_log.txt"
     $arguments += "/Out", "`"$outFile`""
     $arguments += "/DisableStartupDialogs"
-    $arguments += $extraArgs
+    $arguments += @($extraArgs | ForEach-Object { ConvertTo-QuotedIfNeeded $_ })
 
     # --- Execute ---
     Write-Host "Running: 1cv8.exe $(Protect-Secrets ((Format-ArgsForDisplay $arguments $engine) -join ' ') @($Password, $UserName))"
@@ -689,11 +1061,12 @@ try {
         }
     }
     Write-PlatformOutput $__v8.Output
+    if ($exitCode -ne 0) { Write-ManualQueryHint "$logContent`n$($__v8.Output -join "`n")" }
 
     exit $exitCode
 
 } finally {
-    if (Test-Path $tempDir) {
+    if ($tempDir -and (Test-Path $tempDir)) {
         Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($autoCreatedBase -and (Test-Path $autoCreatedBase)) {

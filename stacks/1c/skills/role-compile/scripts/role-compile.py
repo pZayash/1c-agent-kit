@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# role-compile v1.36 — Compile 1C role from JSON
+# role-compile v1.51 — Compile 1C role from JSON
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 import argparse
 import json
@@ -10,6 +10,42 @@ import uuid
 import xml.etree.ElementTree as ET
 
 from lxml import etree
+
+# --- Булевы флаги DSL: прощающий ввод ---
+# Флаг строкой или числом — однозначная ошибка автора JSON: true|да|истина|1 / false|нет|ложь|0 (без
+# регистра; 1/0 — и числом) приводим к bool молча. Иное — ошибка без записи: молчаливое «false» из «yes»
+# хуже отказа. Без общего читателя порты расходились: PS (-eq) принимал "false", py (is) — нет.
+def to_dsl_bool(value, key, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        t = value.strip().lower()
+        if t in ('true', 'да', 'истина', '1'):
+            return True
+        if t in ('false', 'нет', 'ложь', '0'):
+            return False
+    elif isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    shown = f'"{value}"' if isinstance(value, str) else f"{value}"
+    print(f"[ERROR] {key} = {shown}: expected true or false", file=sys.stderr)
+    sys.exit(1)
+
+
+def get_dsl_bool(obj, keys, default):
+    """Первый найденный ключ из keys (синонимы, без регистра) → to_dsl_bool; не dict / нет ключа → default."""
+    if not isinstance(obj, dict):
+        return default
+    for k in keys:
+        for actual in obj:
+            if isinstance(actual, str) and actual.lower() == k.lower():
+                return to_dsl_bool(obj[actual], k, default)
+    return default
+
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -182,15 +218,19 @@ def _sg_find_v8project(start_dir):
 
 def _sg_get_edit_mode(cfg_dir):
     try:
-        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(cfg_dir)
+        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(os.path.abspath(cfg_dir))
         if not pj:
             return "deny"
         proj = json.loads(open(pj, encoding="utf-8-sig").read())
-        cfg_full = os.path.normcase(os.path.abspath(cfg_dir)).rstrip("\\/")
+        # configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+        # проекта база не сопоставляется и берётся правило проекта. Пути — настоящие (realpath):
+        # на macOS /var — ссылка на /private/var, и getcwd с путём аргумента иначе не совпадут.
+        proj_dir = os.path.dirname(pj)
+        cfg_full = os.path.normcase(os.path.realpath(cfg_dir)).rstrip("\\/")
         for db in proj.get("databases", []):
             src = db.get("configSrc")
             if src:
-                src_full = os.path.normcase(os.path.abspath(src)).rstrip("\\/")
+                src_full = os.path.normcase(os.path.realpath(os.path.join(proj_dir, src))).rstrip("\\/")
                 if cfg_full == src_full or cfg_full.startswith(src_full + os.sep):
                     if db.get("editingAllowedCheck"):
                         return db["editingAllowedCheck"]
@@ -529,7 +569,9 @@ KNOWN_RIGHTS = {
     ],
     "AccumulationRegister": ["Read", "Update", "View", "Edit", "TotalsControl"],
     "AccountingRegister": ["Read", "Update", "View", "Edit", "TotalsControl"],
-    "CalculationRegister": ["Read", "View"],
+    "CalculationRegister": [
+        "Read", "Update", "View", "Edit",
+    ],
     "Constant": [
         "Read", "Update", "View", "Edit",
         "ReadDataHistory", "ViewDataHistory", "UpdateDataHistory",
@@ -537,14 +579,13 @@ KNOWN_RIGHTS = {
         "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
     ],
     "ChartOfAccounts": [
-        "Read", "Insert", "Update", "Delete", "View", "Edit", "InputByString",
-        "InteractiveInsert", "InteractiveSetDeletionMark", "InteractiveClearDeletionMark",
-        "InteractiveDelete",
-        "InteractiveDeletePredefinedData", "InteractiveSetDeletionMarkPredefinedData",
-        "InteractiveClearDeletionMarkPredefinedData", "InteractiveDeleteMarkedPredefinedData",
-        "ReadDataHistory", "ReadDataHistoryOfMissingData",
-        "UpdateDataHistory", "UpdateDataHistoryOfMissingData",
-        "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment",
+        "Read", "Insert", "Update", "Delete",
+        "View", "Edit", "InputByString", "InteractiveInsert",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDelete", "InteractiveDeleteMarked",
+        "InteractiveDeletePredefinedData", "InteractiveSetDeletionMarkPredefinedData", "InteractiveClearDeletionMarkPredefinedData", "InteractiveDeleteMarkedPredefinedData",
+        "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData",
+        "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment",
+        "SwitchToDataHistoryVersion",
     ],
     "ChartOfCharacteristicTypes": [
         "Read", "Insert", "Update", "Delete", "View", "Edit", "InputByString",
@@ -558,11 +599,13 @@ KNOWN_RIGHTS = {
         "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
     ],
     "ChartOfCalculationTypes": [
-        "Read", "Insert", "Update", "Delete", "View", "Edit", "InputByString",
-        "InteractiveInsert", "InteractiveSetDeletionMark", "InteractiveClearDeletionMark",
-        "InteractiveDelete",
-        "InteractiveDeletePredefinedData", "InteractiveSetDeletionMarkPredefinedData",
-        "InteractiveClearDeletionMarkPredefinedData", "InteractiveDeleteMarkedPredefinedData",
+        "Read", "Insert", "Update", "Delete",
+        "View", "Edit", "InputByString", "InteractiveInsert",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDelete", "InteractiveDeleteMarked",
+        "InteractiveDeletePredefinedData", "InteractiveSetDeletionMarkPredefinedData", "InteractiveClearDeletionMarkPredefinedData", "InteractiveDeleteMarkedPredefinedData",
+        "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData",
+        "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment",
+        "SwitchToDataHistoryVersion",
     ],
     "ExchangePlan": [
         "Read", "Insert", "Update", "Delete", "View", "Edit", "InputByString",
@@ -574,14 +617,20 @@ KNOWN_RIGHTS = {
         "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
     ],
     "BusinessProcess": [
-        "Read", "Insert", "Update", "Delete", "View", "Edit", "InputByString",
-        "Start", "InteractiveInsert", "InteractiveSetDeletionMark", "InteractiveClearDeletionMark",
-        "InteractiveDelete", "InteractiveActivate", "InteractiveStart",
+        "Read", "Insert", "Update", "Delete",
+        "View", "Edit", "InputByString", "Start",
+        "InteractiveInsert", "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDelete",
+        "InteractiveDeleteMarked", "InteractiveActivate", "InteractiveStart", "ReadDataHistory",
+        "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData", "UpdateDataHistorySettings",
+        "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
     ],
     "Task": [
-        "Read", "Insert", "Update", "Delete", "View", "Edit", "InputByString",
-        "Execute", "InteractiveInsert", "InteractiveSetDeletionMark", "InteractiveClearDeletionMark",
-        "InteractiveDelete", "InteractiveActivate", "InteractiveExecute",
+        "Read", "Insert", "Update", "Delete",
+        "View", "Edit", "InputByString", "Execute",
+        "InteractiveInsert", "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDelete",
+        "InteractiveDeleteMarked", "InteractiveActivate", "InteractiveExecute", "ReadDataHistory",
+        "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData", "UpdateDataHistorySettings",
+        "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
     ],
     "DataProcessor": ["Use", "View"],
     "Report": ["Use", "View"],
@@ -762,6 +811,396 @@ def get_nested_rights(object_type, kind):
     return NESTED_KIND_RIGHTS.get(kind)
 
 
+# --- Зависимости прав (замерено на платформе) ---
+# Платформа при загрузке сама доводит набор до замыкания: выдал Edit — получил ещё
+# Read, Update и View. Пишем замыкание сразу, иначе файл и база расходятся.
+# Таблица общая для типов; исключения — там, где у типа своя механика (обработка и отчёт
+# держатся на Use, план счетов не тянет Read под историю данных).
+RIGHT_DEPS = {
+    "Delete": ["Read"],
+    "Edit": ["Read", "Update", "View"],
+    "EditDataHistoryVersionComment": ["Read", "ReadDataHistory", "UpdateDataHistoryVersionComment", "View"],
+    "Execute": ["Read", "Update"],
+    "InputByString": ["Read", "View"],
+    "Insert": ["Read"],
+    "InteractiveActivate": ["Read", "Update"],
+    "InteractiveChangeOfPosted": ["Edit", "Read", "Update", "View"],
+    "InteractiveClearDeletionMark": ["Edit", "Read", "Update", "View"],
+    "InteractiveClearDeletionMarkPredefinedData": ["Edit", "InteractiveClearDeletionMark", "Read", "Update", "View"],
+    "InteractiveDelete": ["Delete", "Edit", "Read", "Update", "View"],
+    "InteractiveDeleteMarked": ["Delete", "Edit", "Read", "Update", "View"],
+    "InteractiveDeleteMarkedPredefinedData": ["Delete", "Edit", "InteractiveDeleteMarked", "Read", "Update", "View"],
+    "InteractiveDeletePredefinedData": ["Delete", "Edit", "InteractiveDelete", "Read", "Update", "View"],
+    "InteractiveExecute": ["Execute", "Read", "Update"],
+    "InteractiveInsert": ["Edit", "Insert", "Read", "Update", "View"],
+    "InteractivePosting": ["Edit", "Posting", "Read", "Update", "View"],
+    "InteractivePostingRegular": ["Edit", "InteractivePosting", "Posting", "Read", "Update", "View"],
+    "InteractiveSetDeletionMark": ["Edit", "Read", "Update", "View"],
+    "InteractiveSetDeletionMarkPredefinedData": ["Edit", "InteractiveSetDeletionMark", "Read", "Update", "View"],
+    "InteractiveStart": ["Read", "Start", "Update"],
+    "InteractiveUndoPosting": ["Edit", "Read", "UndoPosting", "Update", "View"],
+    "Posting": ["Read", "Update"],
+    "ReadDataHistory": ["Read"],
+    "ReadDataHistoryOfMissingData": ["Read", "ReadDataHistory"],
+    "Start": ["Read", "Update"],
+    "SwitchToDataHistoryVersion": ["Read", "View"],
+    "UndoPosting": ["Read", "Update"],
+    "Update": ["Read"],
+    "UpdateDataHistory": ["Read", "ReadDataHistory"],
+    "UpdateDataHistoryOfMissingData": ["Read", "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory"],
+    "UpdateDataHistoryVersionComment": ["Read", "ReadDataHistory"],
+    "View": ["Read"],
+    "ViewDataHistory": ["Read", "ReadDataHistory", "View"],
+}
+
+RIGHT_DEPS_BY_TYPE = {
+    "ChartOfAccounts": {
+        "ReadDataHistory": [],
+        "ReadDataHistoryOfMissingData": ["ReadDataHistory"],
+        "UpdateDataHistory": ["ReadDataHistory"],
+        "UpdateDataHistoryOfMissingData": ["ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory"],
+        "UpdateDataHistoryVersionComment": ["ReadDataHistory"],
+    },
+    "DataProcessor": {
+        "View": ["Use"],
+    },
+    "InformationRegister": {
+        "UpdateDataHistoryOfMissingData": ["Read", "ReadDataHistory", "UpdateDataHistory"],
+    },
+    "Report": {
+        "View": ["Use"],
+    },
+}
+
+CONFIGURATION_LEGACY_DEPS = ["AnalyticsSystemClient", "MainWindowModeEmbeddedWorkplace", "MainWindowModeFullscreenWorkplace", "MainWindowModeKiosk", "MainWindowModeNormal", "MainWindowModeWorkplace"]
+
+# Права конфигурации: до формата 2.19 платформа взводила весь блок режимов окна вместе с
+# любым правом, с 2.19 (8.3.26) перестала. Сами права допустимы и там, и там.
+CONFIGURATION_LEGACY_RANK = 218
+
+
+# Платформа хранит только то, что ОТЛИЧАЕТСЯ от значения по умолчанию для роли: при
+# setForNewObjects=false на верхнем уровне живут разрешения, при true — запреты; у реквизитных
+# вложенных объектов ту же роль играет setForAttributesByDefault. Совпавшее с умолчанием
+# платформа выбрасывает при первой же загрузке, поэтому не пишем его и сами.
+ATTRIBUTE_KINDS = [
+    "Attribute", "StandardAttribute", "TabularSection", "StandardTabularSection",
+    "Dimension", "Resource", "AccountingFlag", "ExtDimensionAccountingFlag", "AddressingAttribute",
+]
+
+
+def get_default_right_value(object_name, set_for_new_objects, set_for_attributes_by_default):
+    parts = object_name.split('.')
+    if len(parts) < 3:
+        return set_for_new_objects
+    # Внешние источники данных под это правило не проверялись — трогаем только то, что замерено.
+    if parts[0] == 'ExternalDataSource':
+        return "false"
+    kind = parts[-2]
+    if kind in ATTRIBUTE_KINDS:
+        return set_for_attributes_by_default
+    # Команды, подсистемы, операции сервисов флагами роли не управляются — там живут разрешения.
+    return "false"
+
+
+def close_rights_dependencies(object_name, rights, format_rank):
+    """Замыкание набора прав объекта. Возвращает (итоговые права, что дописано)."""
+    parts = object_name.split('.')
+    nested = len(parts) >= 3
+    object_type = parts[0]
+    allowed = (get_nested_rights(object_type, get_nested_kind(object_name)) if nested
+               else KNOWN_RIGHTS.get(object_type))
+    if not allowed:
+        return rights, []
+    have = {}
+    for r in rights:
+        have.setdefault(r['Name'], r)
+    by_type = RIGHT_DEPS_BY_TYPE.get(object_type, {})
+    added = []
+    # Вперёд — только от РАЗРЕШЁННЫХ прав: платформа замыкает выданное, а не запрещённое.
+    queue = [n for n in have if have[n]['Value'] == 'true']
+    while queue:
+        name = queue.pop(0)
+        need = by_type[name] if name in by_type else RIGHT_DEPS.get(name)
+        if not need:
+            continue
+        for dep in need:
+            if dep not in allowed:
+                continue
+            if dep in have:
+                # Разрешение перебивает запрет — так поступает и платформа при загрузке.
+                if have[dep]['Value'] != 'true':
+                    have[dep]['Value'] = 'true'
+                    added.append(dep)
+                    queue.append(dep)
+                continue
+            have[dep] = {'Name': dep, 'Value': 'true', 'Condition': None}
+            added.append(dep)
+            queue.append(dep)
+    # Назад — от ЗАПРЕТОВ: право, которому запрещённое нужно, платформа запрещает следом.
+    deny_queue = [n for n in have if have[n]['Value'] != 'true']
+    while deny_queue:
+        name = deny_queue.pop(0)
+        for candidate in allowed:
+            if candidate == name or candidate in have:
+                continue
+            need = by_type[candidate] if candidate in by_type else RIGHT_DEPS.get(candidate)
+            if not need or name not in need:
+                continue
+            have[candidate] = {'Name': candidate, 'Value': 'false', 'Condition': None}
+            added.append(candidate)
+            deny_queue.append(candidate)
+    if object_type == 'Configuration' and format_rank <= CONFIGURATION_LEGACY_RANK and have:
+        for dep in CONFIGURATION_LEGACY_DEPS:
+            if dep in have:
+                continue
+            have[dep] = {'Name': dep, 'Value': 'true', 'Condition': None}
+            added.append(dep)
+    return list(have.values()), added
+
+
+# --- Канонический порядок прав и узлов (замерено на платформе) ---
+# Платформа нормализует порядок <right> внутри <object> и порядок самих <object>:
+# права идут в фиксированном для типа порядке, узлы — по uuid объекта метаданных.
+# Пишем сразу так же, иначе первая же выгрузка из Конфигуратора даст диф на ровном месте.
+RIGHT_ORDER = {
+    "AccountingRegister": ["Read", "Update", "View", "Edit", "TotalsControl"],
+    "AccumulationRegister": ["Read", "Update", "View", "Edit", "TotalsControl"],
+    "BusinessProcess": [
+        "Read", "Insert", "Update", "Delete",
+        "View", "InteractiveInsert", "Edit", "InteractiveDelete",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDeleteMarked", "InputByString",
+        "InteractiveActivate", "Start", "InteractiveStart", "ReadDataHistory",
+        "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData", "UpdateDataHistorySettings",
+        "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
+    ],
+    "CalculationRegister": ["Read", "Update", "View", "Edit"],
+    "Catalog": [
+        "Read", "Insert", "Update", "Delete",
+        "View", "InteractiveInsert", "Edit", "InteractiveDelete",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDeleteMarked", "InputByString",
+        "InteractiveDeletePredefinedData", "InteractiveSetDeletionMarkPredefinedData", "InteractiveClearDeletionMarkPredefinedData", "InteractiveDeleteMarkedPredefinedData",
+        "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData",
+        "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment",
+        "SwitchToDataHistoryVersion",
+    ],
+    "ChartOfAccounts": [
+        "Read", "Insert", "Update", "Delete",
+        "View", "InteractiveInsert", "Edit", "InteractiveDelete",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDeleteMarked", "InputByString",
+        "InteractiveDeletePredefinedData", "InteractiveSetDeletionMarkPredefinedData", "InteractiveClearDeletionMarkPredefinedData", "InteractiveDeleteMarkedPredefinedData",
+        "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData",
+        "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment",
+        "SwitchToDataHistoryVersion",
+    ],
+    "ChartOfCalculationTypes": [
+        "Read", "Insert", "Update", "Delete",
+        "View", "InteractiveInsert", "Edit", "InteractiveDelete",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDeleteMarked", "InputByString",
+        "InteractiveDeletePredefinedData", "InteractiveSetDeletionMarkPredefinedData", "InteractiveClearDeletionMarkPredefinedData", "InteractiveDeleteMarkedPredefinedData",
+        "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData",
+        "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment",
+        "SwitchToDataHistoryVersion",
+    ],
+    "ChartOfCharacteristicTypes": [
+        "Read", "Insert", "Update", "Delete",
+        "View", "InteractiveInsert", "Edit", "InteractiveDelete",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDeleteMarked", "InputByString",
+        "InteractiveDeletePredefinedData", "InteractiveSetDeletionMarkPredefinedData", "InteractiveClearDeletionMarkPredefinedData", "InteractiveDeleteMarkedPredefinedData",
+        "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData",
+        "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment",
+        "SwitchToDataHistoryVersion",
+    ],
+    "CommonAttribute": ["View", "Edit"],
+    "CommonCommand": ["View"],
+    "CommonForm": ["View"],
+    "Configuration": [
+        "Administration", "DataAdministration", "UpdateDataBaseConfiguration", "ExclusiveMode",
+        "ActiveUsers", "EventLog", "ThinClient", "WebClient",
+        "MobileClient", "ThickClient", "ExternalConnection", "Automation",
+        "TechnicalSpecialistMode", "CollaborationSystemInfoBaseRegistration", "MainWindowModeNormal", "MainWindowModeWorkplace",
+        "MainWindowModeEmbeddedWorkplace", "MainWindowModeFullscreenWorkplace", "MainWindowModeKiosk", "AnalyticsSystemClient",
+        "SaveUserData", "ConfigurationExtensionsAdministration", "InteractiveOpenExtDataProcessors", "InteractiveOpenExtReports",
+        "Output",
+    ],
+    "Constant": [
+        "Read", "Update", "View", "Edit",
+        "ReadDataHistory", "UpdateDataHistory", "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment",
+        "ViewDataHistory", "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
+    ],
+    "DataProcessor": ["Use", "View"],
+    "Document": [
+        "Read", "Insert", "Update", "Delete",
+        "Posting", "UndoPosting", "View", "InteractiveInsert",
+        "Edit", "InteractiveDelete", "InteractiveSetDeletionMark", "InteractiveClearDeletionMark",
+        "InteractiveDeleteMarked", "InteractivePosting", "InteractivePostingRegular", "InteractiveUndoPosting",
+        "InteractiveChangeOfPosted", "InputByString", "ReadDataHistory", "ReadDataHistoryOfMissingData",
+        "UpdateDataHistory", "UpdateDataHistoryOfMissingData", "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment",
+        "ViewDataHistory", "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
+    ],
+    "DocumentJournal": ["Read", "View"],
+    "ExchangePlan": [
+        "Read", "Insert", "Update", "Delete",
+        "View", "InteractiveInsert", "Edit", "InteractiveDelete",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDeleteMarked", "InputByString",
+        "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData",
+        "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment",
+        "SwitchToDataHistoryVersion",
+    ],
+    "FilterCriterion": ["View"],
+    "HTTPService": ["Use"],
+    "InformationRegister": [
+        "Read", "Update", "View", "Edit",
+        "TotalsControl", "ReadDataHistory", "ReadDataHistoryOfMissingData", "UpdateDataHistory",
+        "UpdateDataHistoryOfMissingData", "UpdateDataHistorySettings", "UpdateDataHistoryVersionComment", "ViewDataHistory",
+        "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
+    ],
+    "IntegrationService": ["Use"],
+    "Report": ["Use", "View"],
+    "Sequence": ["Read", "Update"],
+    "SessionParameter": ["Get", "Set"],
+    "Subsystem": ["View"],
+    "Task": [
+        "Read", "Insert", "Update", "Delete",
+        "View", "InteractiveInsert", "Edit", "InteractiveDelete",
+        "InteractiveSetDeletionMark", "InteractiveClearDeletionMark", "InteractiveDeleteMarked", "InputByString",
+        "InteractiveActivate", "Execute", "InteractiveExecute", "ReadDataHistory",
+        "ReadDataHistoryOfMissingData", "UpdateDataHistory", "UpdateDataHistoryOfMissingData", "UpdateDataHistorySettings",
+        "UpdateDataHistoryVersionComment", "ViewDataHistory", "EditDataHistoryVersionComment", "SwitchToDataHistoryVersion",
+    ],
+    "WebService": ["Use"],
+}
+
+NESTED_RIGHT_ORDER = {
+    "AccountingFlag": ["View", "Edit"],
+    "AddressingAttribute": ["View", "Edit"],
+    "Attribute": ["View", "Edit"],
+    "Command": ["View"],
+    "Dimension": ["View", "Edit"],
+    "ExtDimensionAccountingFlag": ["View", "Edit"],
+    "IntegrationServiceChannel": ["Use"],
+    "Method": ["Use"],
+    "Operation": ["Use"],
+    "Recalculation": ["Read", "Update"],
+    "Resource": ["View", "Edit"],
+    "StandardAttribute": ["View", "Edit"],
+    "StandardTabularSection": ["View", "Edit"],
+    "Subsystem": ["View"],
+    "TabularSection": ["View", "Edit"],
+}
+
+# Каталоги объектов метаданных — нужны, чтобы прочитать uuid и расставить <object>.
+TYPE_DIRS = {
+    "Catalog": "Catalogs", "Document": "Documents", "DocumentJournal": "DocumentJournals",
+    "Sequence": "Sequences", "Constant": "Constants", "Report": "Reports",
+    "DataProcessor": "DataProcessors", "InformationRegister": "InformationRegisters",
+    "AccumulationRegister": "AccumulationRegisters", "AccountingRegister": "AccountingRegisters",
+    "CalculationRegister": "CalculationRegisters", "ChartOfAccounts": "ChartsOfAccounts",
+    "ChartOfCharacteristicTypes": "ChartsOfCharacteristicTypes",
+    "ChartOfCalculationTypes": "ChartsOfCalculationTypes", "ExchangePlan": "ExchangePlans",
+    "BusinessProcess": "BusinessProcesses", "Task": "Tasks", "Subsystem": "Subsystems",
+    "CommonForm": "CommonForms", "CommonCommand": "CommonCommands",
+    "CommonAttribute": "CommonAttributes", "FilterCriterion": "FilterCriteria",
+    "SessionParameter": "SessionParameters", "WebService": "WebServices",
+    "HTTPService": "HTTPServices", "IntegrationService": "IntegrationServices",
+    "ExternalDataSource": "ExternalDataSources",
+}
+
+
+def sort_rights_canonical(object_name, rights):
+    """Порядок прав объекта: известные — по таблице, незнакомые — следом, в порядке ввода."""
+    parts = object_name.split('.')
+    order = NESTED_RIGHT_ORDER.get(parts[-2]) if len(parts) >= 3 else RIGHT_ORDER.get(parts[0])
+    if not order:
+        return rights
+    by_name = {}
+    for r in rights:
+        by_name.setdefault(r['Name'], r)
+    sorted_rights = []
+    for name in order:
+        if name in by_name:
+            sorted_rights.append(by_name.pop(name))
+    for r in rights:
+        if r['Name'] in by_name:
+            sorted_rights.append(by_name.pop(r['Name']))
+    return sorted_rights
+
+
+# У стандартных реквизитов и стандартных табличных частей uuid в выгрузке нет: они системные.
+# Отсутствие uuid для них — норма, а не потерянный объект.
+def is_standard_kind(object_name):
+    parts = object_name.split('.')
+    if len(parts) < 3:
+        return False
+    return parts[-2].startswith("Standard")
+
+
+# uuid объекта прав: у верхнего уровня — из файла объекта, у вложенного — спуском по дереву.
+# Искать регуляркой по всему файлу нельзя: реквизит шапки и реквизит табличной части часто
+# называются одинаково, и поиск нашёл бы первый попавшийся. Дочерние подсистемы лежат
+# отдельными файлами, поэтому для них спуск идёт по каталогам.
+# У стандартных реквизитов uuid в выгрузке нет вовсе — для них возвращаем None молча.
+def get_rights_object_uuid(object_name, config_root):
+    parts = object_name.split('.')
+    if parts[0] == 'Configuration':
+        cfg_path = os.path.join(config_root, 'Configuration.xml')
+        if not os.path.isfile(cfg_path):
+            return None
+        with open(cfg_path, 'r', encoding='utf-8-sig') as f:
+            m = re.search(r'<Configuration uuid="([0-9a-fA-F-]+)"', f.read())
+        return m.group(1) if m else None
+    directory = TYPE_DIRS.get(parts[0])
+    if not directory or len(parts) < 2:
+        return None
+    # Подсистемы вложены каталогами: Subsystems/Родитель/Subsystems/Ребёнок.xml
+    owner_path = os.path.join(config_root, directory, parts[1] + '.xml')
+    i = 2
+    while len(parts) > i + 1 and parts[i] == 'Subsystem':
+        owner_path = os.path.join(os.path.splitext(owner_path)[0], 'Subsystems', parts[i + 1] + '.xml')
+        i += 2
+    if not os.path.isfile(owner_path):
+        return None
+    try:
+        tree = etree.parse(owner_path)
+    except Exception:
+        return None
+    md = '{http://v8.1c.ru/8.3/MDClasses}'
+    node = tree.getroot()[0] if len(tree.getroot()) else None
+    if node is None:
+        return None
+    # Оставшиеся пары «вид, имя» ищем строго внутри текущего узла.
+    while i + 1 < len(parts):
+        kind, name = parts[i], parts[i + 1]
+        child = None
+        for candidate in node.findall(f'{md}ChildObjects/{md}{kind}'):
+            props = candidate.find(f'{md}Properties/{md}Name')
+            if props is not None and (props.text or '') == name:
+                child = candidate
+                break
+        if child is None:
+            return None
+        node = child
+        i += 2
+    return node.get('uuid')
+
+
+def sort_objects_by_uuid(objects, config_root):
+    """Порядок узлов: по uuid объекта; неразрешённые — в конец, в порядке ввода."""
+    known, unknown = [], []
+    for o in objects:
+        uuid_value = get_rights_object_uuid(o['Name'], config_root)
+        if uuid_value:
+            known.append((uuid_value, o))
+        else:
+            if not is_standard_kind(o['Name']):
+                print(f"[role-compile] {o['Name']}: объект не найден в выгрузке, uuid неизвестен — "
+                      f"узел записан в конец (платформа переставит его при первой выгрузке)",
+                      file=sys.stderr)
+            unknown.append(o)
+    known.sort(key=lambda pair: pair[0])
+    return [o for _, o in known] + unknown
+
+
 # Отказ копится, а не печатается сразу: роль пишется целиком, поэтому единственный
 # безопасный момент отказа — до первой записи, и показать надо все причины сразу.
 VALIDATION_ERRORS = []
@@ -839,6 +1278,31 @@ def validate_right_name(object_name, right_name):
         return False
 
     return True
+
+
+# "@путь" в значении условия — текст берётся из файла: условия RLS типовых занимают десятки
+# строк с кавычками, и внутри JSON-строки это источник ошибок экранирования. Относительный
+# путь ищется рядом с JSON-описанием роли, затем в текущем каталоге.
+def resolve_text_from_file(val, base_dir):
+    if not val.startswith("@"):
+        return val
+    file_path = val[1:]
+    if os.path.isabs(file_path):
+        candidates = [file_path]
+    else:
+        candidates = [
+            os.path.join(base_dir, file_path),
+            os.path.join(os.getcwd(), file_path),
+        ]
+    for c in candidates:
+        if os.path.exists(c):
+            with open(c, 'r', encoding='utf-8-sig') as f:
+                return f.read().rstrip()
+    print(f"Файл значения не найден: {file_path} (искали: {', '.join(candidates)})", file=sys.stderr)
+    sys.exit(1)
+
+
+TEXT_BASE_DIR = os.getcwd()
 
 
 MD_NS = 'http://v8.1c.ru/8.3/MDClasses'
@@ -1030,7 +1494,7 @@ def parse_object_entry(entry):
             for p_name, p_value in entry['rights'].items():
                 r_name = translate_right_name(p_name)
                 validate_right_name(obj_name, r_name)
-                bool_val = 'true' if p_value is True or str(p_value) == 'True' else 'false'
+                bool_val = 'true' if to_dsl_bool(p_value, p_name, False) else 'false'
                 if r_name not in rights_map:
                     rights_order.append(r_name)
                 rights_map[r_name] = {'Value': bool_val, 'Condition': None}
@@ -1040,7 +1504,7 @@ def parse_object_entry(entry):
         for p_name, p_value in entry['rls'].items():
             rls_right = translate_right_name(p_name)
             if rls_right in rights_map:
-                rights_map[rls_right]['Condition'] = str(p_value)
+                rights_map[rls_right]['Condition'] = resolve_text_from_file(str(p_value), TEXT_BASE_DIR)
             else:
                 print(f"WARNING: {obj_name}: RLS for '{rls_right}' but this right is not in the rights list", file=sys.stderr)
 
@@ -1074,11 +1538,12 @@ def get_new_object_position(cfg_dir):
             return "end"
         proj = json.loads(open(pj, encoding="utf-8-sig").read())
         proj_dir = os.path.dirname(pj)
-        cfg_full = os.path.normcase(os.path.abspath(cfg_dir or ".")).rstrip("\\/")
+        # Пути — настоящие (realpath): на macOS /var — ссылка на /private/var
+        cfg_full = os.path.normcase(os.path.realpath(cfg_dir or ".")).rstrip("\\/")
         for db in proj.get("databases", []):
             src = db.get("configSrc")
             if src and db.get("newObjectPosition"):
-                src_full = os.path.normcase(os.path.abspath(os.path.join(proj_dir, src))).rstrip("\\/")
+                src_full = os.path.normcase(os.path.realpath(os.path.join(proj_dir, src))).rstrip("\\/")
                 if cfg_full == src_full or cfg_full.startswith(src_full + os.sep):
                     return "byName" if str(db["newObjectPosition"]).lower() == "byname" else "end"
         if str(proj.get("newObjectPosition") or "").lower() == "byname":
@@ -1288,6 +1753,10 @@ def main():
     format_version = detect_format_version(out_dir_resolved)
 
     # --- 2. Parse all object entries ---
+    # Относительный путь @файла ищем сначала рядом с JSON-описанием роли.
+    global TEXT_BASE_DIR
+    TEXT_BASE_DIR = os.path.dirname(os.path.abspath(args.JsonPath))
+
     parsed_objects = []
     seen_object_names = set()
     if defn.get('objects'):
@@ -1363,6 +1832,35 @@ def main():
     lines.append(f'\t<setForAttributesByDefault>{sfab}</setForAttributesByDefault>')
     lines.append(f'\t<independentRightsOfChildObjects>{irco}</independentRightsOfChildObjects>')
 
+    # Замыкание зависимостей: платформа при загрузке всё равно доведёт набор до полного,
+    # и файл разошёлся бы с базой. Дописанное показываем — права выдаются не молча.
+    closure_notes = []
+    for o in parsed_objects:
+        o['Rights'], added = close_rights_dependencies(o['Name'], o['Rights'], format_rank(format_version))
+        if added:
+            closure_notes.append(f"     {o['Name']}: по зависимости добавлено — {', '.join(added)}")
+
+    # Порядок как у платформы: узлы по uuid объекта, права — по канону типа. Иначе первая же
+    # выгрузка из Конфигуратора переставит их и даст диф, которого никто не делал.
+    parsed_objects = sort_objects_by_uuid(parsed_objects, out_dir_resolved)
+    for o in parsed_objects:
+        o['Rights'] = sort_rights_canonical(o['Name'], o['Rights'])
+
+    # Записи, равные умолчанию роли, платформа не хранит — отбрасываем их сами и говорим об этом.
+    dropped_by_default = []
+    for obj in parsed_objects:
+        default_value = get_default_right_value(obj['Name'], sfno, sfab)
+        kept = []
+        for right in obj['Rights']:
+            # Право с ограничением отличается от умолчания самим ограничением — его платформа хранит,
+            # и выбросить его значило бы молча потерять написанное условие.
+            if right['Value'] == default_value and not right['Condition']:
+                dropped_by_default.append(f"{obj['Name']}.{right['Name']}")
+                continue
+            kept.append(right)
+        obj['Rights'] = kept
+    parsed_objects = [o for o in parsed_objects if o['Rights']]
+
     # Object blocks
     total_rights = 0
     for obj in parsed_objects:
@@ -1386,7 +1884,7 @@ def main():
         for tpl in defn['templates']:
             lines.append('\t<restrictionTemplate>')
             lines.append(f'\t\t<name>{esc_xml_text(str(tpl["name"]))}</name>')
-            lines.append(f'\t\t<condition>{esc_xml_text(str(tpl["condition"]))}</condition>')
+            lines.append(f'\t\t<condition>{esc_xml_text(resolve_text_from_file(str(tpl["condition"]), TEXT_BASE_DIR))}</condition>')
             lines.append('\t</restrictionTemplate>')
             template_count += 1
 
@@ -1432,6 +1930,13 @@ def main():
     print(f"     Metadata: {metadata_path}")
     print(f"     Rights:   {rights_path}")
     print(f"     Objects: {len(parsed_objects)}, Rights: {total_rights}, Templates: {template_count}")
+    if dropped_by_default:
+        print("[role-compile] Не записаны права, совпадающие с умолчанием роли "
+              f"(платформа их не хранит): {', '.join(dropped_by_default)}", file=sys.stderr)
+        print("  Запрет хранится у реквизитов и табличных частей (они наследуют права объекта) "
+              "либо в роли с setForNewObjects=true; выдача прав — наоборот.", file=sys.stderr)
+    for note in closure_notes:
+        print(note)
     if reg_result == 'added':
         print(f"     Configuration.xml: <Role>{role_name}</Role> added to ChildObjects")
     elif reg_result == 'already':

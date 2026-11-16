@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# stub-db-create v1.10 — Create temp 1C infobase with metadata stubs for EPF/ERF build
+# stub-db-create v1.23 — Create temp 1C infobase with metadata stubs for EPF/ERF build
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 
 import argparse
+import hashlib
 import io
+import json
 import os
 import shutil
 import random
@@ -11,6 +13,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 
 
@@ -20,6 +24,51 @@ IBCMD_NOUSER_HINT = (
     "call may block instead of failing. If it does not return promptly, abort and "
     "re-run with -UserName and -Password.\n"
 )
+
+
+def run_platform_process(cmd):
+    """Run the platform with stdin closed (EOF) and capture its output.
+
+    Waits for the process, not for EOF on its pipes: a process the platform leaves behind
+    (crashpad_handler on 8.5) inherits them and keeps them open. By the time the platform
+    exits, what it wrote is already buffered; the reader threads get a second to drain it."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p.stdin.close()
+    chunks = {p.stdout: [], p.stderr: []}
+
+    def drain(stream):
+        # Chunked reads: read() returns only at EOF, and a held pipe never gives one
+        while True:
+            data = os.read(stream.fileno(), 65536)
+            if not data:
+                break
+            chunks[stream].append(data)
+
+    readers = [threading.Thread(target=drain, args=(s,), daemon=True) for s in (p.stdout, p.stderr)]
+    for t in readers:
+        t.start()
+    try:
+        while True:
+            try:
+                returncode = p.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                pass   # short waits: on Windows an endless one doesn't see Ctrl+C until the child exits
+    except BaseException:
+        # Like subprocess.run: an interrupt must not leave the platform running, holding the
+        # infobase lock and the license
+        p.kill()
+        p.wait()
+        raise
+    deadline = time.monotonic() + 1
+    for t in readers:
+        t.join(max(0, deadline - time.monotonic()))
+    result = subprocess.CompletedProcess(cmd, returncode, b"".join(chunks[p.stdout]), b"".join(chunks[p.stderr]))
+    # A pipe still held by a leftover process stays with its blocked reader
+    for t, stream in zip(readers, (p.stdout, p.stderr)):
+        if not t.is_alive():
+            stream.close()
+    return result
 
 
 def decode_platform_bytes(data):
@@ -44,10 +93,17 @@ def clean_path(value, param=""):
     v = value.strip()
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
         v = v[1:-1].strip()
+    # «C:x» — от текущего каталога диска C, своего у каждого процесса: смысл не угадать, почти
+    # всегда это опечатка в «C:\x». Отказ с подсказкой, а не путь «где-то» у платформы.
+    if os.name == "nt" and re.match(r"^[A-Za-z]:(?![\\/])", v):
+        drive = v[:2]
+        print(f"Error: {param or 'path'} is relative to the current directory of drive {drive} ({value})"
+              f" - use {drive}\\{v[2:]} or a path without a drive")
+        sys.exit(1)
     if len(v) > 3 and v[-1] in "\\/":
         v = v[:-1]
     if '"' in v:
-        print(f"Error: {param or 'path'} contains a quote character: {value}", file=sys.stderr)
+        print(f"Error: {param or 'path'} contains a quote character: {value}")
         sys.exit(1)
     return v
 
@@ -91,7 +147,7 @@ def run_v8(v8path, arguments):
                                                      # часть синтаксиса строки соединения,
                                                      # и с ними на POSIX всё работает
         cmd = [v8path] + [strip_framing_quotes(a) for a in arguments]
-    r = subprocess.run(cmd, input=b"", capture_output=True)
+    r = run_platform_process(cmd)
     r.stdout = decode_platform_bytes(r.stdout)
     r.stderr = decode_platform_bytes(r.stderr)
     return r
@@ -114,14 +170,14 @@ def print_platform_output(result):
 def run_ibcmd(cmd, has_username=False, warn_no_user=True):
     """Run an ibcmd command non-interactively.
 
-    input="" closes stdin (EOF) so ibcmd's auth prompt fast-fails instead of hanging.
+    The closed stdin (EOF) makes ibcmd's auth prompt fast-fail instead of hanging.
     On Windows without -UserName ibcmd reads the console directly and may still block —
     that residual case is flagged via IBCMD_NOUSER_HINT (model-facing).
     """
     if warn_no_user and os.name == "nt" and not has_username:
         sys.stderr.write(IBCMD_NOUSER_HINT)
         sys.stderr.flush()
-    r = subprocess.run(cmd, input=b"", capture_output=True)
+    r = run_platform_process(cmd)
     r.stdout = decode_platform_bytes(r.stdout)
     r.stderr = decode_platform_bytes(r.stderr)
     return r
@@ -180,6 +236,9 @@ def project_extra_args(name):
                     data = json.load(f)
                 v = data.get(name)
                 if v:
+                    # Строка вместо массива — один аргумент, как у PS (@($x)), а не список символов
+                    if not isinstance(v, list):
+                        v = [v]
                     return [str(x) for x in v]
             except Exception:
                 pass
@@ -498,6 +557,315 @@ def scan_register_columns(source_dir):
     return register_columns
 
 
+STD_ATTR_RU = {
+    'Ref': '\u0421\u0441\u044b\u043b\u043a\u0430', 'DeletionMark': '\u041f\u043e\u043c\u0435\u0442\u043a\u0430\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u044f', 'Code': '\u041a\u043e\u0434', 'Description': '\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435',
+    'IsFolder': '\u042d\u0442\u043e\u0413\u0440\u0443\u043f\u043f\u0430', 'Predefined': '\u041f\u0440\u0435\u0434\u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u043d\u044b\u0439', 'PredefinedDataName': '\u0418\u043c\u044f\u041f\u0440\u0435\u0434\u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u043d\u044b\u0445\u0414\u0430\u043d\u043d\u044b\u0445',
+    'Parent': '\u0420\u043e\u0434\u0438\u0442\u0435\u043b\u044c', 'Owner': '\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446', 'Number': '\u041d\u043e\u043c\u0435\u0440', 'Date': '\u0414\u0430\u0442\u0430', 'Posted': '\u041f\u0440\u043e\u0432\u0435\u0434\u0435\u043d',
+    'Order': '\u041f\u043e\u0440\u044f\u0434\u043e\u043a', 'Type': '\u0412\u0438\u0434', 'OffBalance': '\u0417\u0430\u0431\u0430\u043b\u0430\u043d\u0441\u043e\u0432\u044b\u0439', 'ValueType': '\u0422\u0438\u043f\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f',
+    'ThisNode': '\u042d\u0442\u043e\u0442\u0423\u0437\u0435\u043b', 'SentNo': '\u041d\u043e\u043c\u0435\u0440\u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043d\u043e\u0433\u043e', 'ReceivedNo': '\u041d\u043e\u043c\u0435\u0440\u041f\u0440\u0438\u043d\u044f\u0442\u043e\u0433\u043e',
+    'Started': '\u0421\u0442\u0430\u0440\u0442\u043e\u0432\u0430\u043d', 'Completed': '\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d', 'HeadTask': '\u0412\u0435\u0434\u0443\u0449\u0430\u044f\u0417\u0430\u0434\u0430\u0447\u0430', 'Executed': '\u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0430',
+    'RoutePoint': '\u0422\u043e\u0447\u043a\u0430\u041c\u0430\u0440\u0448\u0440\u0443\u0442\u0430', 'BusinessProcess': '\u0411\u0438\u0437\u043d\u0435\u0441\u041f\u0440\u043e\u0446\u0435\u0441\u0441', 'ActionPeriodIsBasic': '\u041f\u0435\u0440\u0438\u043e\u0434\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044f\u0411\u0430\u0437\u043e\u0432\u044b\u0439',
+}
+STD_TABULAR_BY_TYPE = {
+    'ChartOfAccounts': ['ExtDimensionTypes', '\u0412\u0438\u0434\u044b\u0421\u0443\u0431\u043a\u043e\u043d\u0442\u043e'],
+    'ChartOfCalculationTypes': ['BaseCalculationTypes', 'LeadingCalculationTypes', 'DisplacingCalculationTypes',
+                                '\u0411\u0430\u0437\u043e\u0432\u044b\u0435\u0412\u0438\u0434\u044b\u0420\u0430\u0441\u0447\u0435\u0442\u0430', '\u0412\u0435\u0434\u0443\u0449\u0438\u0435\u0412\u0438\u0434\u044b\u0420\u0430\u0441\u0447\u0435\u0442\u0430', '\u0412\u044b\u0442\u0435\u0441\u043d\u044f\u044e\u0449\u0438\u0435\u0412\u0438\u0434\u044b\u0420\u0430\u0441\u0447\u0435\u0442\u0430'],
+}
+FORM_PATH_KINDS = 'Catalog|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|ExchangePlan|BusinessProcess|Task'
+STUB_TASK_NAME = '\u0417\u0430\u0433\u043b\u0443\u0448\u043a\u0430\u0417\u0430\u0434\u0430\u0447\u0438'
+
+
+class PathNode:
+    """Узел дерева путей формы; имена 1С регистронезависимы, сохраняется первое написание."""
+    def __init__(self):
+        self.children = {}
+        self.names = {}
+        self.is_tabular = False
+
+    def child(self, name):
+        key = name.casefold()
+        if key not in self.children:
+            self.children[key] = PathNode()
+            self.names[key] = name
+        return self.children[key]
+
+
+STD_REG_COLS = ('LineNumber', 'Period', 'Recorder', 'Active', 'RecordType')
+
+
+def config_type_keys(type_texts):
+    keys = []
+    for tx in type_texts:
+        m = re.fullmatch(r'(?:cfg:|d\dp1:)(%s)(?:Object|Ref)\.(\w+)' % FORM_PATH_KINDS, tx or '')
+        if m:
+            keys.append(f'{m.group(1)}.{m.group(2)}')
+    return keys
+
+
+def scan_own_members(source_dir):
+    """Реквизиты самой обработки/отчёта ссылочного типа: {имя объекта: {"Реквизит"|"ТЧ.Колонка": ключи}}."""
+    import xml.etree.ElementTree as ET
+    m_ns = '{http://v8.1c.ru/8.3/MDClasses}'
+    v8_ns = '{http://v8.1c.ru/8.1/data/core}'
+    result = {}
+
+    def member_keys(el):
+        return config_type_keys([t.text for t in el.findall(f'{m_ns}Properties/{m_ns}Type/{v8_ns}Type')])
+
+    for dirpath, _, filenames in os.walk(source_dir):
+        for fn in filenames:
+            if not fn.lower().endswith('.xml') or fn == 'Form.xml':
+                continue
+            try:
+                with open(os.path.join(dirpath, fn), 'r', encoding='utf-8-sig') as fh:
+                    content = fh.read()
+                if not re.search(r'<(ExternalDataProcessor|ExternalReport)[ >]', content):
+                    continue
+                own = list(ET.fromstring(content))[0]
+            except Exception:
+                continue
+            members = {}
+            for a in own.findall(f'{m_ns}ChildObjects/{m_ns}Attribute'):
+                keys = member_keys(a)
+                if keys:
+                    members[a.findtext(f'{m_ns}Properties/{m_ns}Name')] = keys
+            for ts_el in own.findall(f'{m_ns}ChildObjects/{m_ns}TabularSection'):
+                ts_name = ts_el.findtext(f'{m_ns}Properties/{m_ns}Name')
+                for a in ts_el.findall(f'{m_ns}ChildObjects/{m_ns}Attribute'):
+                    keys = member_keys(a)
+                    if keys:
+                        members[f"{ts_name}.{a.findtext(f'{m_ns}Properties/{m_ns}Name')}"] = keys
+            result[own.findtext(f'{m_ns}Properties/{m_ns}Name')] = members
+    return result
+
+
+def scan_object_paths(source_dir, type_map, register_columns):
+    """Реквизиты объектов, на которые ссылаются пути формы: платформа сверяет DataPath с метаданными.
+    Возвращает {"Вид.Имя": PathNode}."""
+    import xml.etree.ElementTree as ET
+    f_ns = '{http://v8.1c.ru/8.3/xcf/logform}'
+    v8_ns = '{http://v8.1c.ru/8.1/data/core}'
+    path_re = re.compile(r'<(?:\w+:)?\w*DataPath>([^<]+)<')
+    table_re = re.compile(r'(%s)\.(\w+)' % FORM_PATH_KINDS)
+    register_re = re.compile(r'(InformationRegister|AccumulationRegister|AccountingRegister|CalculationRegister)\.(\w+)')
+    own_members = scan_own_members(source_dir)
+    object_paths = {}
+
+    for dirpath, _, filenames in os.walk(source_dir):
+        for fn in filenames:
+            if fn != 'Form.xml':
+                continue
+            try:
+                with open(os.path.join(dirpath, fn), 'r', encoding='utf-8-sig') as fh:
+                    content = fh.read()
+                if '<Attributes>' not in content:
+                    continue
+                root = ET.fromstring(content)
+            except Exception:
+                continue
+
+            # Начало пути (без учёта регистра) -> куда ведёт: объект или регистр
+            roots = {}
+
+            def add_root(prefix, key, register=False):
+                roots.setdefault(prefix.casefold(), []).append({'key': key, 'register': register})
+
+            attrs_node = root.find(f'{f_ns}Attributes')
+            for attr_node in (attrs_node if attrs_node is not None else []):
+                if attr_node.tag != f'{f_ns}Attribute':
+                    continue
+                attr_name = attr_node.get('name', '')
+                type_texts = [t.text for t in attr_node.findall(f'{f_ns}Type/{v8_ns}Type')]
+                for k in config_type_keys(type_texts):
+                    add_root(attr_name, k)
+                for tx in type_texts:
+                    m = re.search(r'(?:External)?(?:DataProcessor|Report)Object\.(\w+)$', tx or '')
+                    if m and m.group(1) in own_members:
+                        for mn, keys in own_members[m.group(1)].items():
+                            for k in keys:
+                                add_root(f'{attr_name}.{mn}', k)
+                for col in attr_node.findall(f'{f_ns}Columns/{f_ns}Column'):
+                    for k in config_type_keys([t.text for t in col.findall(f'{f_ns}Type/{v8_ns}Type')]):
+                        add_root(f"{attr_name}.{col.get('name', '')}", k)
+                # Основная таблица динамического списка должна существовать, поля списка — её реквизиты
+                mt = attr_node.find(f'{f_ns}Settings/{f_ns}MainTable')
+                if mt is not None:
+                    m = table_re.fullmatch(mt.text or '')
+                    rm = register_re.fullmatch(mt.text or '')
+                    if m:
+                        k = f'{m.group(1)}.{m.group(2)}'
+                        add_root(attr_name, k)
+                    elif rm:
+                        k = f'{rm.group(1)}.{rm.group(2)}'
+                        type_map.setdefault(rm.group(1), {})[rm.group(2)] = True
+                        register_columns.setdefault(k, {})
+                        add_root(attr_name, k, True)
+            if not roots:
+                continue
+            for entries in roots.values():
+                for e in entries:
+                    if not e['register']:
+                        object_paths.setdefault(e['key'], PathNode())
+
+            for m in path_re.finditer(content):
+                segs = m.group(1).replace('~', '').split('.')
+                if any(not re.fullmatch(r'\w+', s) for s in segs):
+                    continue
+                # Самое длинное начало пути: остаток — реквизиты того объекта, куда оно ведёт
+                for n in range(min(len(segs) - 1, 3), 0, -1):
+                    prefix = '.'.join(segs[:n]).casefold()
+                    if prefix not in roots:
+                        continue
+                    for e in roots[prefix]:
+                        if e['register']:
+                            if segs[n] not in STD_REG_COLS:
+                                register_columns[e['key']][segs[n]] = True
+                            continue
+                        node = object_paths[e['key']]
+                        for s in segs[n:]:
+                            node = node.child(s)
+                    break
+            # Таблица на <корень>.<имя> — табличная часть; иная вложенность — реквизит-ссылка
+            for table in root.iter(f'{f_ns}Table'):
+                dp = table.find(f'{f_ns}DataPath')
+                if dp is None:
+                    continue
+                segs = (dp.text or '').replace('~', '').split('.')
+                if len(segs) < 2:
+                    continue
+                for e in roots.get('.'.join(segs[:-1]).casefold(), []):
+                    if not e['register']:
+                        object_paths[e['key']].child(segs[-1]).is_tabular = True
+    return object_paths
+
+
+def merge_path_tree(target, source):
+    if source.is_tabular:
+        target.is_tabular = True
+    for low, node in source.children.items():
+        merge_path_tree(target.child(source.names[low]), node)
+
+
+def convert_manual_query_lists(text):
+    """Запрос динамического списка платформа сверяет по типам настоящих таблиц, и на заглушке исправная
+    форма получила бы отказ. В проверочной копии запрос заменяется запросом-константой с теми же
+    колонками: модули проверяются как обычно, а сам запрос сверит сборка на настоящей базе."""
+    head_re = r'<Attribute name="([^"]+)"(?:(?!</Attribute>).)*?<ManualQuery>true</ManualQuery>'
+    # Ключ строки у запроса-константы — номер, и стандартной картинки у списка нет
+    for m in list(re.finditer(head_re, text, re.S)):
+        text = re.sub(r'\s*<RowPictureDataPath>~?' + re.escape(m.group(1)) + r'\.DefaultPicture</RowPictureDataPath>', '', text)
+    source = text
+
+    def convert(m):
+        columns = {}
+        for p in re.finditer(r'<(?:\w+:)?\w*DataPath>~?' + re.escape(m.group(1)) + r'\.(\w+)', source):
+            if p.group(1) != 'DefaultPicture':
+                columns[p.group(1)] = True
+        fields = ', '.join('&quot;&quot; \u041a\u0410\u041a ' + c for c in columns) or '&quot;&quot; \u041a\u0410\u041a \u041f\u043e\u043b\u0435'
+        block = re.sub(r'<QueryText>.*?</QueryText>|<QueryText/>', lambda _: '<QueryText>\u0412\u042b\u0411\u0420\u0410\u0422\u042c ' + fields + '</QueryText>', m.group(0), flags=re.S)
+        block = re.sub(r'\s*<MainTable>.*?</MainTable>|\s*<KeyFields>.*?</KeyFields>|\s*<KeyType>.*?</KeyType>', '', block, flags=re.S)
+        return block.replace('</QueryText>', '</QueryText><KeyType>RowNumber</KeyType>')
+
+    return re.sub(head_re + r'(?:(?!</Attribute>).)*?</Attribute>', convert, text, flags=re.S)
+
+
+def stub_catalog_name(seed):
+    return '\u0417\u0430\u0433\u043b\u0443\u0448\u043a\u0430_' + hashlib.md5(seed.encode('utf-8')).hexdigest()[:8]
+
+
+def resolve_object_children(object_paths, type_map):
+    """Раскладывает деревья путей по объектам; пустышки попадают в type_map.
+    Возвращает {"Вид.Имя": {attrs, tabular, hierarchical, owner}}."""
+    result = {}
+
+    def add_catalog(name):
+        type_map.setdefault('Catalog', {})[name] = True
+
+    def member_type(owner_key, member, node):
+        if not node.children:
+            return 'xs:string'
+        dummy = stub_catalog_name(f'{owner_key}.{member}')
+        add_catalog(dummy)
+        add_children(f'Catalog.{dummy}', node)
+        return f'cfg:CatalogRef.{dummy}'
+
+    def add_children(key, tree):
+        kind = key[:key.index('.')]
+        std = {'defaultpicture'}
+        for a in STD_ATTRS_BY_TYPE.get(kind, []):
+            std.add(a.casefold())
+            if a in STD_ATTR_RU:
+                std.add(STD_ATTR_RU[a].casefold())
+        std.update(a.casefold() for a in STD_TABULAR_BY_TYPE.get(kind, []))
+        if kind == 'ChartOfCharacteristicTypes':
+            std.update(('isfolder', '\u044d\u0442\u043e\u0433\u0440\u0443\u043f\u043f\u0430'))
+
+        # Родитель и ссылка — тот же объект: их реквизиты принадлежат ему
+        merged = True
+        while merged:
+            merged = False
+            for self_name in ('parent', '\u0440\u043e\u0434\u0438\u0442\u0435\u043b\u044c', 'ref', '\u0441\u0441\u044b\u043b\u043a\u0430'):
+                if self_name in std and self_name in tree.children and tree.children[self_name].children:
+                    sub = tree.children[self_name]
+                    tree.children[self_name] = PathNode()
+                    merge_path_tree(tree, sub)
+                    merged = True
+
+        info = result.setdefault(key, {'attrs': {}, 'tabular': {}, 'hierarchical': False, 'owner': None})
+        for low, node in tree.children.items():
+            name = tree.names[low]
+            if low in std:
+                if low in ('parent', '\u0440\u043e\u0434\u0438\u0442\u0435\u043b\u044c', 'isfolder', '\u044d\u0442\u043e\u0433\u0440\u0443\u043f\u043f\u0430'):
+                    info['hierarchical'] = True
+                if low in ('owner', '\u0432\u043b\u0430\u0434\u0435\u043b\u0435\u0446') and kind == 'Catalog':
+                    if not info['owner']:
+                        info['owner'] = stub_catalog_name(f'{key}.Owner')
+                        add_catalog(info['owner'])
+                    add_children(f"Catalog.{info['owner']}", node)
+                continue
+            if node.is_tabular:
+                columns = info['tabular'].setdefault(low, (name, {}))[1]
+                for col_low, col in node.children.items():
+                    if col_low in ('linenumber', '\u043d\u043e\u043c\u0435\u0440\u0441\u0442\u0440\u043e\u043a\u0438', 'ref', '\u0441\u0441\u044b\u043b\u043a\u0430'):
+                        continue
+                    col_name = node.names[col_low]
+                    columns[col_low] = (col_name, member_type(f'{key}.{name}', col_name, col))
+            else:
+                info['attrs'][low] = (name, member_type(key, name, node))
+
+    for k, tree in object_paths.items():
+        kind, name = k.split('.', 1)
+        type_map.setdefault(kind, {})[name] = True
+        add_children(k, tree)
+    return result
+
+
+def build_stub_attribute(name, type_name, is_column):
+    if type_name == 'xs:string':
+        type_xml = ('<v8:Type>xs:string</v8:Type><v8:StringQualifiers><v8:Length>10</v8:Length>'
+                    '<v8:AllowedLength>Variable</v8:AllowedLength></v8:StringQualifiers>')
+    else:
+        type_xml = f'<v8:Type>{type_name}</v8:Type>'
+    # У колонок табличной части значения заполнения нет: бизнес-процесс такое отвергает
+    fill = '' if is_column else '<FillFromFillingValue>false</FillFromFillingValue><FillValue xsi:nil="true"/>'
+    return (f'<Attribute uuid="{new_uuid()}"><Properties><Name>{name}</Name><Synonym/><Comment/><Type>{type_xml}</Type>'
+            '<PasswordMode>false</PasswordMode><Format/><EditFormat/><ToolTip/><MarkNegatives>false</MarkNegatives><Mask/>'
+            '<MultiLine>false</MultiLine><ExtendedEdit>false</ExtendedEdit><MinValue xsi:nil="true"/><MaxValue xsi:nil="true"/>'
+            f'{fill}<FillChecking>DontCheck</FillChecking><ChoiceFoldersAndItems>Items</ChoiceFoldersAndItems>'
+            '<ChoiceParameterLinks/><ChoiceParameters/><QuickChoice>Auto</QuickChoice><CreateOnInput>Auto</CreateOnInput>'
+            '<ChoiceForm/><LinkByType/><ChoiceHistoryOnInput>Auto</ChoiceHistoryOnInput><Indexing>DontIndex</Indexing>'
+            '<FullTextSearch>Use</FullTextSearch><DataHistory>Use</DataHistory></Properties></Attribute>')
+
+
+def build_stub_tabular_section(kind, obj, name, columns):
+    gt = ''.join(
+        f'<xr:GeneratedType name="{kind}{c}.{obj}.{name}" category="{c}"><xr:TypeId>{new_uuid()}</xr:TypeId>'
+        f'<xr:ValueId>{new_uuid()}</xr:ValueId></xr:GeneratedType>' for c in ('TabularSection', 'TabularSectionRow'))
+    cols = ''.join(build_stub_attribute(n, t, True) for n, t in columns.values())
+    return (f'<TabularSection uuid="{new_uuid()}"><InternalInfo>{gt}</InternalInfo><Properties><Name>{name}</Name><Synonym/>'
+            f'<Comment/><ToolTip/><FillChecking>DontCheck</FillChecking></Properties><ChildObjects>{cols}</ChildObjects></TabularSection>')
+
+
 NS = (
     'xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" '
     'xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" '
@@ -531,11 +899,11 @@ GT_DEFS = {
     'Catalog': [('CatalogObject','Object'),('CatalogRef','Ref'),('CatalogSelection','Selection'),('CatalogList','List'),('CatalogManager','Manager')],
     'Document': [('DocumentObject','Object'),('DocumentRef','Ref'),('DocumentSelection','Selection'),('DocumentList','List'),('DocumentManager','Manager')],
     'Enum': [('EnumRef','Ref'),('EnumManager','Manager'),('EnumList','List')],
-    'ChartOfAccounts': [('ChartOfAccountsObject','Object'),('ChartOfAccountsRef','Ref'),('ChartOfAccountsSelection','Selection'),('ChartOfAccountsList','List'),('ChartOfAccountsManager','Manager')],
+    'ChartOfAccounts': [('ChartOfAccountsObject','Object'),('ChartOfAccountsRef','Ref'),('ChartOfAccountsSelection','Selection'),('ChartOfAccountsList','List'),('ChartOfAccountsManager','Manager'),('ChartOfAccountsExtDimensionTypes','ExtDimensionTypes'),('ChartOfAccountsExtDimensionTypesRow','ExtDimensionTypesRow')],
     'ChartOfCharacteristicTypes': [('ChartOfCharacteristicTypesObject','Object'),('ChartOfCharacteristicTypesRef','Ref'),('ChartOfCharacteristicTypesSelection','Selection'),('ChartOfCharacteristicTypesList','List'),('Characteristic','Characteristic'),('ChartOfCharacteristicTypesManager','Manager')],
-    'ChartOfCalculationTypes': [('ChartOfCalculationTypesObject','Object'),('ChartOfCalculationTypesRef','Ref'),('ChartOfCalculationTypesSelection','Selection'),('ChartOfCalculationTypesList','List'),('ChartOfCalculationTypesManager','Manager')],
+    'ChartOfCalculationTypes': [('ChartOfCalculationTypesObject','Object'),('ChartOfCalculationTypesRef','Ref'),('ChartOfCalculationTypesSelection','Selection'),('ChartOfCalculationTypesList','List'),('ChartOfCalculationTypesManager','Manager'),('DisplacingCalculationTypes','DisplacingCalculationTypes'),('DisplacingCalculationTypesRow','DisplacingCalculationTypesRow'),('BaseCalculationTypes','BaseCalculationTypes'),('BaseCalculationTypesRow','BaseCalculationTypesRow'),('LeadingCalculationTypes','LeadingCalculationTypes'),('LeadingCalculationTypesRow','LeadingCalculationTypesRow')],
     'ExchangePlan': [('ExchangePlanObject','Object'),('ExchangePlanRef','Ref'),('ExchangePlanSelection','Selection'),('ExchangePlanList','List'),('ExchangePlanManager','Manager')],
-    'BusinessProcess': [('BusinessProcessObject','Object'),('BusinessProcessRef','Ref'),('BusinessProcessSelection','Selection'),('BusinessProcessList','List'),('BusinessProcessManager','Manager')],
+    'BusinessProcess': [('BusinessProcessObject','Object'),('BusinessProcessRef','Ref'),('BusinessProcessSelection','Selection'),('BusinessProcessList','List'),('BusinessProcessManager','Manager'),('BusinessProcessRoutePointRef','RoutePointRef')],
     'Task': [('TaskObject','Object'),('TaskRef','Ref'),('TaskSelection','Selection'),('TaskList','List'),('TaskManager','Manager')],
     'InformationRegister': [('InformationRegisterRecord','Record'),('InformationRegisterManager','Manager'),('InformationRegisterSelection','Selection'),('InformationRegisterList','List'),('InformationRegisterRecordSet','RecordSet'),('InformationRegisterRecordKey','RecordKey'),('InformationRegisterRecordManager','RecordManager')],
     'AccumulationRegister': [('AccumulationRegisterRecord','Record'),('AccumulationRegisterManager','Manager'),('AccumulationRegisterSelection','Selection'),('AccumulationRegisterList','List'),('AccumulationRegisterRecordSet','RecordSet'),('AccumulationRegisterRecordKey','RecordKey')],
@@ -784,9 +1152,8 @@ PROPS['ChartOfAccounts'] = lambda n, sa: f"""\t\t\t<Name>{n}</Name>
 \t\t\t<CodeMask/>
 \t\t\t<CodeLength>20</CodeLength>
 \t\t\t<DescriptionLength>100</DescriptionLength>
-\t\t\t<CodeSeries>WholeCatalog</CodeSeries>
+\t\t\t<CodeSeries>WholeChartOfAccounts</CodeSeries>
 \t\t\t<CheckUnique>false</CheckUnique>
-\t\t\t<Autonumbering>true</Autonumbering>
 \t\t\t<DefaultPresentation>AsDescription</DefaultPresentation>
 {sa}\t\t\t<Characteristics/>
 \t\t\t<PredefinedDataUpdate>Auto</PredefinedDataUpdate>
@@ -800,18 +1167,15 @@ PROPS['ChartOfAccounts'] = lambda n, sa: f"""\t\t\t<Name>{n}</Name>
 \t\t\t<DefaultObjectForm/>
 \t\t\t<DefaultListForm/>
 \t\t\t<DefaultChoiceForm/>
-\t\t\t<DefaultFolderForm/>
-\t\t\t<DefaultFolderChoiceForm/>
 \t\t\t<AuxiliaryObjectForm/>
 \t\t\t<AuxiliaryListForm/>
 \t\t\t<AuxiliaryChoiceForm/>
-\t\t\t<AuxiliaryFolderForm/>
-\t\t\t<AuxiliaryFolderChoiceForm/>
 \t\t\t<AutoOrderByCode>true</AutoOrderByCode>
 \t\t\t<OrderLength>5</OrderLength>
 \t\t\t<MaxExtDimensionCount>0</MaxExtDimensionCount>
 \t\t\t<IncludeHelpInContents>false</IncludeHelpInContents>
 \t\t\t<BasedOn/>
+\t\t\t<ExtDimensionTypes/>
 \t\t\t<DataLockFields/>
 \t\t\t<DataLockControlMode>Automatic</DataLockControlMode>
 \t\t\t<FullTextSearch>Use</FullTextSearch>
@@ -900,9 +1264,6 @@ PROPS['ChartOfCalculationTypes'] = lambda n, sa: f"""\t\t\t<Name>{n}</Name>
 \t\t\t<DescriptionLength>25</DescriptionLength>
 \t\t\t<CodeType>String</CodeType>
 \t\t\t<CodeAllowedLength>Variable</CodeAllowedLength>
-\t\t\t<CodeSeries>WholeCatalog</CodeSeries>
-\t\t\t<CheckUnique>false</CheckUnique>
-\t\t\t<Autonumbering>true</Autonumbering>
 \t\t\t<DefaultPresentation>AsDescription</DefaultPresentation>
 {sa}\t\t\t<Characteristics/>
 \t\t\t<PredefinedDataUpdate>Auto</PredefinedDataUpdate>
@@ -913,7 +1274,7 @@ PROPS['ChartOfCalculationTypes'] = lambda n, sa: f"""\t\t\t<Name>{n}</Name>
 \t\t\t<SearchStringModeOnInputByString>Begin</SearchStringModeOnInputByString>
 \t\t\t<FullTextSearchOnInputByString>DontUse</FullTextSearchOnInputByString>
 \t\t\t<ChoiceDataGetModeOnInputByString>Directly</ChoiceDataGetModeOnInputByString>
-\t\t\t<DependenceOnCalculationTypes>NotDepend</DependenceOnCalculationTypes>
+\t\t\t<DependenceOnCalculationTypes>DontUse</DependenceOnCalculationTypes>
 \t\t\t<BaseCalculationTypes/>
 \t\t\t<ActionPeriodUse>false</ActionPeriodUse>
 \t\t\t<DefaultObjectForm/>
@@ -982,7 +1343,6 @@ PROPS['BusinessProcess'] = lambda n, sa: f"""\t\t\t<Name>{n}</Name>
 \t\t\t<Synonym/>
 \t\t\t<Comment/>
 \t\t\t<UseStandardCommands>false</UseStandardCommands>
-\t\t\t<Numerator/>
 \t\t\t<NumberType>String</NumberType>
 \t\t\t<NumberLength>11</NumberLength>
 \t\t\t<NumberAllowedLength>Variable</NumberAllowedLength>
@@ -990,7 +1350,7 @@ PROPS['BusinessProcess'] = lambda n, sa: f"""\t\t\t<Name>{n}</Name>
 \t\t\t<CheckUnique>false</CheckUnique>
 \t\t\t<Autonumbering>true</Autonumbering>
 {sa}\t\t\t<Characteristics/>
-\t\t\t<Task/>
+\t\t\t<Task>Task.{STUB_TASK_NAME}</Task>
 \t\t\t<CreateTaskInPrivilegedMode>false</CreateTaskInPrivilegedMode>
 \t\t\t<DefaultObjectForm/>
 \t\t\t<DefaultListForm/>
@@ -1133,6 +1493,14 @@ def write_bom(path, content):
 GUID_RE = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 
 
+def retag_refs(text, ext_tag, cfg_tag):
+    # Только префикс вида объекта в начале квалифицированного имени. Глобальная замена подстроки
+    # резала бы и имя самого объекта, если оно оканчивается так же (ПриёмкаExternalReport), —
+    # ссылка расходилась с именем, и заглушка не грузилась.
+    return re.sub(r'(?<![\w.])%s(Object)?\.' % ext_tag,
+                  lambda m: cfg_tag + (m.group(1) or '') + '.', text)
+
+
 def add_source_object_to_config(source_xml, cfg_dir):
     # Копия объекта живёт в конфигурации базы, а следом в ту же базу грузится исходник как ВНЕШНЯЯ
     # обработка. С одинаковыми идентификаторами платформа путает их и через раз отвечает «Исключение
@@ -1163,7 +1531,7 @@ def add_source_object_to_config(source_xml, cfg_dir):
     conv = reissue(text)
     conv = conv.replace('<%s ' % ext_tag, '<%s ' % cfg_tag).replace('<%s>' % ext_tag, '<%s>' % cfg_tag)
     conv = conv.replace('</%s>' % ext_tag, '</%s>' % cfg_tag)
-    conv = conv.replace('%sObject.' % ext_tag, '%sObject.' % cfg_tag).replace('%s.' % ext_tag, '%s.' % cfg_tag)
+    conv = retag_refs(conv, ext_tag, cfg_tag)
 
     # Тип менеджера у внешней обработки не объявлен, а объекту конфигурации он обязателен:
     # без него платформа отвечает «отсутствует один или более типов объекта».
@@ -1200,12 +1568,108 @@ def add_source_object_to_config(source_xml, cfg_dir):
                     with io.open(full, encoding='utf-8-sig') as fh:
                         t = fh.read()
                     t = reissue(t)
-                    t = t.replace('%sObject.' % ext_tag, '%sObject.' % cfg_tag).replace('%s.' % ext_tag, '%s.' % cfg_tag)
+                    t = retag_refs(t, ext_tag, cfg_tag)
+                    if os.path.basename(dst) == 'Form.xml':
+                        t = convert_manual_query_lists(t)
                     write_bom(dst, t)
                 else:
                     shutil.copyfile(full, dst)
 
     return {'tag': cfg_tag, 'name': name}
+
+
+# --- Общие модули целевой конфигурации, к которым обращается код ---
+# Проверка модулей (замер 8.3.24, 8.3.27) требует от общего модуля только двух вещей: чтобы он
+# существовал и был доступен в контексте вызова. Методы, их экспорт и число параметров она не
+# сверяет. Поэтому двойнику хватает имени и флагов контекста из настоящей выгрузки, тело пустое,
+# и зависимости модуля за ним не тянутся. Двойник получает только имя, которое есть в выгрузке:
+# неизвестное имя остаётся ошибкой проверки, а не угадывается.
+
+COMMON_MODULE_FLAGS = ['Global', 'ClientManagedApplication', 'Server', 'ExternalConnection',
+                       'ClientOrdinaryApplication', 'ServerCall', 'Privileged']
+
+
+def remove_bsl_noise(code):
+    # Код без строковых литералов и комментариев: слова в них — не обращения к модулям.
+    out = []
+    for line in re.split(r'\r?\n', code):
+        # Продолжение многострочной строки («|ВЫБРАТЬ …»): литерал до закрывающей кавычки, после
+        # неё может идти код («|ГДЕ …"; Х = Модуль.Метод();»).
+        line = re.sub(r'^\s*\|(?:[^"]|"")*("|$)', '""', line)
+        # Литерал до закрывающей кавычки или, если строка продолжится ниже, до конца строки.
+        line = re.sub(r'"(?:[^"]|"")*("|$)', '""', line)
+        ci = line.find('//')
+        if ci >= 0:
+            line = line[:ci]
+        out.append(line)
+    return '\n'.join(out) + '\n'
+
+
+def scan_common_modules(source_dir, config_src):
+    """\u0418\u043c\u044f \u0438\u0437 \u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0438 -> {\u0444\u043b\u0430\u0433: 'true'|'false'} \u0434\u043b\u044f \u043e\u0431\u0449\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439, \u043a \u043a\u043e\u0442\u043e\u0440\u044b\u043c \u043e\u0431\u0440\u0430\u0449\u0430\u0435\u0442\u0441\u044f \u043a\u043e\u0434."""
+    result = {}
+    if not config_src:
+        return result
+    cm_dir = os.path.join(config_src, 'CommonModules')
+    if not os.path.isdir(cm_dir):
+        print('WARNING: \u0432 -ConfigSrc \u043d\u0435\u0442 \u043a\u0430\u0442\u0430\u043b\u043e\u0433\u0430 CommonModules: %s' % config_src)
+        return result
+    # Идентификаторы 1С регистронезависимы — и имена модулей в коде тоже.
+    known = {}
+    for fn in os.listdir(cm_dir):
+        full = os.path.join(cm_dir, fn)
+        if fn.lower().endswith('.xml') and os.path.isfile(full):
+            known[os.path.splitext(fn)[0].casefold()] = full
+    used = set()
+    for root, _dirs, files in os.walk(source_dir):
+        for fn in files:
+            if not fn.lower().endswith('.bsl'):
+                continue
+            # Битые байты (файл не в UTF-8) заменяются, как в PS-мастере, а не валят заглушку.
+            with open(os.path.join(root, fn), 'r', encoding='utf-8-sig', errors='replace') as fh:
+                code = remove_bsl_noise(fh.read())
+            for m in re.finditer(r'(?<![\w.])([^\W\d]\w*)\s*\.', code):
+                used.add(m.group(1).casefold())
+    names = sorted(os.path.splitext(os.path.basename(known[u]))[0] for u in used if u in known)
+    for n in names:
+        with open(known[n.casefold()], 'r', encoding='utf-8-sig') as fh:
+            t = fh.read()
+        flags = {}
+        for fl in COMMON_MODULE_FLAGS:
+            m = re.search(r'<%s>(true|false)</%s>' % (fl, fl), t, re.IGNORECASE)
+            flags[fl] = m.group(1).lower() if m else 'false'
+        result[n] = flags
+    if result:
+        print('\u041e\u0431\u0449\u0438\u0435 \u043c\u043e\u0434\u0443\u043b\u0438 \u0438\u0437 configSrc: %s' % ', '.join(result.keys()))
+    else:
+        print('\u041e\u0431\u0449\u0438\u0435 \u043c\u043e\u0434\u0443\u043b\u0438 \u0438\u0437 configSrc: \u043d\u0435 \u043f\u043e\u043d\u0430\u0434\u043e\u0431\u0438\u043b\u0438\u0441\u044c')
+    return result
+
+
+def write_common_module_stubs(cfg_dir, ns_decl, common_modules):
+    # Пустые двойники с флагами контекста из выгрузки.
+    if not common_modules:
+        return
+    cm_out = os.path.join(cfg_dir, 'CommonModules')
+    os.makedirs(cm_out, exist_ok=True)
+    for name, flags in common_modules.items():
+        flag_xml = ''.join('\n\t\t\t<%s>%s</%s>' % (fl, flags[fl], fl) for fl in COMMON_MODULE_FLAGS)
+        cm_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject {ns_decl}>
+\t<CommonModule uuid="{new_uuid()}">
+\t\t<Properties>
+\t\t\t<Name>{name}</Name>
+\t\t\t<Synonym/>
+\t\t\t<Comment/>{flag_xml}
+\t\t\t<ReturnValuesReuse>DontUse</ReturnValuesReuse>
+\t\t</Properties>
+\t</CommonModule>
+</MetaDataObject>
+"""
+        write_bom(os.path.join(cm_out, name + '.xml'), cm_xml)
+        ext_dir = os.path.join(cm_out, name, 'Ext')
+        os.makedirs(ext_dir, exist_ok=True)
+        write_bom(os.path.join(ext_dir, 'Module.bsl'), '')
 
 
 def main():
@@ -1219,6 +1683,9 @@ def main():
     # XML проверяемой обработки/отчёта: объект кладётся в конфигурацию-заглушку, чтобы платформа
     # смогла проверить его штатными проверками. Без параметра стаб работает как раньше.
     parser.add_argument('-EmbedSourceFile', default='')
+    # Выгрузка целевой конфигурации: общие модули, к которым обращается код, получают в заглушке
+    # пустых двойников с настоящими флагами контекста.
+    parser.add_argument('-ConfigSrc', default='')
     parser.add_argument('-AdditionalV8Arguments', nargs='*', default=[],
                         help='Extra 1cv8 arguments, e.g. /UseHwLicenses+')
     parser.add_argument('-AdditionalIbcmdArguments', nargs='*', default=[],
@@ -1231,12 +1698,18 @@ def main():
     args.V8Path = clean_path(args.V8Path, "-V8Path")
     args.TempBasePath = clean_path(args.TempBasePath, "-TempBasePath")
     args.EmbedSourceFile = clean_path(args.EmbedSourceFile, "-EmbedSourceFile")
+    args.ConfigSrc = clean_path(args.ConfigSrc, "-ConfigSrc")
 
     type_map = scan_ref_types(args.SourceDir)
     register_columns = scan_register_columns(args.SourceDir)
+    object_children = resolve_object_children(scan_object_paths(args.SourceDir, type_map, register_columns), type_map)
+    # Бизнес-процесс без задачи платформа не загружает
+    if type_map.get('BusinessProcess'):
+        type_map.setdefault('Task', {})[STUB_TASK_NAME] = True
+    common_modules = scan_common_modules(args.SourceDir, args.ConfigSrc)
     has_ref_types = len(type_map) > 0
     embed_requested = bool(args.EmbedSourceFile and args.EmbedSourceFile.strip())
-    need_cfg = has_ref_types or embed_requested
+    need_cfg = has_ref_types or embed_requested or len(common_modules) > 0
     stub_format_version = detect_stub_format_version(args.SourceDir)
     stub_compat = stub_compatibility_mode(stub_format_version)
     ns_decl = f'{NS} version="{stub_format_version}"'
@@ -1271,6 +1744,8 @@ def main():
             co_xml += f'\n\t\t\t<xr:ContainedObject>\n\t\t\t\t<xr:ClassId>{CLASS_IDS[i]}</xr:ClassId>\n\t\t\t\t<xr:ObjectId>{co_ids[i]}</xr:ObjectId>\n\t\t\t</xr:ContainedObject>'
 
         child_xml = '\n\t\t\t<Language>\u0420\u0443\u0441\u0441\u043a\u0438\u0439</Language>'  # Русский
+        for cm_name in common_modules:
+            child_xml += '\n\t\t\t<CommonModule>%s</CommonModule>' % cm_name
         for meta_type, names in type_map.items():
             if meta_type not in META_INFO:
                 continue
@@ -1372,6 +1847,8 @@ def main():
 </MetaDataObject>
 """
         write_bom(os.path.join(lang_dir, '\u0420\u0443\u0441\u0441\u043a\u0438\u0439.xml'), lang_xml)
+
+        write_common_module_stubs(cfg_dir, ns_decl, common_modules)
 
         # Metadata stubs
         for meta_type, names in type_map.items():
@@ -1483,6 +1960,17 @@ def main():
                 else:
                     child_obj_xml = '\n\t\t<ChildObjects/>'
 
+                ci = object_children.get(f'{meta_type}.{obj_name}')
+                if ci:
+                    if ci['hierarchical']:
+                        props_xml = props_xml.replace('<Hierarchical>false<', '<Hierarchical>true<')
+                    if ci['owner']:
+                        props_xml = props_xml.replace('<Owners/>', f'<Owners><xr:Item xsi:type="xr:MDObjectRef">Catalog.{ci["owner"]}</xr:Item></Owners>')
+                    child_parts = [build_stub_attribute(n, ty, False) for n, ty in ci['attrs'].values()]
+                    child_parts += [build_stub_tabular_section(meta_type, obj_name, n, cols) for n, cols in ci['tabular'].values()]
+                    if child_parts:
+                        child_obj_xml = '\n\t\t<ChildObjects>\n' + '\n'.join(child_parts) + '\n\t\t</ChildObjects>'
+
                 obj_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject {ns_decl}>
 \t<{tag} uuid="{obj_uuid}">{internal_xml}
@@ -1542,7 +2030,7 @@ def main():
         cfg_dir = os.path.join(temp_base, 'cfg')
         # LoadConfigFromFiles
         print('Loading configuration from files...')
-        load_log = os.path.join(tempfile.gettempdir(), 'stub_load_log.txt')
+        load_log = os.path.join(temp_base, 'load_log.txt')
         result = run_v8(args.V8Path, ['DESIGNER', f'/F"{temp_base}"', '/LoadConfigFromFiles', f'"{cfg_dir}"',
                                       '/Out', f'"{load_log}"',
                                       '/DisableStartupDialogs'] + [quote_if_needed(a) for a in extra_args])
@@ -1562,7 +2050,7 @@ def main():
 
         # UpdateDBCfg
         print('Updating database configuration...')
-        update_log = os.path.join(tempfile.gettempdir(), 'stub_update_log.txt')
+        update_log = os.path.join(temp_base, 'update_log.txt')
         result = run_v8(args.V8Path, ['DESIGNER', f'/F"{temp_base}"', '/UpdateDBCfg', '/Out', f'"{update_log}"',
                                       '/DisableStartupDialogs'] + [quote_if_needed(a) for a in extra_args])
         if result.returncode != 0:

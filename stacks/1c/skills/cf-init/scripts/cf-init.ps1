@@ -1,4 +1,4 @@
-﻿# cf-init v1.15 — Create empty 1C configuration scaffold (+write_xml_file/write_utf8_bom: общий эталон записи)
+﻿# cf-init v1.18 — Create empty 1C configuration scaffold (+write_xml_file/write_utf8_bom: общий эталон записи)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 [CmdletBinding(PositionalBinding=$false)]
 param(
@@ -58,9 +58,29 @@ if ($CompatibilityMode -and $CompatibilityMode.ToLowerInvariant() -eq 'dontuse')
 	[Console]::Error.WriteLine("WARNING: CompatibilityMode 'DontUse' is not `"no restrictions`" — the platform stores it as Version8_3_8. For no compatibility restrictions use the target platform version (e.g. Version8_3_27 for 8.3.27).")
 }
 
+# Режим совместимости не новее платформы, которая пишет эту версию формата. Такой конфигурации
+# не выпускает ни одна платформа, а загрузка платформой старше режима МОЛЧА понижает его до своей
+# версии (замерено: Version8_3_25 и Version8_3_27 на 8.3.24 → Version8_3_24). Лестница «платформа →
+# формат» — копия docs/1c-configuration-spec.md §7.1, сверяет tests/skills/check-format-versions.mjs.
+# Режим, которого нет в лестнице (8.3.28), не проверяется: замера нет.
+$platformFormatLadder = [ordered]@{
+	"8.3.20" = "2.13"; "8.3.21" = "2.14"; "8.3.22" = "2.15"; "8.3.23" = "2.16"; "8.3.24" = "2.17"
+	"8.3.25" = "2.18"; "8.3.26" = "2.19"; "8.3.27" = "2.20"; "8.5.1" = "2.21"
+}
+if ($CompatibilityMode -match '^Version(\d+)_(\d+)_(\d+)$') {
+	$compatPlatform = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+	if ($platformFormatLadder.Contains($compatPlatform)) {
+		$needFormat = $platformFormatLadder[$compatPlatform]
+		if ($formatRank -lt (Get-FormatRank $needFormat)) {
+			[Console]::Error.WriteLine("CompatibilityMode '$CompatibilityMode' needs platform $compatPlatform (format $needFormat or newer), but -FormatVersion is $FormatVersion — no platform writes such a configuration, and loading it into an older platform silently lowers the mode. Use -FormatVersion $needFormat or an older -CompatibilityMode.")
+			exit 1
+		}
+	}
+}
+
 # --- Resolve output dir ---
 if (-not [System.IO.Path]::IsPathRooted($OutputDir)) {
-	$OutputDir = Join-Path (Get-Location).Path $OutputDir
+	$OutputDir = Join-Path (Get-Location).ProviderPath $OutputDir
 }
 
 # --- Check existing ---
@@ -87,6 +107,8 @@ $co7 = [guid]::NewGuid().ToString()
 $is221 = ($formatRank -ge 221)
 # TextToSpeech приехал раньше остальных вставок 8.5 — своей ступенью, поэтому гейт отдельный.
 $is218 = ($formatRank -ge 218)
+$is217 = ($formatRank -ge 217)
+$is216 = ($formatRank -ge 216)
 
 $mobileFuncs = @(
 	@("Biometrics","true"), @("Location","false"), @("BackgroundLocation","false"),
@@ -100,15 +122,15 @@ $mobileFuncs = @(
 	@("BackgroundAudioPlaybackAndVibration","false"), @("InstallPackages","false"),
 	@("OSBackup","true"), @("ApplicationUsageStatistics","false"),
 	@("BarcodeScanning","false"), @("BackgroundAudioRecording","false"),
-	@("AllFilesAccess","false"), @("Videoconferences","false"), @("NFC","false"),
-	@("DocumentScanning","false"), @("SpeechToText","false"), @("Geofences","false"),
-	@("IncomingShareRequests","false"), @("AllIncomingShareRequestsTypesProcessing","false")
+	@("AllFilesAccess","false")
 )
-# TextToSpeech — возможность мобильного приложения, добавленная форматом 2.18 (8.3.25),
-# последней в списке; в 2.21 список не менялся. Замерено выгрузками пустой ИБ шести платформ:
-# 2.13/2.17 — 37 записей без неё, 2.18-2.21 — 38 с ней. Гейт обязателен и в обе стороны:
-# на 2.17 тег ломает загрузку XDTO-ошибкой (проверено на 8.3.24), без тега на 2.18+ платформа
-# подставит дефолт false и допишет его при выгрузке — то есть разойдётся роундтрип.
+# Возможности мобильного приложения прибавляются ступенями формата, в конец списка, — по выгрузкам
+# пустой ИБ самих платформ: 2.13 (8.3.20) — 30, 2.16 (8.3.23) — 33, 2.17 (8.3.24) — 37, 2.18–2.21 — 38.
+# Гейт обязателен в обе стороны: незнакомый платформе тег ломает загрузку XDTO-ошибкой (8.3.20, 8.3.23,
+# TextToSpeech на 8.3.24), а без знакомого платформа подставит false и допишет его при выгрузке —
+# разойдётся роундтрип. 2.14/2.15 (8.3.21/8.3.22) не замерены — список 2.13: короткий загрузится.
+if ($is216) { $mobileFuncs += @(@("Videoconferences","false"), @("NFC","false"), @("DocumentScanning","false")) }
+if ($is217) { $mobileFuncs += @(@("SpeechToText","false"), @("Geofences","false"), @("IncomingShareRequests","false"), @("AllIncomingShareRequestsTypesProcessing","false")) }
 if ($is218) { $mobileFuncs += ,@("TextToSpeech","false") }
 
 $mobileXml = ""
@@ -133,6 +155,14 @@ $versionEl = if ($Version) { "<Version>$(Esc-XmlText ($Version))</Version>" } el
 # выгруженные с 8.3.27 и с 8.5.1, различаются ровно этим. Порядок важен — вставки идут
 # на своё место, а не в конец.
 $nl = "`r`n"
+# Свойства конфигурации, которых нет в старых форматах (выгрузки пустой ИБ 8.3.20 и 8.3.23: незнакомое
+# свойство платформа отбрасывает с записью «Неверное свойство объекта метаданных» в лог загрузки).
+# DefaultReportAppearanceTemplate и DatabaseTablespacesUseMode — есть в 2.16, нет в 2.13 (2.14/2.15 не
+# замерены — без них: незаписанное знакомое свойство платформа заполнит умолчанием); AllowedIncomingShareRequestTypes — с 2.17.
+$gateReportAppearance = if ($is216) { $nl + "`t`t`t<DefaultReportAppearanceTemplate/>" } else { "" }
+$gateTablespaces = if ($is216) { $nl + "`t`t`t<DatabaseTablespacesUseMode>DontUse</DatabaseTablespacesUseMode>" } else { "" }
+$gateShareTypes = if ($is217) { $nl + "`t`t`t<AllowedIncomingShareRequestTypes/>" } else { "" }
+
 $f221AuxForms = ""; $f221WindowVariant = ""; $f221OpenVariant = ""; $f221Captions = ""; $f221Migration = ""
 $palNs = ""
 if ($is221) {
@@ -215,8 +245,7 @@ $cfgXml = @"
 			<Content/>
 			<DefaultReportForm/>
 			<DefaultReportVariantForm/>
-			<DefaultReportSettingsForm/>
-			<DefaultReportAppearanceTemplate/>
+			<DefaultReportSettingsForm/>$gateReportAppearance
 			<DefaultDynamicListSettingsForm/>
 			<DefaultSearchForm/>
 			<DefaultDataHistoryChangeHistoryForm/>
@@ -227,8 +256,7 @@ $cfgXml = @"
 			<UsedMobileApplicationFunctionalities>$mobileXml
 			</UsedMobileApplicationFunctionalities>
 			<StandaloneConfigurationRestrictionRoles/>
-			<MobileApplicationURLs/>
-			<AllowedIncomingShareRequestTypes/>$f221WindowVariant
+			<MobileApplicationURLs/>$gateShareTypes$f221WindowVariant
 			<MainClientApplicationWindowMode>Normal</MainClientApplicationWindowMode>$f221OpenVariant
 			<DefaultInterface/>$f221Captions
 			<DefaultStyle/>
@@ -242,8 +270,7 @@ $cfgXml = @"
 			<ObjectAutonumerationMode>NotAutoFree</ObjectAutonumerationMode>
 			<ModalityUseMode>DontUse</ModalityUseMode>
 			<SynchronousPlatformExtensionAndAddInCallUseMode>DontUse</SynchronousPlatformExtensionAndAddInCallUseMode>
-			<InterfaceCompatibilityMode>TaxiEnableVersion8_2</InterfaceCompatibilityMode>$f221Migration
-			<DatabaseTablespacesUseMode>DontUse</DatabaseTablespacesUseMode>
+			<InterfaceCompatibilityMode>TaxiEnableVersion8_2</InterfaceCompatibilityMode>$f221Migration$gateTablespaces
 			<CompatibilityMode>$CompatibilityMode</CompatibilityMode>
 			<DefaultConstantsForm/>
 		</Properties>

@@ -1,4 +1,4 @@
-﻿# form-decompile v0.150 — Decompile 1C managed Form.xml to JSON DSL (draft)
+﻿# form-decompile v0.160 — Decompile 1C managed Form.xml to JSON DSL (draft)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 # ВНИМАНИЕ: раундтрип не гарантируется. Навык исключён из авто-использования моделью.
 [CmdletBinding(PositionalBinding=$false)]
@@ -18,7 +18,7 @@ if (-not (Test-Path $FormPath)) {
 	Write-Error "Form not found: $FormPath"
 	exit 1
 }
-$FormPath = (Resolve-Path $FormPath).Path
+$FormPath = (Resolve-Path $FormPath).ProviderPath
 
 $xmlDoc = New-Object System.Xml.XmlDocument
 $xmlDoc.PreserveWhitespace = $false
@@ -61,6 +61,18 @@ $ns.AddNamespace("dcscor", $NS_DCSCOR)
 $ns.AddNamespace("v8ui", $NS_V8UI)
 $ns.AddNamespace("app", $NS_APP)
 
+# Список с явным ключом набора (FieldValue/RowKey/RowNumber) без основной таблицы: ссылки в строке нет,
+# умный дефолт RowPictureDataPath = <Список>.DefaultPicture компилятор ему не ставит.
+function Test-DynListExplicitKey([string]$listName) {
+	foreach ($a in $root.SelectNodes("lf:Attributes/lf:Attribute", $ns)) {
+		if ($a.GetAttribute('name') -ne $listName) { continue }
+		$kt = $a.SelectSingleNode("lf:Settings/lf:KeyType", $ns)
+		$v = if ($null -ne $kt) { $kt.InnerText.Trim() } else { '' }
+		return ($v -ne '' -and $v -ne 'Auto' -and $null -eq $a.SelectSingleNode("lf:Settings/lf:MainTable", $ns))
+	}
+	return $false
+}
+
 # Каноничные GUID пустых контейнеров ListSettings (умолчание платформы, ~90% форм).
 # Если ListSettings = пустой скелет с этими GUID → декомпилятор опускает настройки вовсе,
 # компилятор регенерит тот же скелет → чистый раундтрип.
@@ -74,7 +86,7 @@ $script:outputDir = $null
 $script:outputBasename = $null
 if ($OutputPath) {
 	$od = Split-Path -Parent $OutputPath
-	if (-not $od) { $od = (Get-Location).Path }
+	if (-not $od) { $od = (Get-Location).ProviderPath }
 	$script:outputDir = $od
 	$script:outputBasename = [System.IO.Path]::GetFileNameWithoutExtension($OutputPath)
 }
@@ -413,8 +425,11 @@ function Title-FromName {
 	[void]$out.Add($parts[0])
 	for ($i = 1; $i -lt $parts.Count; $i++) {
 		$p = $parts[$i]
-		if ($p.Length -gt 1 -and $p -ceq $p.ToUpper()) { [void]$out.Add($p) }
-		else { [void]$out.Add($p.ToLower()) }
+		if ($p.Length -gt 1 -and $p -ceq $p.ToUpper()) {
+			[void]$out.Add($p)
+		} else {
+			[void]$out.Add($p.ToLower())
+		}
 	}
 	return ($out -join ' ')
 }
@@ -424,7 +439,9 @@ $script:fmtMarkupRe = '</>|<\s*(?:link|b|i|u|s|color|colorStyle|bgColor|bgColorS
 function Test-HasRealMarkup {
 	param($text)
 	if ($null -eq $text) { return $false }
-	$vals = if ($text -is [System.Collections.IDictionary]) { @($text.Values) } else { @("$text") }
+	$vals = if ($text -is [System.Collections.IDictionary]) { @($text.Values) }
+		elseif ($text -is [System.Management.Automation.PSCustomObject]) { @($text.PSObject.Properties.Value) }
+		else { @("$text") }
 	foreach ($v in $vals) { if ("$v" -match $script:fmtMarkupRe) { return $true } }
 	return $false
 }
@@ -1044,16 +1061,18 @@ function Add-TitleLocation {
 	elseif ($tl -ne $smartDefault) { $obj['titleLocation'] = $tl.ToLower() }
 }
 
-# Разобрать <Events> элемента → упорядоченная мапа { ИмяСобытия: ИмяОбработчика }
-# в порядке документа. Имена обработчиков всегда явные (как у событий формы) —
-# единый, консистентный с form-level формат. Legacy on/handlers больше не эмитим.
+# Разобрать <Events> формы или элемента → упорядоченная мапа { ИмяСобытия: ИмяОбработчика }
+# в порядке документа. Имена обработчиков всегда явные. Привязка с видом вызова (расширение) —
+# { handler, callType }; несколько привязок одного события (Before и After) — массив таких объектов.
 function Get-Events {
 	param($node, [string]$elName)
 	$ev = $node.SelectSingleNode("lf:Events", $ns)
 	if (-not $ev) { return $null }
 	$events = [ordered]@{}
 	foreach ($e in @($ev.SelectNodes("lf:Event", $ns))) {
-		$events[$e.GetAttribute("name")] = $e.InnerText
+		$n = $e.GetAttribute("name"); $ct = $e.GetAttribute("callType")
+		$v = if ($ct) { [ordered]@{ handler = $e.InnerText; callType = $ct } } else { $e.InnerText }
+		if ($events.Contains($n)) { $events[$n] = @(@($events[$n]) + , $v) } else { $events[$n] = $v }
 	}
 	if ($events.Count -eq 0) { return $null }
 	return $events
@@ -1285,9 +1304,10 @@ function Decompile-Type {
 				$len = $typeNode.SelectSingleNode("v8:StringQualifiers/v8:Length", $ns)
 				$al = $typeNode.SelectSingleNode("v8:StringQualifiers/v8:AllowedLength", $ns)
 				$fixed = ($al -and $al.InnerText -eq 'Fixed')   # Variable = дефолт (опускаем); Fixed — явно
-				if ($len -and [int]$len.InnerText -gt 0) {
-					$short = if ($fixed) { "string($($len.InnerText),fixed)" } else { "string($($len.InnerText))" }
-				} else { $short = "string" }   # Length=0 → всегда Variable (корпус)
+				$ll = if ($len) { $len.InnerText } else { '0' }
+				if ($fixed -and [int]$ll -gt 0) { $short = "string($ll,fixed)" }   # Fixed при длине 0 платформа не хранит
+				elseif ([int]$ll -gt 0) { $short = "string($ll)" }
+				else { $short = "string" }   # голая строка у form-compile — неограниченная
 				break
 			}
 			'^xs:decimal$' {
@@ -1296,7 +1316,9 @@ function Decompile-Type {
 				$sgn = $typeNode.SelectSingleNode("v8:NumberQualifiers/v8:AllowedSign", $ns)
 				$dd = if ($d) { $d.InnerText } else { '0' }
 				$ff = if ($f) { $f.InnerText } else { '0' }
-				if ($sgn -and $sgn.InnerText -eq 'Nonnegative') { $short = "decimal($dd,$ff,nonneg)" } else { $short = "decimal($dd,$ff)" }
+				if ($sgn -and $sgn.InnerText -eq 'Nonnegative') { $short = "decimal($dd,$ff,nonneg)" }
+				elseif ($dd -eq '10' -and $ff -eq '0') { $short = "decimal" }   # голое число у form-compile — 10,0
+				else { $short = "decimal($dd,$ff)" }
 				break
 			}
 			'^xs:boolean$' { $short = "boolean"; break }
@@ -1491,10 +1513,15 @@ function Build-DLParameter {
 	# title — опускаем, если совпадает с авто-выводом из имени (ru-only)
 	$titleNode = $pNode.SelectSingleNode("dcssch:title", $ns)
 	if ($titleNode) {
-		$t = Get-LangText $titleNode
+		$t = Get-LangTextWS $titleNode   # восстановление значимого пробела: заголовком-пробелом гасят подпись
 		if ($null -ne $t) {
+			# Сравнение байт в байт: эталон — компилятор, он пишет заголовок как есть. -eq
+			# регистронезависим, и заголовок, отличающийся от авто-вывода только регистром
+			# («Организации ВетИС» при авто «Организации ВЕТИС»), терялся молча. Даже -ceq мало:
+			# он культурный, мягкий перенос и NFD-разложение для него — ноль. Нужен Ordinal,
+			# он же и есть зеркало питоновского ==.
 			$auto = Title-FromName -name $name
-			if (-not (($t -is [string]) -and ($t -eq $auto))) { $o['title'] = $t }
+			if (-not (($t -is [string]) -and [string]::Equals($t, $auto, [StringComparison]::Ordinal))) { $o['title'] = $t }
 		}
 	}
 	# valueType
@@ -1903,7 +1930,12 @@ function Decompile-Element {
 			Add-CommonProps $obj $node $name
 			$rep = Get-Child $node 'Representation'
 			if ($rep) { $repmap=@{'None'='none';'NormalSeparation'='normal';'WeakSeparation'='weak';'StrongSeparation'='strong'}; if ($repmap.ContainsKey($rep)) { $obj['representation']=$repmap[$rep] } else { $obj['representation']=$rep } }
-			$st = Get-Child $node 'ShowTitle'; if ($null -ne $st) { $obj['showTitle'] = ($st -eq 'true') }  # факт. значение (явный true тоже)
+			# Зеркало компилятора. Обычная группа без showTitle: с заголовком (title/titleDataPath) — показан, без — скрыт; ключ
+			# пишется, только когда факт расходится с этим умолчанием. Сворачиваемая/всплывающая — факт. значение.
+			$st = Get-Child $node 'ShowTitle'
+			if (@('Collapsible','PopUp') -contains $behavior) { if ($null -ne $st) { $obj['showTitle'] = ($st -eq 'true') } }
+			elseif ($obj['title'] -or (Get-Child $node 'TitleDataPath')) { if ($st -eq 'false') { $obj['showTitle'] = $false } }
+			elseif ($st -ne 'false') { $obj['showTitle'] = $true }
 			$cru = Get-Child $node 'CurrentRowUse'; if ($cru) { $obj['currentRowUse'] = $cru }   # использование текущей строки группы
 			$crt = $node.SelectSingleNode("lf:CollapsedRepresentationTitle", $ns); if ($crt) { $ct = Get-LangText $crt; if ($null -ne $ct -and $ct -ne '') { $obj['collapsedTitle'] = $ct } }
 			if ((Get-Child $node 'United') -eq 'false') { $obj['united'] = $false }
@@ -2126,8 +2158,13 @@ function Decompile-Element {
 				if ((Get-Child $node 'AllowRootChoice') -eq 'true') { $obj['allowRootChoice'] = $true }
 				$uodc = Get-Child $node 'UpdateOnDataChange'; if ($uodc -and $uodc -ne 'Auto') { $obj['updateOnDataChange'] = $uodc }
 				if ((Get-Child $node 'AllowGettingCurrentRowURL') -eq 'false') { $obj['allowGettingCurrentRowURL'] = $false }
-				# RowPictureDataPath: инверсия умного дефолта <Список>.DefaultPicture
-				if ($null -eq $rpdp) { $obj['rowPictureDataPath'] = '' }
+				# RowPictureDataPath: инверсия умного дефолта <Список>.DefaultPicture. У списка с явным ключом
+				# без основной таблицы умолчание — отсутствие (компилятор его не ставит): ""-маркер не нужен,
+				# а любое значение — явное.
+				if (Test-DynListExplicitKey "$($obj['path'])") {
+					if ($null -ne $rpdp) { $obj['rowPictureDataPath'] = $rpdp }
+				}
+				elseif ($null -eq $rpdp) { $obj['rowPictureDataPath'] = '' }
 				elseif ($rpdp -ne "$($obj['path']).DefaultPicture") { $obj['rowPictureDataPath'] = $rpdp }
 				$usg = Get-Child $node 'UserSettingsGroup'
 				if ($usg) { if ($usg -match '^\d+:[0-9a-fA-F]{8}-') { [Console]::Error.WriteLine("form-decompile: UserSettingsGroup '$usg' ($name) — ссылка по id, не воспроизводима, опущена") } else { $obj['userSettingsGroup'] = $usg } }
@@ -2586,13 +2623,7 @@ if ($csForm) {
 
 # events (form-level)
 $evForm = Get-Events $root $null
-if ($evForm) {
-	# form-level: компилятор хранит как {Event: handler} напрямую
-	$evMap = [ordered]@{}
-	$evNode = $root.SelectSingleNode("lf:Events", $ns)
-	foreach ($e in @($evNode.SelectNodes("lf:Event", $ns))) { $evMap[$e.GetAttribute("name")] = $e.InnerText }
-	if ($evMap.Count -gt 0) { $dsl['events'] = $evMap }
-}
+if ($evForm) { $dsl['events'] = $evForm }
 
 # Зеркало компилятор-эвристики B3 (Compute-MainAcbAutofill): наличие cmdBar-элемента где-либо
 # в дереве → форменный AutoCommandBar autofill=false. Нужно, чтобы предсказать вывод и выразить
@@ -2691,7 +2722,10 @@ if ($attrsNode) {
 		if ($tNode) {
 			$t = Get-LangTextWS $tNode   # восстановление значимого пробела (whitespace-заголовок реквизита)
 			if ($null -ne $t) {
-				if ($isMain -or -not ($t -is [string]) -or $t -ne (Title-FromName $ao['name'])) { $ao['title'] = $t }
+				# Ordinal, а не -ne/-ceq: заголовок опускаем только при ТОЧНОМ, побайтовом совпадении
+				# с авто-выводом — компилятор восстановит его как есть, значим и регистр, и мягкий
+				# перенос, и форма нормализации.
+				if ($isMain -or -not ($t -is [string]) -or -not [string]::Equals($t, (Title-FromName $ao['name']), [StringComparison]::Ordinal)) { $ao['title'] = $t }
 			}
 		} elseif (-not $isMain) {
 			$ao['title'] = ''

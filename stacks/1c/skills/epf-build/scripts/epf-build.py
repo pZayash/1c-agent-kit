@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# epf-build v1.17 — Build external data processor or report (EPF/ERF) from XML sources
+# epf-build v1.32 — Build external data processor or report (EPF/ERF) from XML sources
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 
 import argparse
@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -38,8 +40,94 @@ def ci_parse_args(parser, argv=None):
 
 
 
-def _find_project_v8path():
-    """Walk up from CWD to find .v8-project.json and read its v8path."""
+# --- Запись базы в .v8-project.json ---
+# Модель не передаёт ни путь к платформе конкретной базы, ни реквизиты хранилища: скрипт
+# сопоставляет параметры соединения с записью в databases[] и берёт их оттуда. Тот же приём,
+# что в cf-edit.py (сопоставление по configSrc).
+def same_path(a, b):
+    if not a or not b:
+        return False
+    try:
+        return os.path.abspath(a).rstrip("\\/").lower() == os.path.abspath(b).rstrip("\\/").lower()
+    except Exception:
+        return False
+
+
+def resolve_infobase_path(path):
+    """Относительный путь к базе — от корня проекта (каталог .v8-project.json, вверх от рабочего
+    каталога), как configSrc; без файла проекта — от рабочего каталога. Платформе уходит только
+    абсолютный: ibcmd считает относительный --db-path от каталога --data, а он у навыков временный."""
+    if not path:
+        return path
+    # Абсолютный на Windows — только с диском и разделителем или UNC, как в PS-порте; «\\x» берёт
+    # диск базового каталога (os.path.join); «C:x» отклоняет ещё clean_path. На POSIX — os.path.isabs.
+    absolute = re.match(r"^([A-Za-z]:[\\/]|[\\/]{2})", path) if os.name == "nt" else os.path.isabs(path)
+    if not absolute:
+        cwd = os.getcwd()
+        base = cwd
+        d = cwd
+        for _ in range(20):
+            if not d:
+                break
+            if os.path.isfile(os.path.join(d, ".v8-project.json")):
+                base = d
+                break
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+        path = os.path.abspath(os.path.join(base, path))
+    # Хвостовые разделители срезаются, но корень («C:\\», на POSIX «/») остаётся корнем
+    seps, keep = ("\\/", 3) if os.name == "nt" else ("/", 1)
+    while len(path) > keep and path[-1] in seps:
+        path = path[:-1]
+    return path
+
+
+def resolve_work_path(path):
+    """Путь файла или каталога — от рабочего каталога. Платформе уходит только абсолютный: ibcmd
+    отбрасывает ведущие «..» относительного пути и читает или пишет не там."""
+    if not path:
+        return path
+    # Абсолютный — как в resolve_infobase_path.
+    absolute = re.match(r"^([A-Za-z]:[\\/]|[\\/]{2})", path) if os.name == "nt" else os.path.isabs(path)
+    if not absolute:
+        path = os.path.abspath(os.path.join(os.getcwd(), path))
+    seps, keep = ("\\/", 3) if os.name == "nt" else ("/", 1)
+    while len(path) > keep and path[-1] in seps:
+        path = path[:-1]
+    return path
+
+
+def find_project_database(args):
+    """Запись базы в реестре, соответствующая переданному соединению. None, если не найдена."""
+    pf = _sg_find_v8project(os.getcwd())
+    if not pf:
+        return None
+    try:
+        with open(pf, encoding="utf-8-sig") as f:
+            proj = json.load(f)
+    except Exception:
+        return None
+    for db in proj.get("databases") or []:
+        if args.InfoBasePath and db.get("path") and same_path(os.path.join(os.path.dirname(pf), db["path"]), args.InfoBasePath):
+            return db
+        if args.InfoBaseServer and args.InfoBaseRef and db.get("server") and db.get("ref"):
+            if (db["server"].lower() == args.InfoBaseServer.lower()
+                    and db["ref"].lower() == args.InfoBaseRef.lower()):
+                return db
+    return None
+
+
+def _find_project_v8path(args):
+    """Walk up from CWD to find .v8-project.json and read its v8path.
+
+    v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
+    платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
+    """
+    db = find_project_database(args)
+    if db and db.get("v8path"):
+        return db["v8path"]
     d = os.getcwd()
     while True:
         pf = os.path.join(d, ".v8-project.json")
@@ -112,6 +200,9 @@ def project_extra_args(name):
                     data = json.load(f)
                 v = data.get(name)
                 if v:
+                    # Строка вместо массива — один аргумент, как у PS (@($x)), а не список символов
+                    if not isinstance(v, list):
+                        v = [v]
                     return [str(x) for x in v]
             except Exception:
                 pass
@@ -244,10 +335,10 @@ def _version_key(p):
     return [int(x) for x in re.findall(r"\d+", _version_dir(p))]
 
 
-def resolve_v8path(v8path):
+def resolve_v8path(v8path, args):
     """Resolve path to a 1C executable (1cv8; ibcmd only when given explicitly)."""
     if not v8path:
-        v8path = _find_project_v8path()
+        v8path = _find_project_v8path(args)
     if not v8path:
         if os.name == "nt":
             candidates = (
@@ -279,6 +370,51 @@ IBCMD_NOUSER_HINT = (
     "call may block instead of failing. If it does not return promptly, abort and "
     "re-run with -UserName and -Password.\n"
 )
+
+
+def run_platform_process(cmd):
+    """Run the platform with stdin closed (EOF) and capture its output.
+
+    Waits for the process, not for EOF on its pipes: a process the platform leaves behind
+    (crashpad_handler on 8.5) inherits them and keeps them open. By the time the platform
+    exits, what it wrote is already buffered; the reader threads get a second to drain it."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p.stdin.close()
+    chunks = {p.stdout: [], p.stderr: []}
+
+    def drain(stream):
+        # Chunked reads: read() returns only at EOF, and a held pipe never gives one
+        while True:
+            data = os.read(stream.fileno(), 65536)
+            if not data:
+                break
+            chunks[stream].append(data)
+
+    readers = [threading.Thread(target=drain, args=(s,), daemon=True) for s in (p.stdout, p.stderr)]
+    for t in readers:
+        t.start()
+    try:
+        while True:
+            try:
+                returncode = p.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                pass   # short waits: on Windows an endless one doesn't see Ctrl+C until the child exits
+    except BaseException:
+        # Like subprocess.run: an interrupt must not leave the platform running, holding the
+        # infobase lock and the license
+        p.kill()
+        p.wait()
+        raise
+    deadline = time.monotonic() + 1
+    for t in readers:
+        t.join(max(0, deadline - time.monotonic()))
+    result = subprocess.CompletedProcess(cmd, returncode, b"".join(chunks[p.stdout]), b"".join(chunks[p.stderr]))
+    # A pipe still held by a leftover process stays with its blocked reader
+    for t, stream in zip(readers, (p.stdout, p.stderr)):
+        if not t.is_alive():
+            stream.close()
+    return result
 
 
 def decode_platform_bytes(data):
@@ -313,6 +449,13 @@ def clean_path(value, param=""):
     v = value.strip()
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
         v = v[1:-1].strip()
+    # «C:x» — от текущего каталога диска C, своего у каждого процесса: смысл не угадать, почти
+    # всегда это опечатка в «C:\x». Отказ с подсказкой, а не путь «где-то» у платформы.
+    if os.name == "nt" and re.match(r"^[A-Za-z]:(?![\\/])", v):
+        drive = v[:2]
+        print(f"Error: {param or 'path'} is relative to the current directory of drive {drive} ({value})"
+              f" - use {drive}\\{v[2:]} or a path without a drive")
+        sys.exit(1)
     if len(v) > 3 and v[-1] in "\\/":
         v = v[:-1]
     if '"' in v:
@@ -327,6 +470,17 @@ def quote_if_needed(token):
     if token and (" " in token or "\t" in token) and '"' not in token:
         return f'"{token}"'
     return token
+
+
+def quote_text(value):
+    """Free text (user, password, comment, label, list name) framed in quotes for the 1cv8
+    command line. A lone quote inside the value ends it, and the rest is dropped silently
+    (замер 2026-11-14: «-comment» хранилища сохраняется до кавычки, exit 0); 1C reads a
+    doubled quote as one, «\\"» не понимает. On POSIX too: 1cv8 parses quotes inside each
+    argv element the same way (замер на darwin, 8.3.27), so the quote is doubled on every OS;
+    there run_v8 strips only the framing pair and leaves the doubled quote inside."""
+    value = str(value)    # a registry value may be a JSON number
+    return '"%s"' % value.replace('"', '""')
 
 
 def run_v8(v8path, arguments):
@@ -360,7 +514,7 @@ def run_v8(v8path, arguments):
                                                      # часть синтаксиса строки соединения,
                                                      # и с ними на POSIX всё работает
         cmd = [v8path] + [strip_framing_quotes(a) for a in arguments]
-    r = subprocess.run(cmd, input=b"", capture_output=True)
+    r = run_platform_process(cmd)
     r.stdout = decode_platform_bytes(r.stdout)
     r.stderr = decode_platform_bytes(r.stderr)
     return r
@@ -383,14 +537,14 @@ def print_platform_output(result):
 def run_ibcmd(cmd, has_username=False, warn_no_user=True):
     """Run an ibcmd command non-interactively.
 
-    input="" closes stdin (EOF) so ibcmd's auth prompt fast-fails instead of hanging.
+    The closed stdin (EOF) makes ibcmd's auth prompt fast-fail instead of hanging.
     On Windows without -UserName ibcmd reads the console directly and may still block —
     that residual case is flagged via IBCMD_NOUSER_HINT (model-facing).
     """
     if warn_no_user and os.name == "nt" and not has_username:
         sys.stdout.write(IBCMD_NOUSER_HINT)
         sys.stderr.flush()
-    r = subprocess.run(cmd, input=b"", capture_output=True)
+    r = run_platform_process(cmd)
     r.stdout = decode_platform_bytes(r.stdout)
     r.stderr = decode_platform_bytes(r.stderr)
     return r
@@ -405,9 +559,12 @@ def output_nonempty(path):
 def _redact(text, *secrets):
     """Redact literal secret values (password, user) from a display string —
     precise, never touches lookalike paths."""
-    for s in secrets:
-        if s:
-            text = text.replace(s, "***")
+    # A secret with a quote reaches the command line doubled (quote_text), so both forms
+    # are redacted. Longest first: a shorter form replaced earlier could break a longer one
+    # that contains it and leave part of that secret visible.
+    forms = {f for s in secrets if s for f in (str(s), str(s).replace('"', '""'))}
+    for f in sorted(forms, key=len, reverse=True):
+        text = text.replace(f, "***")
     return text
 
 
@@ -473,7 +630,7 @@ def resolve_source_path(line, source_dir):
 
 
 # True, если платформа нашла проблемы — вызывающий не собирает артефакт.
-def invoke_source_check(exe, base_path, flags, source_dir, extra_args):
+def invoke_source_check(exe, base_path, flags, source_dir, extra_args, config_src=None):
     exe_dir = os.path.dirname(exe)
     exe_leaf = os.path.basename(exe)
     if exe_leaf.lower().startswith('ibcmd'):
@@ -507,14 +664,71 @@ def invoke_source_check(exe, base_path, flags, source_dir, extra_args):
         # Пустой лог при ненулевом коде — отказ не по находкам (база занята, нет лицензии); молчать нельзя.
         if not lines:
             print(f'  платформа вернула код {result.returncode} без сообщений')
-        for l in lines:
+        hinted = []
+        for i, l in enumerate(lines):
             print(f'  {l.rstrip()}')
             src_path = resolve_source_path(l, source_dir)
             if src_path:
                 print(f'    -> {src_path}')
+            # Подсказка — под строкой кода, которую платформа печатает следом за ошибкой.
+            hint = get_undefined_module_hint(lines[i - 1], l, hinted, config_src) if i > 0 else None
+            if hint:
+                print(f'    [hint] {hint}')
+        if hinted and not config_src:
+            print('[hint] \u041e\u0431\u0449\u0438\u0435 \u043c\u043e\u0434\u0443\u043b\u0438 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0435 \u043d\u0435 \u0432\u0438\u0434\u043d\u044b: %s.' % ', '.join(hinted))
+            print('       \u0423\u043a\u0430\u0436\u0438\u0442\u0435 -ConfigSrc (\u043a\u0430\u0442\u0430\u043b\u043e\u0433 \u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0438 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438) \u0438\u043b\u0438 \u0431\u0430\u0437\u0443 \u0441 configSrc \u0432 .v8-project.json; \u043b\u0438\u0431\u043e \u0441\u043e\u0431\u0435\u0440\u0438\u0442\u0435 \u0431\u0435\u0437 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438: -Checks off')
         return True
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+# Выгрузка целевой конфигурации для проверки: явный -ConfigSrc, иначе configSrc базы из реестра.
+# Без неё обращения к общим модулям конфигурации проверка считает неопределёнными переменными.
+def resolve_config_src(args):
+    if args.ConfigSrc:
+        if not os.path.isdir(args.ConfigSrc):
+            print('Error: -ConfigSrc not found: %s' % args.ConfigSrc)
+            sys.exit(1)
+        return os.path.abspath(args.ConfigSrc)
+    db = find_project_database(args)
+    if not db or not db.get('configSrc'):
+        return None
+    p = str(db['configSrc'])
+    # Реестр пишут и на Windows: относительный путь может прийти с обратными слешами.
+    if os.sep == '/':
+        p = p.replace('\\', '/')
+    if not os.path.isabs(p):
+        pf = _sg_find_v8project(os.getcwd())
+        p = os.path.join(os.path.dirname(pf), p)
+    if not os.path.isdir(p):
+        print('WARNING: configSrc \u0431\u0430\u0437\u044b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d: %s \u2014 \u043e\u0431\u0449\u0438\u0435 \u043c\u043e\u0434\u0443\u043b\u0438 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b' % p)
+        return None
+    return p
+
+
+# «Переменная не определена (X)» при обращении X.… — чаще всего общий модуль конфигурации, которого
+# проверке не показали. Платформа печатает строку кода следующей строкой лога с меткой <<?>> перед X.
+# Подсказка одна на имя; сама ошибка остаётся ошибкой.
+def get_undefined_module_hint(line, code_line, hinted, config_src):
+    m = re.search(r'\u041f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u0430\u044f \u043d\u0435 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0430 \(([^)]+)\)', line)
+    if not m:
+        return None
+    name = m.group(1)
+    if not re.search(r'<<\?>>\s*' + re.escape(name) + r'\s*\.', code_line):
+        return None
+    if any(h.casefold() == name.casefold() for h in hinted):
+        return None
+    hinted.append(name)
+    if not config_src:
+        return '\u043f\u043e\u0445\u043e\u0436\u0435 \u043d\u0430 \u043e\u0431\u0449\u0438\u0439 \u043c\u043e\u0434\u0443\u043b\u044c \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438 \u2014 \u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0430 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0435 \u043d\u0435 \u043f\u0435\u0440\u0435\u0434\u0430\u043d\u0430'
+    cm_dir = os.path.join(config_src, 'CommonModules')
+    in_cfg = os.path.isdir(cm_dir) and any(
+        f.lower().endswith('.xml') and os.path.splitext(f)[0].casefold() == name.casefold()
+        and os.path.isfile(os.path.join(cm_dir, f))
+        for f in os.listdir(cm_dir))
+    if in_cfg:
+        return '\u043e\u0431\u0449\u0438\u0439 \u043c\u043e\u0434\u0443\u043b\u044c %s \u0435\u0441\u0442\u044c \u0432 configSrc, \u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u0432 \u043a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u0435 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 (\u0441\u043c. \u00ab\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430: \u2026\u00bb \u0432 \u0441\u0442\u0440\u043e\u043a\u0435 \u0432\u044b\u0448\u0435)' % name
+    return '\u043e\u0431\u0449\u0435\u0433\u043e \u043c\u043e\u0434\u0443\u043b\u044f %s \u043d\u0435\u0442 \u0432 configSrc (%s)' % (name, config_src)
 
 
 # Проверять ли исходники: -Checks off сильнее настройки проекта externalCheck.
@@ -561,6 +775,9 @@ def main():
     parser.add_argument("-Checks", default="")
     # Контексты синтаксической проверки. По умолчанию ThinClient,Server.
     parser.add_argument("-Context", default="")
+    # Выгрузка конфигурации, в которой будет работать обработка: её общие модули видны проверке.
+    # Без параметра берётся configSrc базы из .v8-project.json.
+    parser.add_argument("-ConfigSrc", default="")
     parser.add_argument("-AdditionalV8Arguments", nargs="*", default=[],
                         help="Extra 1cv8 arguments, e.g. /UseHwLicenses+")
     parser.add_argument("-AdditionalIbcmdArguments", nargs="*", default=[],
@@ -571,12 +788,17 @@ def main():
 
     args.V8Path = clean_path(args.V8Path, "-V8Path")
     args.InfoBasePath = clean_path(args.InfoBasePath, "-InfoBasePath")
+    args.InfoBasePath = resolve_infobase_path(args.InfoBasePath)
     assert_infobase_exists(args.InfoBasePath)
     args.SourceFile = clean_path(args.SourceFile, "-SourceFile")
+    args.SourceFile = resolve_work_path(args.SourceFile)
     args.OutputFile = clean_path(args.OutputFile, "-OutputFile")
+    args.OutputFile = resolve_work_path(args.OutputFile)
+    args.ConfigSrc = clean_path(args.ConfigSrc, "-ConfigSrc")
+    args.ConfigSrc = resolve_work_path(args.ConfigSrc)
 
     # --- Resolve V8Path ---
-    v8path = resolve_v8path(args.V8Path)
+    v8path = resolve_v8path(args.V8Path, args)
     engine = "ibcmd" if os.path.basename(v8path).lower().startswith("ibcmd") else "1cv8"
 
     # --- Resolve additional arguments for the selected engine ---
@@ -603,6 +825,21 @@ def main():
         print('Error: -Context задан, но в -Checks нет modules — контексты относятся только к ней')
         sys.exit(1)
     source_dir = os.path.dirname(os.path.abspath(args.SourceFile))
+    # Запросный список проверочная копия проверяет запросом-константой, а без базы запрос сверить не с чем
+    object_src_dir = os.path.join(source_dir, os.path.splitext(os.path.basename(args.SourceFile))[0])
+    manual_query_lists = []
+    for dirpath, _, filenames in os.walk(object_src_dir):
+        if 'Form.xml' in filenames:
+            with open(os.path.join(dirpath, 'Form.xml'), encoding='utf-8-sig', errors='replace') as fh:
+                manual_query_lists += re.findall(r'<Attribute name="([^"]+)"(?:(?!</Attribute>).)*?<ManualQuery>true</ManualQuery>', fh.read(), re.S)
+
+    def print_manual_query_hint(platform_text):
+        if not auto_created_base or not manual_query_lists or not platform_text:
+            return
+        if '\u041d\u0435\u0432\u0435\u0440\u043d\u043e \u0443\u043a\u0430\u0437\u0430\u043d\u0430 \u0433\u043b\u0430\u0432\u043d\u0430\u044f \u0442\u0430\u0431\u043b\u0438\u0446\u0430' in platform_text or any(
+                f'\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u043f\u0443\u0442\u044c \u043a \u0434\u0430\u043d\u043d\u044b\u043c: "{n}.' in platform_text for n in manual_query_lists):
+            print('[note] A form with a manual-query dynamic list cannot be built without an infobase: specify the database')
+    check_config_src = resolve_config_src(args) if check_list else None
 
     def new_stub_base(base_path, embed):
         # The stub runs its own platform processes (CREATEINFOBASE, LoadConfigFromFiles,
@@ -613,6 +850,8 @@ def main():
                     "-TempBasePath", base_path]
         if embed:
             stub_cmd += ["-EmbedSourceFile", args.SourceFile]
+        if embed and check_config_src:
+            stub_cmd += ["-ConfigSrc", check_config_src]
         if v8_extra:
             stub_cmd += ["-AdditionalV8Arguments"] + list(v8_extra)
         if ibcmd_extra:
@@ -660,7 +899,8 @@ def main():
         # Проверку ведёт 1cv8, поэтому ibcmd-шные дополнительные аргументы ей не отдаём.
         check_extra = [] if engine == "ibcmd" else extra_args
         found = invoke_source_check(v8path, check_base_path,
-                                    get_check_flags(check_list, context_list), source_dir, check_extra)
+                                    get_check_flags(check_list, context_list), source_dir, check_extra,
+                                    check_config_src)
         if found:
             if auto_created_base and os.path.exists(auto_created_base):
                 shutil.rmtree(auto_created_base, ignore_errors=True)
@@ -702,6 +942,9 @@ def main():
                 print(f"Error: exit code 0 but no non-empty file at {args.OutputFile} — build produced no output")
             else:
                 print(f"Error building external data processor/report (code: {exit_code})")
+            print_platform_output(result)
+            if exit_code != 0:
+                print_manual_query_hint((result.stdout or '') + (result.stderr or ''))
             sys.exit(exit_code)
 
         # --- Build arguments ---
@@ -713,9 +956,9 @@ def main():
             arguments += ["/F", f'"{args.InfoBasePath}"']
 
         if args.UserName:
-            arguments.append(f'/N"{args.UserName}"')
+            arguments.append('/N' + quote_text(args.UserName))
         if args.Password:
-            arguments.append(f'/P"{args.Password}"')
+            arguments.append('/P' + quote_text(args.Password))
 
         arguments += ["/LoadExternalDataProcessorOrReportFromFiles", f'"{args.SourceFile}"', f'"{args.OutputFile}"']
 
@@ -742,6 +985,7 @@ def main():
         else:
             print(f"Error building (code: {exit_code})")
 
+        log_content = ""
         if os.path.isfile(out_file):
             try:
                 with open(out_file, "r", encoding="utf-8-sig") as f:
@@ -754,6 +998,8 @@ def main():
                 pass
 
         print_platform_output(result)
+        if exit_code != 0:
+            print_manual_query_hint((log_content or '') + (result.stdout or ''))
         sys.exit(exit_code)
 
     finally:

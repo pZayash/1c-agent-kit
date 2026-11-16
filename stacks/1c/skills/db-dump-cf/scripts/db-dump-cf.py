@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# db-dump-cf v1.16 — Dump 1C configuration to CF file
+# db-dump-cf v1.26 — Dump 1C configuration to CF file
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 
 import argparse
@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -37,8 +39,108 @@ def ci_parse_args(parser, argv=None):
 
 
 
-def _find_project_v8path():
-    """Walk up from CWD to find .v8-project.json and read its v8path."""
+# --- Запись базы в .v8-project.json ---
+# Модель не передаёт ни путь к платформе конкретной базы, ни реквизиты хранилища: скрипт
+# сопоставляет параметры соединения с записью в databases[] и берёт их оттуда. Тот же приём,
+# что в cf-edit.py (сопоставление по configSrc).
+def _sg_find_v8project(start_dir):
+    d = start_dir
+    for _ in range(20):
+        if not d:
+            break
+        pj = os.path.join(d, ".v8-project.json")
+        if os.path.isfile(pj):
+            return pj
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+def same_path(a, b):
+    if not a or not b:
+        return False
+    try:
+        return os.path.abspath(a).rstrip("\\/").lower() == os.path.abspath(b).rstrip("\\/").lower()
+    except Exception:
+        return False
+
+
+def resolve_infobase_path(path):
+    """Относительный путь к базе — от корня проекта (каталог .v8-project.json, вверх от рабочего
+    каталога), как configSrc; без файла проекта — от рабочего каталога. Платформе уходит только
+    абсолютный: ibcmd считает относительный --db-path от каталога --data, а он у навыков временный."""
+    if not path:
+        return path
+    # Абсолютный на Windows — только с диском и разделителем или UNC, как в PS-порте; «\\x» берёт
+    # диск базового каталога (os.path.join); «C:x» отклоняет ещё clean_path. На POSIX — os.path.isabs.
+    absolute = re.match(r"^([A-Za-z]:[\\/]|[\\/]{2})", path) if os.name == "nt" else os.path.isabs(path)
+    if not absolute:
+        cwd = os.getcwd()
+        base = cwd
+        d = cwd
+        for _ in range(20):
+            if not d:
+                break
+            if os.path.isfile(os.path.join(d, ".v8-project.json")):
+                base = d
+                break
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+        path = os.path.abspath(os.path.join(base, path))
+    # Хвостовые разделители срезаются, но корень («C:\\», на POSIX «/») остаётся корнем
+    seps, keep = ("\\/", 3) if os.name == "nt" else ("/", 1)
+    while len(path) > keep and path[-1] in seps:
+        path = path[:-1]
+    return path
+
+
+def resolve_work_path(path):
+    """Путь файла или каталога — от рабочего каталога. Платформе уходит только абсолютный: ibcmd
+    отбрасывает ведущие «..» относительного пути и читает или пишет не там."""
+    if not path:
+        return path
+    # Абсолютный — как в resolve_infobase_path.
+    absolute = re.match(r"^([A-Za-z]:[\\/]|[\\/]{2})", path) if os.name == "nt" else os.path.isabs(path)
+    if not absolute:
+        path = os.path.abspath(os.path.join(os.getcwd(), path))
+    seps, keep = ("\\/", 3) if os.name == "nt" else ("/", 1)
+    while len(path) > keep and path[-1] in seps:
+        path = path[:-1]
+    return path
+
+
+def find_project_database(args):
+    """Запись базы в реестре, соответствующая переданному соединению. None, если не найдена."""
+    pf = _sg_find_v8project(os.getcwd())
+    if not pf:
+        return None
+    try:
+        with open(pf, encoding="utf-8-sig") as f:
+            proj = json.load(f)
+    except Exception:
+        return None
+    for db in proj.get("databases") or []:
+        if args.InfoBasePath and db.get("path") and same_path(os.path.join(os.path.dirname(pf), db["path"]), args.InfoBasePath):
+            return db
+        if args.InfoBaseServer and args.InfoBaseRef and db.get("server") and db.get("ref"):
+            if (db["server"].lower() == args.InfoBaseServer.lower()
+                    and db["ref"].lower() == args.InfoBaseRef.lower()):
+                return db
+    return None
+
+
+def _find_project_v8path(args):
+    """Walk up from CWD to find .v8-project.json and read its v8path.
+
+    v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
+    платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
+    """
+    db = find_project_database(args)
+    if db and db.get("v8path"):
+        return db["v8path"]
     d = os.getcwd()
     while True:
         pf = os.path.join(d, ".v8-project.json")
@@ -111,6 +213,9 @@ def project_extra_args(name):
                     data = json.load(f)
                 v = data.get(name)
                 if v:
+                    # Строка вместо массива — один аргумент, как у PS (@($x)), а не список символов
+                    if not isinstance(v, list):
+                        v = [v]
                     return [str(x) for x in v]
             except Exception:
                 pass
@@ -243,10 +348,10 @@ def _version_key(p):
     return [int(x) for x in re.findall(r"\d+", _version_dir(p))]
 
 
-def resolve_v8path(v8path):
+def resolve_v8path(v8path, args):
     """Resolve path to a 1C executable (1cv8; ibcmd only when given explicitly)."""
     if not v8path:
-        v8path = _find_project_v8path()
+        v8path = _find_project_v8path(args)
     if not v8path:
         if os.name == "nt":
             candidates = (
@@ -278,6 +383,51 @@ IBCMD_NOUSER_HINT = (
     "call may block instead of failing. If it does not return promptly, abort and "
     "re-run with -UserName and -Password.\n"
 )
+
+
+def run_platform_process(cmd):
+    """Run the platform with stdin closed (EOF) and capture its output.
+
+    Waits for the process, not for EOF on its pipes: a process the platform leaves behind
+    (crashpad_handler on 8.5) inherits them and keeps them open. By the time the platform
+    exits, what it wrote is already buffered; the reader threads get a second to drain it."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p.stdin.close()
+    chunks = {p.stdout: [], p.stderr: []}
+
+    def drain(stream):
+        # Chunked reads: read() returns only at EOF, and a held pipe never gives one
+        while True:
+            data = os.read(stream.fileno(), 65536)
+            if not data:
+                break
+            chunks[stream].append(data)
+
+    readers = [threading.Thread(target=drain, args=(s,), daemon=True) for s in (p.stdout, p.stderr)]
+    for t in readers:
+        t.start()
+    try:
+        while True:
+            try:
+                returncode = p.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                pass   # short waits: on Windows an endless one doesn't see Ctrl+C until the child exits
+    except BaseException:
+        # Like subprocess.run: an interrupt must not leave the platform running, holding the
+        # infobase lock and the license
+        p.kill()
+        p.wait()
+        raise
+    deadline = time.monotonic() + 1
+    for t in readers:
+        t.join(max(0, deadline - time.monotonic()))
+    result = subprocess.CompletedProcess(cmd, returncode, b"".join(chunks[p.stdout]), b"".join(chunks[p.stderr]))
+    # A pipe still held by a leftover process stays with its blocked reader
+    for t, stream in zip(readers, (p.stdout, p.stderr)):
+        if not t.is_alive():
+            stream.close()
+    return result
 
 
 def decode_platform_bytes(data):
@@ -312,6 +462,13 @@ def clean_path(value, param=""):
     v = value.strip()
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
         v = v[1:-1].strip()
+    # «C:x» — от текущего каталога диска C, своего у каждого процесса: смысл не угадать, почти
+    # всегда это опечатка в «C:\x». Отказ с подсказкой, а не путь «где-то» у платформы.
+    if os.name == "nt" and re.match(r"^[A-Za-z]:(?![\\/])", v):
+        drive = v[:2]
+        print(f"Error: {param or 'path'} is relative to the current directory of drive {drive} ({value})"
+              f" - use {drive}\\{v[2:]} or a path without a drive")
+        sys.exit(1)
     if len(v) > 3 and v[-1] in "\\/":
         v = v[:-1]
     if '"' in v:
@@ -326,6 +483,17 @@ def quote_if_needed(token):
     if token and (" " in token or "\t" in token) and '"' not in token:
         return f'"{token}"'
     return token
+
+
+def quote_text(value):
+    """Free text (user, password, comment, label, list name) framed in quotes for the 1cv8
+    command line. A lone quote inside the value ends it, and the rest is dropped silently
+    (замер 2026-11-14: «-comment» хранилища сохраняется до кавычки, exit 0); 1C reads a
+    doubled quote as one, «\\"» не понимает. On POSIX too: 1cv8 parses quotes inside each
+    argv element the same way (замер на darwin, 8.3.27), so the quote is doubled on every OS;
+    there run_v8 strips only the framing pair and leaves the doubled quote inside."""
+    value = str(value)    # a registry value may be a JSON number
+    return '"%s"' % value.replace('"', '""')
 
 
 def run_v8(v8path, arguments):
@@ -359,7 +527,7 @@ def run_v8(v8path, arguments):
                                                      # часть синтаксиса строки соединения,
                                                      # и с ними на POSIX всё работает
         cmd = [v8path] + [strip_framing_quotes(a) for a in arguments]
-    r = subprocess.run(cmd, input=b"", capture_output=True)
+    r = run_platform_process(cmd)
     r.stdout = decode_platform_bytes(r.stdout)
     r.stderr = decode_platform_bytes(r.stderr)
     return r
@@ -382,14 +550,14 @@ def print_platform_output(result):
 def run_ibcmd(cmd, has_username=False, warn_no_user=True):
     """Run an ibcmd command non-interactively.
 
-    input="" closes stdin (EOF) so ibcmd's auth prompt fast-fails instead of hanging.
+    The closed stdin (EOF) makes ibcmd's auth prompt fast-fail instead of hanging.
     On Windows without -UserName ibcmd reads the console directly and may still block —
     that residual case is flagged via IBCMD_NOUSER_HINT (model-facing).
     """
     if warn_no_user and os.name == "nt" and not has_username:
         sys.stdout.write(IBCMD_NOUSER_HINT)
         sys.stderr.flush()
-    r = subprocess.run(cmd, input=b"", capture_output=True)
+    r = run_platform_process(cmd)
     r.stdout = decode_platform_bytes(r.stdout)
     r.stderr = decode_platform_bytes(r.stderr)
     return r
@@ -404,9 +572,12 @@ def output_nonempty(path):
 def _redact(text, *secrets):
     """Redact literal secret values (password, user) from a display string —
     precise, never touches lookalike paths."""
-    for s in secrets:
-        if s:
-            text = text.replace(s, "***")
+    # A secret with a quote reaches the command line doubled (quote_text), so both forms
+    # are redacted. Longest first: a shorter form replaced earlier could break a longer one
+    # that contains it and leave part of that secret visible.
+    forms = {f for s in secrets if s for f in (str(s), str(s).replace('"', '""'))}
+    for f in sorted(forms, key=len, reverse=True):
+        text = text.replace(f, "***")
     return text
 
 
@@ -436,10 +607,12 @@ def main():
 
     args.V8Path = clean_path(args.V8Path, "-V8Path")
     args.InfoBasePath = clean_path(args.InfoBasePath, "-InfoBasePath")
+    args.InfoBasePath = resolve_infobase_path(args.InfoBasePath)
     assert_infobase_exists(args.InfoBasePath)
     args.OutputFile = clean_path(args.OutputFile, "-OutputFile")
+    args.OutputFile = resolve_work_path(args.OutputFile)
 
-    v8path = resolve_v8path(args.V8Path)
+    v8path = resolve_v8path(args.V8Path, args)
     engine = "ibcmd" if os.path.basename(v8path).lower().startswith("ibcmd") else "1cv8"
 
     # --- Resolve additional arguments for the selected engine ---
@@ -513,9 +686,9 @@ def main():
             arguments.extend(["/F", f'"{args.InfoBasePath}"'])
 
         if args.UserName:
-            arguments.append(f'/N"{args.UserName}"')
+            arguments.append('/N' + quote_text(args.UserName))
         if args.Password:
-            arguments.append(f'/P"{args.Password}"')
+            arguments.append('/P' + quote_text(args.Password))
 
         arguments.extend(["/DumpCfg", f'"{args.OutputFile}"'])
 

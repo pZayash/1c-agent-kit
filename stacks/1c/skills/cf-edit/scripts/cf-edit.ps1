@@ -1,4 +1,4 @@
-﻿# cf-edit v1.29 — Edit 1C configuration root (Configuration.xml)
+﻿# cf-edit v1.37 — Edit 1C configuration root (Configuration.xml)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 [CmdletBinding(PositionalBinding=$false)]
 param(
@@ -12,19 +12,64 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# --- Булевы флаги DSL: прощающий ввод ---
+# Флаг строкой или числом — однозначная ошибка автора JSON: true|да|истина|1 / false|нет|ложь|0 (без
+# регистра; 1/0 — и числом) приводим к bool молча. Иное — ошибка без записи: молчаливое «false» из «yes»
+# хуже отказа. Без общего читателя порты расходились: PS (-eq) принимал "false", py (is) — нет.
+function ConvertTo-DslBool {
+	param($Value, [string]$Key, [bool]$Default)
+	if ($null -eq $Value) { return $Default }
+	if ($Value -is [bool]) { return $Value }
+	if ($Value -is [string]) {
+		$t = $Value.Trim().ToLowerInvariant()
+		if (@('true', 'да', 'истина', '1') -ccontains $t) { return $true }
+		if (@('false', 'нет', 'ложь', '0') -ccontains $t) { return $false }
+	} elseif ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) {
+		if ($Value -eq 1) { return $true }
+		if ($Value -eq 0) { return $false }
+	}
+	$shown = if ($Value -is [string]) { '"' + $Value + '"' } else { "$Value" }
+	[Console]::Error.WriteLine("[ERROR] $Key = ${shown}: expected true or false")
+	exit 1
+}
+
+# Первый найденный ключ из $Keys (синонимы, без регистра) → ConvertTo-DslBool; не объект / нет ключа → $Default.
+function Get-DslBool {
+	param($Obj, [string[]]$Keys, [bool]$Default)
+	if ($null -eq $Obj -or $Obj -is [string] -or $Obj -is [ValueType]) { return $Default }
+	foreach ($k in $Keys) {
+		if ($Obj -is [System.Collections.IDictionary]) {
+			if ($Obj.Contains($k)) { return (ConvertTo-DslBool $Obj[$k] $k $Default) }
+		} elseif ($Obj.PSObject.Properties[$k]) {
+			return (ConvertTo-DslBool $Obj.PSObject.Properties[$k].Value $k $Default)
+		}
+	}
+	return $Default
+}
+
 # --- Разбор пользовательского JSON ---
 # Одна строка в stderr вместо дампа исключения ConvertFrom-Json (issue #80): агент по стектрейсу
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
+
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -37,7 +82,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	Write-Output -NoEnumerate $parsed
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -83,7 +128,7 @@ if (-not $DefinitionFile -and -not $Operation) { Write-Error "Either -Definition
 
 # --- Resolve path ---
 if (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
-	$ConfigPath = Join-Path (Get-Location).Path $ConfigPath
+	$ConfigPath = Join-Path (Get-Location).ProviderPath $ConfigPath
 }
 if (Test-Path $ConfigPath -PathType Container) {
 	$candidate = Join-Path $ConfigPath "Configuration.xml"
@@ -91,7 +136,7 @@ if (Test-Path $ConfigPath -PathType Container) {
 	else { Write-Error "No Configuration.xml in directory"; exit 1 }
 }
 if (-not (Test-Path $ConfigPath)) { Write-Error "File not found: $ConfigPath"; exit 1 }
-$resolvedPath = (Resolve-Path $ConfigPath).Path
+$resolvedPath = (Resolve-Path $ConfigPath).ProviderPath
 $script:configDir = [System.IO.Path]::GetDirectoryName($resolvedPath)
 
 # --- Support guard (Ext/ParentConfigurations.bin) ---
@@ -132,16 +177,20 @@ function Find-V8Project([string]$startDir) {
 }
 function Get-EditMode([string]$cfgDir) {
 	try {
-		$pj = Find-V8Project (Get-Location).Path
-		if (-not $pj) { $pj = Find-V8Project $cfgDir }
+		$pj = Find-V8Project (Get-Location).ProviderPath
+		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return 'deny' }
-		$proj = Get-Content -Raw $pj | ConvertFrom-Json
+		# UTF-8 явно: PS 5.1 читает файл без BOM как ANSI, и configSrc с кириллицей не совпал бы
+		$proj = Get-Content -Raw -Encoding UTF8 $pj | ConvertFrom-Json
+		# configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+		# проекта база не сопоставляется и берётся правило проекта.
+		$projDir = [System.IO.Path]::GetDirectoryName($pj)
 		$cfgFull = [System.IO.Path]::GetFullPath($cfgDir).TrimEnd('\', '/')
 		if ($proj.databases) {
 			foreach ($db in $proj.databases) {
 				if ($db.configSrc) {
-					$src = [System.IO.Path]::GetFullPath($db.configSrc).TrimEnd('\', '/')
-					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar)) {
+					$src = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($projDir, $db.configSrc)).TrimEnd('\', '/')
+					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
 						if ($db.editingAllowedCheck) { return $db.editingAllowedCheck }
 					}
 				}
@@ -154,7 +203,7 @@ function Get-EditMode([string]$cfgDir) {
 function Assert-EditAllowed([string]$targetPath, [string]$require) {
 	try {
 		$rp = $targetPath
-		try { $rp = (Resolve-Path $targetPath -ErrorAction Stop).Path } catch {}
+		try { $rp = (Resolve-Path $targetPath -ErrorAction Stop).ProviderPath } catch {}
 		# Autonomous external object (EPF/ERF): never part of a config on support (issue #39).
 		if (Test-ExternalObjectRoot $rp) { return }
 		$elemUuid = Get-RootUuid $rp
@@ -468,17 +517,18 @@ function Do-ModifyProperty([string]$batchVal) {
 function Get-NewObjectPosition([string]$cfgDir) {
 	try {
 		if (-not $cfgDir) { $cfgDir = "." }
-		$pj = Find-V8Project (Get-Location).Path
+		$pj = Find-V8Project (Get-Location).ProviderPath
 		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return "end" }
-		$proj = Get-Content -Raw $pj | ConvertFrom-Json
+		# UTF-8 явно: PS 5.1 читает файл без BOM как ANSI, и configSrc с кириллицей не совпал бы
+		$proj = Get-Content -Raw -Encoding UTF8 $pj | ConvertFrom-Json
 		$projDir = [System.IO.Path]::GetDirectoryName($pj)
 		$cfgFull = [System.IO.Path]::GetFullPath($cfgDir).TrimEnd('\', '/')
 		if ($proj.databases) {
 			foreach ($db in $proj.databases) {
 				if ($db.configSrc -and $db.newObjectPosition) {
 					$src = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($projDir, $db.configSrc)).TrimEnd('\', '/')
-					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar)) {
+					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
 						if ("$($db.newObjectPosition)" -eq "byName") { return "byName" }
 						return "end"
 					}
@@ -1124,7 +1174,7 @@ function Build-HomePageItemXml($entry, [string]$indent) {
 		$h = Get-FieldValue $entry @("height","Height")
 		$height = if ($null -ne $h) { [int]$h } else { 10 }
 		$vis = Get-FieldValue $entry @("visibility","Visibility")
-		$common = if ($null -ne $vis) { [bool]$vis } else { $true }
+		$common = ConvertTo-DslBool $vis 'visibility' $true
 		$roles = Get-FieldValue $entry @("roles")
 	}
 
@@ -1135,7 +1185,7 @@ function Build-HomePageItemXml($entry, [string]$indent) {
 		foreach ($prop in $roles.PSObject.Properties) {
 			$rname = $prop.Name
 			if (-not $rname.StartsWith("Role.") -and -not ($rname -match '^[0-9a-fA-F]{8}-')) { $rname = "Role.$rname" }
-			$rval = ([bool]$prop.Value).ToString().ToLower()
+			$rval = if (ConvertTo-DslBool $prop.Value $rname $false) { 'true' } else { 'false' }
 			$escName = [System.Security.SecurityElement]::Escape($rname)
 			$visParts += "$indent`t`t<xr:Value name=`"$escName`">$rval</xr:Value>"
 		}
@@ -1167,17 +1217,24 @@ function Do-SetHomePage($valArg) {
 		Write-Error "Unknown template '$tmpl'. Allowed: $($allowedTemplates -join ', ')"; exit 1
 	}
 
-	$leftItems = Get-FieldValue $layout @("left","LeftColumn")
+	$leftItems = Get-FieldValue $layout @("left","LeftColumn","Column")
 	$rightItems = Get-FieldValue $layout @("right","RightColumn")
 
 	# Reject unknown keys
-	$known = @("template","WorkingAreaTemplate","left","LeftColumn","right","RightColumn")
+	$known = @("template","WorkingAreaTemplate","left","LeftColumn","Column","right","RightColumn")
 	foreach ($prop in $layout.PSObject.Properties) {
 		if ($known -notcontains $prop.Name) {
 			Write-Error "Unknown key '$($prop.Name)'. Allowed: template, left, right"; exit 1
 		}
 	}
 
+	$leftKeys = @($layout.PSObject.Properties.Name | Where-Object { @("left","LeftColumn","Column") -contains $_ })
+	if ($leftKeys.Count -gt 1) {
+		Write-Error "Keys $($leftKeys -join ', ') all mean the first column - give one of them"; exit 1
+	}
+	if ($leftKeys -contains "Column" -and $tmpl -ne "OneColumn") {
+		Write-Error "Key 'Column' is the single column of template 'OneColumn'; template '$tmpl' takes 'left' and 'right'"; exit 1
+	}
 	if ($tmpl -eq "OneColumn" -and $rightItems) {
 		Write-Error "Template 'OneColumn' cannot have items in 'right' column"; exit 1
 	}
@@ -1196,15 +1253,19 @@ function Do-SetHomePage($valArg) {
 		return "`t<$tag>`r`n$body`r`n`t</$tag>"
 	}
 
-	$leftXml = Build-Column "LeftColumn" $leftItems
-	$rightXml = Build-Column "RightColumn" $rightItems
+	# Одна колонка у платформы — <Column> без RightColumn; LeftColumn/RightColumn она отвергает
+	# («Текущее LeftColumn, ожидаемое Column», замер 8.3.24).
+	$columnsXml = if ($tmpl -eq "OneColumn") {
+		Build-Column "Column" $leftItems
+	} else {
+		(Build-Column "LeftColumn" $leftItems) + "`r`n" + (Build-Column "RightColumn" $rightItems)
+	}
 
 	$hpXml = @"
 <?xml version="1.0" encoding="UTF-8"?>
 <HomePageWorkArea xmlns="http://v8.1c.ru/8.3/xcf/extrnprops" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="$($script:formatVersion)">
 	<WorkingAreaTemplate>$tmpl</WorkingAreaTemplate>
-$leftXml
-$rightXml
+$columnsXml
 </HomePageWorkArea>
 "@
 
@@ -1268,7 +1329,7 @@ function Do-SetDefaultRoles([string]$batchVal) {
 $operations = @()
 if ($DefinitionFile) {
 	if (-not [System.IO.Path]::IsPathRooted($DefinitionFile)) {
-		$DefinitionFile = Join-Path (Get-Location).Path $DefinitionFile
+		$DefinitionFile = Join-Path (Get-Location).ProviderPath $DefinitionFile
 	}
 	$jsonText = Read-JsonInputFile $DefinitionFile
 	$ops = ConvertFrom-JsonInput $jsonText $DefinitionFile

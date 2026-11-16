@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# form-decompile v0.150 — Decompile 1C managed Form.xml to JSON DSL (draft)
+# form-decompile v0.160 — Decompile 1C managed Form.xml to JSON DSL (draft)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 # ВНИМАНИЕ: раундтрип не гарантируется. Навык исключён из авто-использования моделью.
 #
@@ -460,15 +460,11 @@ def title_from_name(name):
     s = re.sub(r'([А-ЯA-Z])([А-ЯA-Z][а-яa-z])', r'\1 \2', name)
     s = re.sub(r'([а-яa-z0-9])([А-ЯA-Z])', r'\1 \2', s)
     parts = s.split(' ')
-    if len(parts) == 0:
+    if not parts:
         return s
     out = [parts[0]]
-    for i in range(1, len(parts)):
-        p = parts[i]
-        if len(p) > 1 and p == p.upper():
-            out.append(p)
-        else:
-            out.append(p.lower())
+    for p in parts[1:]:
+        out.append(p if (len(p) > 1 and p.isupper()) else p.lower())
     return ' '.join(out)
 
 
@@ -481,7 +477,7 @@ def test_has_real_markup(text):
         return False
     vals = list(text.values()) if isinstance(text, dict) else [str(text)]
     for v in vals:
-        if re.search(FMT_MARKUP_RE, str(v)):
+        if re.search(FMT_MARKUP_RE, str(v), re.I):  # как -match в PS: без учёта регистра
             return True
     return False
 
@@ -618,12 +614,6 @@ def _ps_truthy(v):
     return True
 
 
-# Зеркало PowerShell -eq/-ne для строк: регистронезависимое сравнение (PS по умолчанию ignore-case).
-# Нужно там, где сравниваются произвольно-регистровые строки (заголовок vs авто-вывод из имени).
-def _ps_ieq(a, b):
-    return a.lower() == b.lower()
-
-
 # Зеркало PowerShell "$v" (строковая интерполяция): bool→True/False, float без хвостового .0,
 # $null→'', иначе str(). Используется везде, где канон делает "$value".
 def _ps_str(v):
@@ -634,6 +624,17 @@ def _ps_str(v):
     if v is None:
         return ''
     return str(v)
+
+
+def _dlist_has_explicit_key(list_name):
+    """Список с явным ключом набора (FieldValue/RowKey/RowNumber) без основной таблицы: ссылки в строке
+    нет, умный дефолт RowPictureDataPath = <Список>.DefaultPicture компилятор ему не ставит."""
+    for a in ROOT.findall('lf:Attributes/lf:Attribute', NS):
+        if (a.get('name') or '').lower() == list_name.lower():
+            kt = a.find('lf:Settings/lf:KeyType', NS)
+            v = (kt.text or '').strip() if kt is not None else ''
+            return v != '' and v.lower() != 'auto' and a.find('lf:Settings/lf:MainTable', NS) is None
+    return False
 
 
 # Шрифт оформления → объект {@type:Font, ...} (bit-perfect для compile).
@@ -1188,14 +1189,22 @@ def add_title_location(obj, node, smart_default):
         obj['titleLocation'] = tl.lower()
 
 
-# Разобрать <Events> элемента → упорядоченная мапа { ИмяСобытия: ИмяОбработчика }.
+# Разобрать <Events> формы или элемента → упорядоченная мапа { ИмяСобытия: ИмяОбработчика }.
+# Привязка с видом вызова (расширение) — { handler, callType }; несколько привязок одного события — массив.
 def get_events(node, el_name):
     ev = node.find('lf:Events', NS)
     if ev is None:
         return None
     events = OrderedDict()
     for e in ev.findall('lf:Event', NS):
-        events[_attr(e, 'name')] = _text(e)
+        n = _attr(e, 'name')
+        ct = _attr(e, 'callType')
+        v = OrderedDict([('handler', _text(e)), ('callType', ct)]) if ct else _text(e)
+        if n in events:
+            prev = events[n]
+            events[n] = (prev if isinstance(prev, list) else [prev]) + [v]
+        else:
+            events[n] = v
     if len(events) == 0:
         return None
     return events
@@ -1468,10 +1477,13 @@ def decompile_type(type_node):
             ln = type_node.find('v8:StringQualifiers/v8:Length', NS)
             al = type_node.find('v8:StringQualifiers/v8:AllowedLength', NS)
             fixed = (al is not None and _text(al) == 'Fixed')   # Variable = дефолт; Fixed — явно
-            if ln is not None and int(_text(ln)) > 0:
-                short = ('string(%s,fixed)' % _text(ln)) if fixed else ('string(%s)' % _text(ln))
+            ll = _text(ln) if ln is not None else '0'
+            if fixed and int(ll) > 0:   # Fixed при длине 0 платформа не хранит
+                short = 'string(%s,fixed)' % ll
+            elif int(ll) > 0:
+                short = 'string(%s)' % ll
             else:
-                short = 'string'   # Length=0 → всегда Variable (корпус)
+                short = 'string'   # голая строка у form-compile — неограниченная
         elif re.match(r'^xs:decimal$', raw):
             d = type_node.find('v8:NumberQualifiers/v8:Digits', NS)
             f = type_node.find('v8:NumberQualifiers/v8:FractionDigits', NS)
@@ -1480,6 +1492,8 @@ def decompile_type(type_node):
             ff = _text(f) if f is not None else '0'
             if sgn is not None and _text(sgn) == 'Nonnegative':
                 short = 'decimal(%s,%s,nonneg)' % (dd, ff)
+            elif dd == '10' and ff == '0':
+                short = 'decimal'   # голое число у form-compile — 10,0
             else:
                 short = 'decimal(%s,%s)' % (dd, ff)
         elif re.match(r'^xs:boolean$', raw):
@@ -1687,10 +1701,16 @@ def build_dl_parameter(p_node):
     # title — опускаем, если совпадает с авто-выводом из имени (ru-only)
     title_node = p_node.find('dcssch:title', NS)
     if title_node is not None:
-        t = get_lang_text(title_node)
+        # get_lang_text_ws, а не get_lang_text: заголовком-пробелом гасят подпись, а обычное
+        # чтение схлопывает whitespace-only в '' — и компилятор подставил бы авто-вывод.
+        t = get_lang_text_ws(title_node)
         if t is not None:
+            # Сравнение байт в байт (в ps1 — [string]::Equals(..., Ordinal)): эталон — компилятор,
+            # он пишет заголовок как есть. Регистронезависимое сравнение теряло заголовок,
+            # отличающийся от авто-вывода только регистром («Организации ВетИС» при авто
+            # «Организации ВЕТИС»).
             auto = title_from_name(name)
-            if not (isinstance(t, str) and _ps_ieq(t, auto)):
+            if not (isinstance(t, str) and t == auto):
                 o['title'] = t
     vt_node = p_node.find('dcssch:valueType', NS)
     type_val = None
@@ -2105,9 +2125,17 @@ def decompile_element(node):
         if rep:
             repmap = {'None': 'none', 'NormalSeparation': 'normal', 'WeakSeparation': 'weak', 'StrongSeparation': 'strong'}
             obj['representation'] = repmap[rep] if rep in repmap else rep
+        # Зеркало компилятора. Обычная группа без showTitle: с заголовком (title/titleDataPath) — показан, без — скрыт; ключ
+        # пишется, только когда факт расходится с этим умолчанием. Сворачиваемая/всплывающая — факт. значение.
         st = get_child(node, 'ShowTitle')
-        if st is not None:
-            obj['showTitle'] = (st == 'true')
+        if behavior in ('Collapsible', 'PopUp'):
+            if st is not None:
+                obj['showTitle'] = (st == 'true')
+        elif obj.get('title') or get_child(node, 'TitleDataPath'):
+            if st == 'false':
+                obj['showTitle'] = False
+        elif st != 'false':
+            obj['showTitle'] = True
         cru = get_child(node, 'CurrentRowUse')
         if cru:
             obj['currentRowUse'] = cru
@@ -2520,7 +2548,13 @@ def decompile_element(node):
                 obj['updateOnDataChange'] = uodc
             if get_child(node, 'AllowGettingCurrentRowURL') == 'false':
                 obj['allowGettingCurrentRowURL'] = False
-            if rpdp is None:
+            # RowPictureDataPath: инверсия умного дефолта <Список>.DefaultPicture. У списка с явным ключом
+            # без основной таблицы умолчание — отсутствие (компилятор его не ставит): ""-маркер не нужен,
+            # а любое значение — явное.
+            if _dlist_has_explicit_key(_ps_str(obj.get('path'))):
+                if rpdp is not None:
+                    obj['rowPictureDataPath'] = rpdp
+            elif rpdp is None:
                 obj['rowPictureDataPath'] = ''
             elif rpdp != ('%s.DefaultPicture' % _ps_str(obj.get('path'))):
                 obj['rowPictureDataPath'] = rpdp
@@ -3244,15 +3278,10 @@ def main():
         if len(exc_form) > 0:
             dsl['excludedCommands'] = exc_form
 
-    # events (form-level) → {Event: handler} напрямую
+    # events (form-level)
     ev_form = get_events(root, None)
     if ev_form:
-        ev_map = OrderedDict()
-        ev_node = root.find('lf:Events', NS)
-        for e in ev_node.findall('lf:Event', NS):
-            ev_map[_attr(e, 'name')] = _text(e)
-        if len(ev_map) > 0:
-            dsl['events'] = ev_map
+        dsl['events'] = ev_form
 
     # elements (+ форменный AutoCommandBar как autoCmdBar-элемент)
     elem_list = []
@@ -3333,7 +3362,10 @@ def main():
             if t_node is not None:
                 t = get_lang_text_ws(t_node)
                 if t is not None:
-                    if is_main or not isinstance(t, str) or not _ps_ieq(t, title_from_name(ao['name'])):
+                    # Заголовок опускаем только при ТОЧНОМ, побайтовом совпадении с авто-выводом
+                    # (в ps1 — [string]::Equals(..., Ordinal)): компилятор восстановит его как есть,
+                    # значим и регистр, и мягкий перенос, и форма нормализации.
+                    if is_main or not isinstance(t, str) or t != title_from_name(ao['name']):
                         ao['title'] = t
             elif not is_main:
                 ao['title'] = ''

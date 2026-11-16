@@ -1,4 +1,4 @@
-﻿# web-publish v1.9 — Publish 1C infobase via Apache (+_version_dir/_version_key: общий эталон db-семейства)
+﻿# web-publish v1.17 — Publish 1C infobase via Apache (+_version_dir/_version_key: общий эталон db-семейства)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 <#
 .SYNOPSIS
@@ -86,9 +86,111 @@ param(
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+function ConvertTo-CleanPath {
+    # Forgive what is unambiguous in a path the caller passed: surrounding whitespace,
+    # surrounding quotes that survived shell parsing, a trailing separator. A quote left
+    # inside afterwards cannot be part of a real path — reject it by name instead of letting
+    # 1C answer with its opaque "Неверные или отсутствующие параметры соединения".
+    param([string]$Value, [string]$ParamName)
+    if (-not $Value) { return $Value }
+    $v = $Value.Trim()
+    if ($v.Length -ge 2 -and $v[0] -eq $v[-1] -and ($v[0] -eq '"' -or $v[0] -eq "'")) {
+        $v = $v.Substring(1, $v.Length - 2).Trim()
+    }
+    # «C:x» — от текущего каталога диска C, своего у каждого процесса: смысл не угадать, почти
+    # всегда это опечатка в «C:\x». Отказ с подсказкой, а не путь «где-то» у платформы.
+    if ($v -match '^[A-Za-z]:(?![\\/])') {
+        $drive = $v.Substring(0, 2)
+        Write-Host "Error: $ParamName is relative to the current directory of drive $drive ($Value) - use $drive\$($v.Substring(2)) or a path without a drive" -ForegroundColor Red
+        exit 1
+    }
+    if ($v.Length -gt 3 -and ($v[-1] -eq '\' -or $v[-1] -eq '/')) { $v = $v.Substring(0, $v.Length - 1) }
+    if ($v.Contains('"')) {
+        Write-Host "Error: $ParamName contains a quote character: $Value" -ForegroundColor Red
+        exit 1
+    }
+    return $v
+}
+$InfoBasePath = ConvertTo-CleanPath $InfoBasePath '-InfoBasePath'
+
+function Resolve-InfoBasePath {
+    # Относительный путь к базе — от корня проекта (каталог .v8-project.json, вверх от рабочего
+    # каталога), как configSrc; без файла проекта — от рабочего каталога. Платформе уходит только
+    # абсолютный: ibcmd считает относительный --db-path от каталога --data, а он у навыков временный.
+    # Абсолютный — только с диском и разделителем или UNC: «\x» .NET считает корневым, а платформа
+    # разрешила бы его от своего каталога; «\x» берёт диск базового каталога. «C:x» отклоняет ещё
+    # ConvertTo-CleanPath. Хвостовые разделители срезаются, но корень («C:\») остаётся корнем.
+    param([string]$Path)
+    if (-not $Path) { return $Path }
+    if ($Path -notmatch '^([A-Za-z]:[\\/]|[\\/]{2})') {
+        $cwd = (Get-Location).ProviderPath
+        $base = $cwd
+        $d = $cwd
+        for ($i = 0; $i -lt 20 -and $d; $i++) {
+            if (Test-Path -LiteralPath (Join-Path $d ".v8-project.json")) { $base = $d; break }
+            $parent = [System.IO.Path]::GetDirectoryName($d)
+            if ($parent -eq $d) { break }
+            $d = $parent
+        }
+        $joined = if ($Path -match '^[\\/]') { [System.IO.Path]::GetPathRoot($base).TrimEnd('\', '/') + $Path }
+            else { [System.IO.Path]::Combine($base, $Path) }
+        $Path = [System.IO.Path]::GetFullPath($joined)
+    }
+    while ($Path.Length -gt 3 -and ($Path[-1] -eq '\' -or $Path[-1] -eq '/')) { $Path = $Path.Substring(0, $Path.Length - 1) }
+    return $Path
+}
+$InfoBasePath = Resolve-InfoBasePath $InfoBasePath
+
+# --- Запись базы в .v8-project.json ---
+# Модель не передаёт ни путь к платформе конкретной базы, ни реквизиты хранилища: скрипт
+# сопоставляет параметры соединения с записью в databases[] и берёт их оттуда. Тот же приём,
+# что в cf-edit.ps1 (сопоставление по configSrc).
+function Find-V8Project([string]$startDir) {
+	$d = $startDir
+	for ($i = 0; $i -lt 20 -and $d; $i++) {
+		$pj = Join-Path $d ".v8-project.json"
+		if (Test-Path $pj) { return $pj }
+		$parent = [System.IO.Path]::GetDirectoryName($d)
+		if ($parent -eq $d) { break }
+		$d = $parent
+	}
+	return $null
+}
+function Test-SamePath {
+    param([string]$A, [string]$B)
+    if (-not $A -or -not $B) { return $false }
+    try {
+        $na = [System.IO.Path]::GetFullPath($A).TrimEnd('\', '/')
+        $nb = [System.IO.Path]::GetFullPath($B).TrimEnd('\', '/')
+        return $na.Equals($nb, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch { return $false }
+}
+function Find-ProjectDatabase {
+    # Запись базы в реестре, соответствующая переданному соединению. $null, если не найдена.
+    $pf = Find-V8Project (Get-Location).ProviderPath
+    if (-not $pf) { return $null }
+    try { $proj = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    if (-not $proj.databases) { return $null }
+    foreach ($db in $proj.databases) {
+        if ($InfoBasePath -and $db.path) {
+            try { $dbPath = [System.IO.Path]::Combine((Split-Path $pf -Parent), $db.path) } catch { $dbPath = $null }
+            if ($dbPath -and (Test-SamePath $dbPath $InfoBasePath)) { return $db }
+        }
+        if ($InfoBaseServer -and $InfoBaseRef -and $db.server -and $db.ref) {
+            if ($db.server.Equals($InfoBaseServer, [System.StringComparison]::OrdinalIgnoreCase) -and
+                $db.ref.Equals($InfoBaseRef, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+        }
+    }
+    return $null
+}
+
 # --- Resolve V8Path ---
 function Find-ProjectV8Path {
-    $dir = (Get-Location).Path
+    # v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
+    # платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
+    $dbRec = Find-ProjectDatabase
+    if ($dbRec -and $dbRec.v8path) { return [string]$dbRec.v8path }
+    $dir = (Get-Location).ProviderPath
     while ($dir) {
         $pf = Join-Path $dir ".v8-project.json"
         if (Test-Path $pf) {
@@ -143,7 +245,7 @@ if (-not $ApachePath) {
 }
 # Ensure absolute path (agent may pass relative like "tools/apache24")
 if (-not [System.IO.Path]::IsPathRooted($ApachePath)) {
-    $ApachePath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $ApachePath))
+    $ApachePath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).ProviderPath $ApachePath))
 }
 
 # --- Check / Install Apache ---
@@ -161,8 +263,8 @@ if (-not (Test-Path $httpdExe)) {
     }
 
     Write-Host "Apache не найден. Скачиваю..." -ForegroundColor Cyan
-    $tmpZip = Join-Path $env:TEMP "apache24.zip"
-    $tmpDir = Join-Path $env:TEMP "apache24_extract"
+    $tmpZip = Join-Path ([IO.Path]::GetTempPath()) "apache24.zip"
+    $tmpDir = Join-Path ([IO.Path]::GetTempPath()) "apache24_extract"
 
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -305,9 +407,24 @@ $vrdPathFwd = $vrdPath -replace '\\','/'
 # --- Global block (Listen + LoadModule) ---
 $globalMarkerStart = "# --- 1C: global ---"
 $globalMarkerEnd = "# --- End: global ---"
+# Адреса привязки, вписанные в наш блок руками (Listen 127.0.0.1:port + Listen [::1]:port),
+# при перезаписи сохраняем все — меняется только порт
+$listenHosts = @()
+$globalPattern = [regex]::Escape($globalMarkerStart) + '([\s\S]*?)' + [regex]::Escape($globalMarkerEnd)
+if ($confContent -match $globalPattern) {
+    foreach ($lm in [regex]::Matches($Matches[1], '(?mi)^[ \t]*Listen[ \t]+(?:(\[[^\]]+\]|[^\s:\[\]]+):)?(\d+)\b')) {
+        $h = $lm.Groups[1].Value
+        if ($listenHosts -cnotcontains $h) { $listenHosts += $h }
+    }
+}
+if ($listenHosts.Count -eq 0) { $listenHosts = @("") }
+$listenLines = ($listenHosts | ForEach-Object { if ($_) { "Listen ${_}:$Port" } else { "Listen $Port" } }) -join "`n"
+# URL — по первому адресу; «все интерфейсы» → localhost
+$firstHost = $listenHosts[0]
+$urlHost = if ($firstHost -and @('0.0.0.0', '*', '[::]') -notcontains $firstHost) { $firstHost } else { "localhost" }
 $globalBlock = @"
 $globalMarkerStart
-Listen $Port
+$listenLines
 LoadModule _1cws_module "$wsapDllFwd"
 $globalMarkerEnd
 "@
@@ -318,7 +435,7 @@ if ($confContent -match [regex]::Escape($globalMarkerStart)) {
     $confContent = [regex]::Replace($confContent, $pattern, $globalBlock)
 } else {
     # Comment out default Listen to avoid port conflict
-    $confContent = $confContent -replace '(?m)^(Listen\s+\d+)', '#$1  # commented by web-publish'
+    $confContent = $confContent -replace '(?m)^([ \t]*Listen\b[^\r\n]*)', '#$1  # commented by web-publish'
     # Append global block
     $confContent = $confContent.TrimEnd() + "`n`n" + $globalBlock + "`n"
 }
@@ -352,14 +469,15 @@ Write-Host "httpd.conf обновлён" -ForegroundColor Green
 
 # --- Helper: filter httpd processes by our ApachePath ---
 function Get-OurHttpd {
-    $httpdExeNorm = (Resolve-Path $httpdExe -ErrorAction SilentlyContinue).Path
+    $httpdExeNorm = (Resolve-Path $httpdExe -ErrorAction SilentlyContinue).ProviderPath
     Get-Process httpd -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -eq $httpdExeNorm } catch { $false }
     }
 }
 
 # --- Check port availability ---
-$portCheck = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
+# Only a listening socket holds the port: TIME_WAIT leftovers of a just-stopped Apache (owner PID 0) do not
+$portCheck = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($portCheck) {
     $ourProc = Get-OurHttpd
     if ($ourProc) {
@@ -416,7 +534,7 @@ if ($httpdCheck) {
 # --- Result ---
 Write-Host ""
 Write-Host "=== Публикация готова ===" -ForegroundColor Green
-Write-Host "URL:          http://localhost:$Port/$AppName" -ForegroundColor Cyan
-Write-Host "OData:        http://localhost:$Port/$AppName/odata/standard.odata" -ForegroundColor Cyan
-Write-Host "HTTP-сервисы: http://localhost:$Port/$AppName/hs/<RootUrl>/..." -ForegroundColor Cyan
-Write-Host "Web-сервисы:  http://localhost:$Port/$AppName/ws/<Имя>?wsdl" -ForegroundColor Cyan
+Write-Host "URL:          http://${urlHost}:$Port/$AppName" -ForegroundColor Cyan
+Write-Host "OData:        http://${urlHost}:$Port/$AppName/odata/standard.odata" -ForegroundColor Cyan
+Write-Host "HTTP-сервисы: http://${urlHost}:$Port/$AppName/hs/<RootUrl>/..." -ForegroundColor Cyan
+Write-Host "Web-сервисы:  http://${urlHost}:$Port/$AppName/ws/<Имя>?wsdl" -ForegroundColor Cyan

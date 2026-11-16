@@ -1,4 +1,4 @@
-﻿# role-compile v1.36 — Compile 1C role from JSON
+﻿# role-compile v1.51 — Compile 1C role from JSON
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 [CmdletBinding(PositionalBinding=$false)]
 param(
@@ -11,19 +11,64 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# --- Булевы флаги DSL: прощающий ввод ---
+# Флаг строкой или числом — однозначная ошибка автора JSON: true|да|истина|1 / false|нет|ложь|0 (без
+# регистра; 1/0 — и числом) приводим к bool молча. Иное — ошибка без записи: молчаливое «false» из «yes»
+# хуже отказа. Без общего читателя порты расходились: PS (-eq) принимал "false", py (is) — нет.
+function ConvertTo-DslBool {
+	param($Value, [string]$Key, [bool]$Default)
+	if ($null -eq $Value) { return $Default }
+	if ($Value -is [bool]) { return $Value }
+	if ($Value -is [string]) {
+		$t = $Value.Trim().ToLowerInvariant()
+		if (@('true', 'да', 'истина', '1') -ccontains $t) { return $true }
+		if (@('false', 'нет', 'ложь', '0') -ccontains $t) { return $false }
+	} elseif ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) {
+		if ($Value -eq 1) { return $true }
+		if ($Value -eq 0) { return $false }
+	}
+	$shown = if ($Value -is [string]) { '"' + $Value + '"' } else { "$Value" }
+	[Console]::Error.WriteLine("[ERROR] $Key = ${shown}: expected true or false")
+	exit 1
+}
+
+# Первый найденный ключ из $Keys (синонимы, без регистра) → ConvertTo-DslBool; не объект / нет ключа → $Default.
+function Get-DslBool {
+	param($Obj, [string[]]$Keys, [bool]$Default)
+	if ($null -eq $Obj -or $Obj -is [string] -or $Obj -is [ValueType]) { return $Default }
+	foreach ($k in $Keys) {
+		if ($Obj -is [System.Collections.IDictionary]) {
+			if ($Obj.Contains($k)) { return (ConvertTo-DslBool $Obj[$k] $k $Default) }
+		} elseif ($Obj.PSObject.Properties[$k]) {
+			return (ConvertTo-DslBool $Obj.PSObject.Properties[$k].Value $k $Default)
+		}
+	}
+	return $Default
+}
+
 # --- Разбор пользовательского JSON ---
 # Одна строка в stderr вместо дампа исключения ConvertFrom-Json (issue #80): агент по стектрейсу
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
+
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -36,7 +81,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	Write-Output -NoEnumerate $parsed
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -114,16 +159,20 @@ function Find-V8Project([string]$startDir) {
 }
 function Get-EditMode([string]$cfgDir) {
 	try {
-		$pj = Find-V8Project (Get-Location).Path
-		if (-not $pj) { $pj = Find-V8Project $cfgDir }
+		$pj = Find-V8Project (Get-Location).ProviderPath
+		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return 'deny' }
-		$proj = Get-Content -Raw $pj | ConvertFrom-Json
+		# UTF-8 явно: PS 5.1 читает файл без BOM как ANSI, и configSrc с кириллицей не совпал бы
+		$proj = Get-Content -Raw -Encoding UTF8 $pj | ConvertFrom-Json
+		# configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+		# проекта база не сопоставляется и берётся правило проекта.
+		$projDir = [System.IO.Path]::GetDirectoryName($pj)
 		$cfgFull = [System.IO.Path]::GetFullPath($cfgDir).TrimEnd('\', '/')
 		if ($proj.databases) {
 			foreach ($db in $proj.databases) {
 				if ($db.configSrc) {
-					$src = [System.IO.Path]::GetFullPath($db.configSrc).TrimEnd('\', '/')
-					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar)) {
+					$src = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($projDir, $db.configSrc)).TrimEnd('\', '/')
+					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
 						if ($db.editingAllowedCheck) { return $db.editingAllowedCheck }
 					}
 				}
@@ -136,7 +185,7 @@ function Get-EditMode([string]$cfgDir) {
 function Assert-EditAllowed([string]$targetPath, [string]$require) {
 	try {
 		$rp = $targetPath
-		try { $rp = (Resolve-Path $targetPath -ErrorAction Stop).Path } catch {}
+		try { $rp = (Resolve-Path $targetPath -ErrorAction Stop).ProviderPath } catch {}
 		# Autonomous external object (EPF/ERF): never part of a config on support (issue #39).
 		if (Test-ExternalObjectRoot $rp) { return }
 		$elemUuid = Get-RootUuid $rp
@@ -418,7 +467,9 @@ $script:knownRights = @{
 	)
 	"AccumulationRegister" = @("Read","Update","View","Edit","TotalsControl")
 	"AccountingRegister" = @("Read","Update","View","Edit","TotalsControl")
-	"CalculationRegister" = @("Read","View")
+	"CalculationRegister" = @(
+		"Read","Update","View","Edit"
+	)
 	"Constant" = @(
 		"Read","Update","View","Edit",
 		"ReadDataHistory","ViewDataHistory","UpdateDataHistory",
@@ -426,14 +477,13 @@ $script:knownRights = @{
 		"EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
 	)
 	"ChartOfAccounts" = @(
-		"Read","Insert","Update","Delete","View","Edit","InputByString",
-		"InteractiveInsert","InteractiveSetDeletionMark","InteractiveClearDeletionMark",
-		"InteractiveDelete",
-		"InteractiveDeletePredefinedData","InteractiveSetDeletionMarkPredefinedData",
-		"InteractiveClearDeletionMarkPredefinedData","InteractiveDeleteMarkedPredefinedData",
-		"ReadDataHistory","ReadDataHistoryOfMissingData",
-		"UpdateDataHistory","UpdateDataHistoryOfMissingData",
-		"UpdateDataHistorySettings","UpdateDataHistoryVersionComment"
+		"Read","Insert","Update","Delete"
+		"View","Edit","InputByString","InteractiveInsert"
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDelete","InteractiveDeleteMarked"
+		"InteractiveDeletePredefinedData","InteractiveSetDeletionMarkPredefinedData","InteractiveClearDeletionMarkPredefinedData","InteractiveDeleteMarkedPredefinedData"
+		"ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData"
+		"UpdateDataHistorySettings","UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment"
+		"SwitchToDataHistoryVersion"
 	)
 	"ChartOfCharacteristicTypes" = @(
 		"Read","Insert","Update","Delete","View","Edit","InputByString",
@@ -447,11 +497,13 @@ $script:knownRights = @{
 		"EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
 	)
 	"ChartOfCalculationTypes" = @(
-		"Read","Insert","Update","Delete","View","Edit","InputByString",
-		"InteractiveInsert","InteractiveSetDeletionMark","InteractiveClearDeletionMark",
-		"InteractiveDelete",
-		"InteractiveDeletePredefinedData","InteractiveSetDeletionMarkPredefinedData",
-		"InteractiveClearDeletionMarkPredefinedData","InteractiveDeleteMarkedPredefinedData"
+		"Read","Insert","Update","Delete"
+		"View","Edit","InputByString","InteractiveInsert"
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDelete","InteractiveDeleteMarked"
+		"InteractiveDeletePredefinedData","InteractiveSetDeletionMarkPredefinedData","InteractiveClearDeletionMarkPredefinedData","InteractiveDeleteMarkedPredefinedData"
+		"ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData"
+		"UpdateDataHistorySettings","UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment"
+		"SwitchToDataHistoryVersion"
 	)
 	"ExchangePlan" = @(
 		"Read","Insert","Update","Delete","View","Edit","InputByString",
@@ -463,14 +515,20 @@ $script:knownRights = @{
 		"EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
 	)
 	"BusinessProcess" = @(
-		"Read","Insert","Update","Delete","View","Edit","InputByString",
-		"Start","InteractiveInsert","InteractiveSetDeletionMark","InteractiveClearDeletionMark",
-		"InteractiveDelete","InteractiveActivate","InteractiveStart"
+		"Read","Insert","Update","Delete"
+		"View","Edit","InputByString","Start"
+		"InteractiveInsert","InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDelete"
+		"InteractiveDeleteMarked","InteractiveActivate","InteractiveStart","ReadDataHistory"
+		"ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData","UpdateDataHistorySettings"
+		"UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
 	)
 	"Task" = @(
-		"Read","Insert","Update","Delete","View","Edit","InputByString",
-		"Execute","InteractiveInsert","InteractiveSetDeletionMark","InteractiveClearDeletionMark",
-		"InteractiveDelete","InteractiveActivate","InteractiveExecute"
+		"Read","Insert","Update","Delete"
+		"View","Edit","InputByString","Execute"
+		"InteractiveInsert","InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDelete"
+		"InteractiveDeleteMarked","InteractiveActivate","InteractiveExecute","ReadDataHistory"
+		"ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData","UpdateDataHistorySettings"
+		"UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
 	)
 	"DataProcessor" = @("Use","View")
 	"Report" = @("Use","View")
@@ -611,6 +669,396 @@ $script:presets = @{
 	}
 }
 
+# --- 4a. Канонический порядок прав и узлов (замерено на платформе) ---
+# Платформа нормализует порядок <right> внутри <object> и порядок самих <object>:
+# права идут в фиксированном для типа порядке, узлы — по uuid объекта метаданных.
+# Пишем сразу так же, иначе первая же выгрузка из Конфигуратора даст диф на ровном месте.
+$script:rightOrder = @{
+	"AccountingRegister" = @("Read","Update","View","Edit","TotalsControl")
+	"AccumulationRegister" = @("Read","Update","View","Edit","TotalsControl")
+	"BusinessProcess" = @(
+		"Read","Insert","Update","Delete",
+		"View","InteractiveInsert","Edit","InteractiveDelete",
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDeleteMarked","InputByString",
+		"InteractiveActivate","Start","InteractiveStart","ReadDataHistory",
+		"ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData","UpdateDataHistorySettings",
+		"UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
+	)
+	"CalculationRegister" = @("Read","Update","View","Edit")
+	"Catalog" = @(
+		"Read","Insert","Update","Delete",
+		"View","InteractiveInsert","Edit","InteractiveDelete",
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDeleteMarked","InputByString",
+		"InteractiveDeletePredefinedData","InteractiveSetDeletionMarkPredefinedData","InteractiveClearDeletionMarkPredefinedData","InteractiveDeleteMarkedPredefinedData",
+		"ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData",
+		"UpdateDataHistorySettings","UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment",
+		"SwitchToDataHistoryVersion"
+	)
+	"ChartOfAccounts" = @(
+		"Read","Insert","Update","Delete",
+		"View","InteractiveInsert","Edit","InteractiveDelete",
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDeleteMarked","InputByString",
+		"InteractiveDeletePredefinedData","InteractiveSetDeletionMarkPredefinedData","InteractiveClearDeletionMarkPredefinedData","InteractiveDeleteMarkedPredefinedData",
+		"ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData",
+		"UpdateDataHistorySettings","UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment",
+		"SwitchToDataHistoryVersion"
+	)
+	"ChartOfCalculationTypes" = @(
+		"Read","Insert","Update","Delete",
+		"View","InteractiveInsert","Edit","InteractiveDelete",
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDeleteMarked","InputByString",
+		"InteractiveDeletePredefinedData","InteractiveSetDeletionMarkPredefinedData","InteractiveClearDeletionMarkPredefinedData","InteractiveDeleteMarkedPredefinedData",
+		"ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData",
+		"UpdateDataHistorySettings","UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment",
+		"SwitchToDataHistoryVersion"
+	)
+	"ChartOfCharacteristicTypes" = @(
+		"Read","Insert","Update","Delete",
+		"View","InteractiveInsert","Edit","InteractiveDelete",
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDeleteMarked","InputByString",
+		"InteractiveDeletePredefinedData","InteractiveSetDeletionMarkPredefinedData","InteractiveClearDeletionMarkPredefinedData","InteractiveDeleteMarkedPredefinedData",
+		"ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData",
+		"UpdateDataHistorySettings","UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment",
+		"SwitchToDataHistoryVersion"
+	)
+	"CommonAttribute" = @("View","Edit")
+	"CommonCommand" = @("View")
+	"CommonForm" = @("View")
+	"Configuration" = @(
+		"Administration","DataAdministration","UpdateDataBaseConfiguration","ExclusiveMode",
+		"ActiveUsers","EventLog","ThinClient","WebClient",
+		"MobileClient","ThickClient","ExternalConnection","Automation",
+		"TechnicalSpecialistMode","CollaborationSystemInfoBaseRegistration","MainWindowModeNormal","MainWindowModeWorkplace",
+		"MainWindowModeEmbeddedWorkplace","MainWindowModeFullscreenWorkplace","MainWindowModeKiosk","AnalyticsSystemClient",
+		"SaveUserData","ConfigurationExtensionsAdministration","InteractiveOpenExtDataProcessors","InteractiveOpenExtReports",
+		"Output"
+	)
+	"Constant" = @(
+		"Read","Update","View","Edit",
+		"ReadDataHistory","UpdateDataHistory","UpdateDataHistorySettings","UpdateDataHistoryVersionComment",
+		"ViewDataHistory","EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
+	)
+	"DataProcessor" = @("Use","View")
+	"Document" = @(
+		"Read","Insert","Update","Delete",
+		"Posting","UndoPosting","View","InteractiveInsert",
+		"Edit","InteractiveDelete","InteractiveSetDeletionMark","InteractiveClearDeletionMark",
+		"InteractiveDeleteMarked","InteractivePosting","InteractivePostingRegular","InteractiveUndoPosting",
+		"InteractiveChangeOfPosted","InputByString","ReadDataHistory","ReadDataHistoryOfMissingData",
+		"UpdateDataHistory","UpdateDataHistoryOfMissingData","UpdateDataHistorySettings","UpdateDataHistoryVersionComment",
+		"ViewDataHistory","EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
+	)
+	"DocumentJournal" = @("Read","View")
+	"ExchangePlan" = @(
+		"Read","Insert","Update","Delete",
+		"View","InteractiveInsert","Edit","InteractiveDelete",
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDeleteMarked","InputByString",
+		"ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData",
+		"UpdateDataHistorySettings","UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment",
+		"SwitchToDataHistoryVersion"
+	)
+	"FilterCriterion" = @("View")
+	"HTTPService" = @("Use")
+	"InformationRegister" = @(
+		"Read","Update","View","Edit",
+		"TotalsControl","ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory",
+		"UpdateDataHistoryOfMissingData","UpdateDataHistorySettings","UpdateDataHistoryVersionComment","ViewDataHistory",
+		"EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
+	)
+	"IntegrationService" = @("Use")
+	"Report" = @("Use","View")
+	"Sequence" = @("Read","Update")
+	"SessionParameter" = @("Get","Set")
+	"Subsystem" = @("View")
+	"Task" = @(
+		"Read","Insert","Update","Delete",
+		"View","InteractiveInsert","Edit","InteractiveDelete",
+		"InteractiveSetDeletionMark","InteractiveClearDeletionMark","InteractiveDeleteMarked","InputByString",
+		"InteractiveActivate","Execute","InteractiveExecute","ReadDataHistory",
+		"ReadDataHistoryOfMissingData","UpdateDataHistory","UpdateDataHistoryOfMissingData","UpdateDataHistorySettings",
+		"UpdateDataHistoryVersionComment","ViewDataHistory","EditDataHistoryVersionComment","SwitchToDataHistoryVersion"
+	)
+	"WebService" = @("Use")
+}
+
+$script:nestedRightOrder = @{
+	"AccountingFlag" = @("View","Edit")
+	"AddressingAttribute" = @("View","Edit")
+	"Attribute" = @("View","Edit")
+	"Command" = @("View")
+	"Dimension" = @("View","Edit")
+	"ExtDimensionAccountingFlag" = @("View","Edit")
+	"IntegrationServiceChannel" = @("Use")
+	"Method" = @("Use")
+	"Operation" = @("Use")
+	"Recalculation" = @("Read","Update")
+	"Resource" = @("View","Edit")
+	"StandardAttribute" = @("View","Edit")
+	"StandardTabularSection" = @("View","Edit")
+	"Subsystem" = @("View")
+	"TabularSection" = @("View","Edit")
+}
+
+# Каталоги объектов метаданных — нужны, чтобы прочитать uuid и расставить <object>.
+$script:typeDirs = @{
+	"Catalog"="Catalogs"; "Document"="Documents"; "DocumentJournal"="DocumentJournals"
+	"Sequence"="Sequences"; "Constant"="Constants"; "Report"="Reports"; "DataProcessor"="DataProcessors"
+	"InformationRegister"="InformationRegisters"; "AccumulationRegister"="AccumulationRegisters"
+	"AccountingRegister"="AccountingRegisters"; "CalculationRegister"="CalculationRegisters"
+	"ChartOfAccounts"="ChartsOfAccounts"; "ChartOfCharacteristicTypes"="ChartsOfCharacteristicTypes"
+	"ChartOfCalculationTypes"="ChartsOfCalculationTypes"; "ExchangePlan"="ExchangePlans"
+	"BusinessProcess"="BusinessProcesses"; "Task"="Tasks"; "Subsystem"="Subsystems"
+	"CommonForm"="CommonForms"; "CommonCommand"="CommonCommands"; "CommonAttribute"="CommonAttributes"
+	"FilterCriterion"="FilterCriteria"; "SessionParameter"="SessionParameters"
+	"WebService"="WebServices"; "HTTPService"="HTTPServices"; "IntegrationService"="IntegrationServices"
+	"ExternalDataSource"="ExternalDataSources"
+}
+
+# Порядок прав объекта: известные — по таблице, незнакомые — следом, в порядке ввода.
+function Sort-RightsCanonical {
+	param([string]$objName, $rights)
+	$parts = $objName -split '\.'
+	$order = if ($parts.Count -ge 3) { $script:nestedRightOrder[$parts[$parts.Count-2]] }
+	         else { $script:rightOrder[$parts[0]] }
+	if (-not $order) { return $rights }
+	$byName = @{}
+	foreach ($r in $rights) { if (-not $byName.ContainsKey($r.Name)) { $byName[$r.Name] = $r } }
+	$sorted = @()
+	foreach ($name in $order) { if ($byName.ContainsKey($name)) { $sorted += ,$byName[$name]; $byName.Remove($name) } }
+	foreach ($r in $rights) { if ($byName.ContainsKey($r.Name)) { $sorted += ,$r; $byName.Remove($r.Name) } }
+	return $sorted
+}
+
+# У стандартных реквизитов и стандартных табличных частей uuid в выгрузке нет: они системные.
+# Отсутствие uuid для них — норма, а не потерянный объект.
+function Test-StandardKind {
+	param([string]$objName)
+	$parts = $objName -split '\\.'
+	if ($parts.Count -lt 3) { return $false }
+	return $parts[$parts.Count-2].StartsWith("Standard")
+}
+
+# uuid объекта прав: у верхнего уровня — из файла объекта, у вложенного — спуском по дереву.
+# Искать регуляркой по всему файлу нельзя: реквизит шапки и реквизит табличной части часто
+# называются одинаково, и поиск нашёл бы первый попавшийся. Дочерние подсистемы лежат
+# отдельными файлами, поэтому для них спуск идёт по каталогам.
+# У стандартных реквизитов uuid в выгрузке нет вовсе — для них возвращаем $null молча.
+function Get-RightsObjectUuid {
+	param([string]$objName, [string]$configRoot)
+	$parts = $objName -split '\.'
+	if ($parts[0] -eq 'Configuration') {
+		$cfgPath = Join-Path $configRoot "Configuration.xml"
+		if (-not (Test-Path $cfgPath)) { return $null }
+		$head = [System.IO.File]::ReadAllText($cfgPath)
+		if ($head -match '<Configuration uuid="([0-9a-fA-F-]+)"') { return $Matches[1] }
+		return $null
+	}
+	$dir = $script:typeDirs[$parts[0]]
+	if (-not $dir -or $parts.Count -lt 2) { return $null }
+	# Подсистемы вложены каталогами: Subsystems/Родитель/Subsystems/Ребёнок.xml
+	$ownerPath = Join-Path (Join-Path $configRoot $dir) "$($parts[1]).xml"
+	$i = 2
+	while ($parts.Count -gt $i + 1 -and $parts[$i] -eq 'Subsystem') {
+		$ownerDir = [System.IO.Path]::Combine($configRoot, $dir, ($parts[1..($i-1)] -join [System.IO.Path]::DirectorySeparatorChar + 'Subsystems' + [System.IO.Path]::DirectorySeparatorChar))
+		$ownerPath = Join-Path (Join-Path ([System.IO.Path]::GetDirectoryName($ownerPath)) ([System.IO.Path]::GetFileNameWithoutExtension($ownerPath))) (Join-Path "Subsystems" "$($parts[$i+1]).xml")
+		$i += 2
+	}
+	if (-not (Test-Path $ownerPath)) { return $null }
+	$doc = New-Object System.Xml.XmlDocument
+	$doc.PreserveWhitespace = $true
+	try { $doc.Load($ownerPath) } catch { return $null }
+	$nsm = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+	$nsm.AddNamespace("md", "http://v8.1c.ru/8.3/MDClasses")
+	$node = $doc.DocumentElement.FirstChild
+	while ($node -and $node.NodeType -ne 'Element') { $node = $node.NextSibling }
+	if (-not $node) { return $null }
+	# Оставшиеся пары «вид, имя» ищем строго внутри текущего узла.
+	while ($i + 1 -lt $parts.Count) {
+		$kind = $parts[$i]
+		$name = $parts[$i+1]
+		$child = $node.SelectSingleNode("md:ChildObjects/md:$kind[md:Properties/md:Name='$name']", $nsm)
+		if (-not $child) { return $null }
+		$node = $child
+		$i += 2
+	}
+	if ($node.HasAttribute("uuid")) { return $node.GetAttribute("uuid") }
+	return $null
+}
+
+# Порядок узлов: по uuid объекта; неразрешённые — в конец, в порядке ввода.
+function Sort-ObjectsByUuid {
+	param($objects, [string]$configRoot)
+	$known = @()
+	$unknown = @()
+	foreach ($o in $objects) {
+		$uuid = Get-RightsObjectUuid -objName $o.Name -configRoot $configRoot
+		if ($uuid) { $known += ,[pscustomobject]@{ Uuid = $uuid; Obj = $o } }
+		else {
+			if (-not (Test-StandardKind $o.Name)) {
+				[Console]::Error.WriteLine("[role-compile] $($o.Name): объект не найден в выгрузке, uuid неизвестен — узел записан в конец (платформа переставит его при первой выгрузке)")
+			}
+			$unknown += ,$o
+		}
+	}
+	# Сортировка строго ordinal: Sort-Object сравнивает по культуре и игнорирует дефис,
+	# из-за чего порядок разошёлся бы и с платформой, и с py-портом.
+	$arr = [object[]]$known
+	if ($arr.Count -gt 1) {
+		[Array]::Sort($arr, [System.Comparison[object]]{ param($x, $y) [string]::CompareOrdinal($x.Uuid, $y.Uuid) })
+	}
+	$result = @()
+	foreach ($k in $arr) { $result += ,$k.Obj }
+	foreach ($u in $unknown) { $result += ,$u }
+	return $result
+}
+
+# --- 4b. Зависимости прав (замерено на платформе) ---
+# Платформа при загрузке сама доводит набор до замыкания: выдал Edit — получил ещё
+# Read, Update и View. Пишем замыкание сразу, иначе файл и база расходятся.
+# Таблица общая для типов; исключения — там, где у типа своя механика (обработка и отчёт
+# держатся на Use, план счетов не тянет Read под историю данных).
+$script:rightDeps = @{
+	"Delete" = @("Read")
+	"Edit" = @("Read","Update","View")
+	"EditDataHistoryVersionComment" = @("Read","ReadDataHistory","UpdateDataHistoryVersionComment","View")
+	"Execute" = @("Read","Update")
+	"InputByString" = @("Read","View")
+	"Insert" = @("Read")
+	"InteractiveActivate" = @("Read","Update")
+	"InteractiveChangeOfPosted" = @("Edit","Read","Update","View")
+	"InteractiveClearDeletionMark" = @("Edit","Read","Update","View")
+	"InteractiveClearDeletionMarkPredefinedData" = @("Edit","InteractiveClearDeletionMark","Read","Update","View")
+	"InteractiveDelete" = @("Delete","Edit","Read","Update","View")
+	"InteractiveDeleteMarked" = @("Delete","Edit","Read","Update","View")
+	"InteractiveDeleteMarkedPredefinedData" = @("Delete","Edit","InteractiveDeleteMarked","Read","Update","View")
+	"InteractiveDeletePredefinedData" = @("Delete","Edit","InteractiveDelete","Read","Update","View")
+	"InteractiveExecute" = @("Execute","Read","Update")
+	"InteractiveInsert" = @("Edit","Insert","Read","Update","View")
+	"InteractivePosting" = @("Edit","Posting","Read","Update","View")
+	"InteractivePostingRegular" = @("Edit","InteractivePosting","Posting","Read","Update","View")
+	"InteractiveSetDeletionMark" = @("Edit","Read","Update","View")
+	"InteractiveSetDeletionMarkPredefinedData" = @("Edit","InteractiveSetDeletionMark","Read","Update","View")
+	"InteractiveStart" = @("Read","Start","Update")
+	"InteractiveUndoPosting" = @("Edit","Read","UndoPosting","Update","View")
+	"Posting" = @("Read","Update")
+	"ReadDataHistory" = @("Read")
+	"ReadDataHistoryOfMissingData" = @("Read","ReadDataHistory")
+	"Start" = @("Read","Update")
+	"SwitchToDataHistoryVersion" = @("Read","View")
+	"UndoPosting" = @("Read","Update")
+	"Update" = @("Read")
+	"UpdateDataHistory" = @("Read","ReadDataHistory")
+	"UpdateDataHistoryOfMissingData" = @("Read","ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory")
+	"UpdateDataHistoryVersionComment" = @("Read","ReadDataHistory")
+	"View" = @("Read")
+	"ViewDataHistory" = @("Read","ReadDataHistory","View")
+}
+
+$script:rightDepsByType = @{
+	"ChartOfAccounts" = @{
+		"ReadDataHistory" = @()
+		"ReadDataHistoryOfMissingData" = @("ReadDataHistory")
+		"UpdateDataHistory" = @("ReadDataHistory")
+		"UpdateDataHistoryOfMissingData" = @("ReadDataHistory","ReadDataHistoryOfMissingData","UpdateDataHistory")
+		"UpdateDataHistoryVersionComment" = @("ReadDataHistory")
+	}
+	"DataProcessor" = @{
+		"View" = @("Use")
+	}
+	"InformationRegister" = @{
+		"UpdateDataHistoryOfMissingData" = @("Read","ReadDataHistory","UpdateDataHistory")
+	}
+	"Report" = @{
+		"View" = @("Use")
+	}
+}
+
+$script:configurationLegacyDeps = @("AnalyticsSystemClient","MainWindowModeEmbeddedWorkplace","MainWindowModeFullscreenWorkplace","MainWindowModeKiosk","MainWindowModeNormal","MainWindowModeWorkplace")
+
+# Права конфигурации: до формата 2.19 платформа взводила весь блок режимов окна вместе с
+# любым правом, с 2.19 (8.3.26) перестала. Сами права допустимы и там, и там.
+$script:configurationLegacyRank = 218
+
+# Замыкание набора прав объекта. Возвращает @{ Rights = <итог>; Added = <что дописано> }.
+# Платформа хранит только то, что ОТЛИЧАЕТСЯ от значения по умолчанию для роли: при
+# setForNewObjects=false на верхнем уровне живут разрешения, при true — запреты; у реквизитных
+# вложенных объектов ту же роль играет setForAttributesByDefault. Совпавшее с умолчанием
+# платформа выбрасывает при первой же загрузке, поэтому не пишем его и сами.
+$script:attributeKinds = @(
+	"Attribute","StandardAttribute","TabularSection","StandardTabularSection",
+	"Dimension","Resource","AccountingFlag","ExtDimensionAccountingFlag","AddressingAttribute"
+)
+
+function Get-DefaultRightValue {
+	param([string]$objName, [string]$setForNewObjects, [string]$setForAttributesByDefault)
+	$parts = $objName -split '\.'
+	if ($parts.Count -lt 3) { return $setForNewObjects }
+	# Внешние источники данных под это правило не проверялись — трогаем только то, что замерено.
+	if ($parts[0] -eq 'ExternalDataSource') { return "false" }
+	$kind = $parts[$parts.Count-2]
+	if ($script:attributeKinds -contains $kind) { return $setForAttributesByDefault }
+	# Команды, подсистемы, операции сервисов флагами роли не управляются — там живут разрешения.
+	return "false"
+}
+
+function Close-RightsDependencies {
+	param([string]$objName, $rights, [int]$formatRank)
+	$parts = $objName -split '\.'
+	$nested = $parts.Count -ge 3
+	$objectType = $parts[0]
+	$allowed = if ($nested) { Get-NestedRights -objectType $objectType -kind (Get-NestedKind $objName) }
+	           else { $script:knownRights[$objectType] }
+	if (-not $allowed) { return @{ Rights = $rights; Added = @() } }
+	$have = [ordered]@{}
+	foreach ($r in $rights) { if (-not $have.Contains($r.Name)) { $have[$r.Name] = $r } }
+	$byType = $script:rightDepsByType[$objectType]
+	$added = @()
+	# Вперёд — только от РАЗРЕШЁННЫХ прав: платформа замыкает выданное, а не запрещённое.
+	$queue = @($have.Keys | Where-Object { $have[$_].Value -eq "true" })
+	while ($queue.Count -gt 0) {
+		$name = $queue[0]
+		$queue = @($queue | Select-Object -Skip 1)
+		$need = if ($byType -and $byType.Contains($name)) { $byType[$name] } else { $script:rightDeps[$name] }
+		if (-not $need) { continue }
+		foreach ($dep in $need) {
+			if ($allowed -notcontains $dep) { continue }
+			if ($have.Contains($dep)) {
+				# Разрешение перебивает запрет — так поступает и платформа при загрузке.
+				if ($have[$dep].Value -ne "true") { $have[$dep].Value = "true"; $added += $dep; $queue += $dep }
+				continue
+			}
+			$have[$dep] = @{ Name = $dep; Value = "true"; Condition = $null }
+			$added += $dep
+			$queue += $dep
+		}
+	}
+	# Назад — от ЗАПРЕТОВ: право, которому запрещённое нужно, платформа запрещает следом.
+	$denyQueue = @($have.Keys | Where-Object { $have[$_].Value -ne "true" })
+	while ($denyQueue.Count -gt 0) {
+		$name = $denyQueue[0]
+		$denyQueue = @($denyQueue | Select-Object -Skip 1)
+		foreach ($candidate in $allowed) {
+			if ($candidate -eq $name) { continue }
+			$need = if ($byType -and $byType.Contains($candidate)) { $byType[$candidate] } else { $script:rightDeps[$candidate] }
+			if (-not $need -or $need -notcontains $name) { continue }
+			if ($have.Contains($candidate)) { continue }
+			$have[$candidate] = @{ Name = $candidate; Value = "false"; Condition = $null }
+			$added += $candidate
+			$denyQueue += $candidate
+		}
+	}
+	if ($objectType -eq 'Configuration' -and $formatRank -le $script:configurationLegacyRank -and $have.Count -gt 0) {
+		foreach ($dep in $script:configurationLegacyDeps) {
+			if ($have.Contains($dep)) { continue }
+			$have[$dep] = @{ Name = $dep; Value = "true"; Condition = $null }
+			$added += $dep
+		}
+	}
+	$result = @()
+	foreach ($k in $have.Keys) { $result += ,$have[$k] }
+	return @{ Rights = $result; Added = $added }
+}
+
 # --- 5. Helpers ---
 
 function Get-ObjectType {
@@ -742,6 +1190,30 @@ function Validate-RightName {
 	}
 
 	return $true
+}
+
+# "@путь" в значении условия — текст берётся из файла: условия RLS типовых занимают десятки
+# строк с кавычками, и внутри JSON-строки это источник ошибок экранирования. Относительный
+# путь ищется рядом с JSON-описанием роли, затем в текущем каталоге.
+function Resolve-TextFromFile {
+	param([string]$val, [string]$baseDir)
+	if (-not $val.StartsWith("@")) { return $val }
+	$filePath = $val.Substring(1)
+	if ([System.IO.Path]::IsPathRooted($filePath)) {
+		$candidates = @($filePath)
+	} else {
+		$candidates = @(
+			(Join-Path $baseDir $filePath),
+			(Join-Path (Get-Location).ProviderPath $filePath)
+		)
+	}
+	foreach ($c in $candidates) {
+		if (Test-Path $c) {
+			return (Get-Content -Raw -Encoding UTF8 $c).TrimEnd()
+		}
+	}
+	Write-Error "Файл значения не найден: $filePath (искали: $($candidates -join ', '))"
+	exit 1
 }
 
 # --- 5a. Service roots: expand to leaves ---
@@ -948,7 +1420,7 @@ function Parse-ObjectEntry {
 				$rName = Translate-RightName $p.Name
 				Validate-RightName -objectName $objName -rightName $rName | Out-Null
 				$boolVal = $p.Value
-				if ($boolVal -eq $true -or "$boolVal" -eq "True") {
+				if (ConvertTo-DslBool $boolVal $p.Name $false) {
 					$rightsMap[$rName] = @{Value="true"; Condition=$null}
 				} else {
 					$rightsMap[$rName] = @{Value="false"; Condition=$null}
@@ -962,7 +1434,7 @@ function Parse-ObjectEntry {
 		foreach ($p in $entry.rls.PSObject.Properties) {
 			$rlsRight = Translate-RightName $p.Name
 			if ($rightsMap.Contains($rlsRight)) {
-				$rightsMap[$rlsRight].Condition = "$($p.Value)"
+				$rightsMap[$rlsRight].Condition = Resolve-TextFromFile "$($p.Value)" $script:textBaseDir
 			} else {
 				Write-Warning "${objName}: RLS for '$rlsRight' but this right is not in the rights list"
 			}
@@ -988,7 +1460,10 @@ function Parse-ObjectEntry {
 if (-not $def.objects -and $def.rights) { $def | Add-Member -NotePropertyName objects -NotePropertyValue $def.rights }
 
 # Путь нужен уже здесь: раскрытие сервисного корня читает метаданные сервиса рядом с ролью.
-$resolvedOutputDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path (Get-Location) $OutputDir }
+$resolvedOutputDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path (Get-Location).ProviderPath $OutputDir }
+
+# Относительный путь @файла ищем сначала рядом с JSON-описанием роли.
+$script:textBaseDir = [System.IO.Path]::GetDirectoryName((Resolve-Path $JsonPath).ProviderPath)
 
 $parsedObjects = @()
 $seenObjectNames = @{}
@@ -1110,6 +1585,35 @@ X "`t<setForNewObjects>$sfno</setForNewObjects>"
 X "`t<setForAttributesByDefault>$sfab</setForAttributesByDefault>"
 X "`t<independentRightsOfChildObjects>$irco</independentRightsOfChildObjects>"
 
+# Замыкание зависимостей: платформа при загрузке всё равно доведёт набор до полного,
+# и файл разошёлся бы с базой. Дописанное показываем — права выдаются не молча.
+$closureNotes = @()
+foreach ($o in $parsedObjects) {
+	$closed = Close-RightsDependencies -objName $o.Name -rights $o.Rights -formatRank (Get-FormatRank $formatVersion)
+	$o.Rights = @($closed.Rights)
+	if ($closed.Added.Count -gt 0) { $closureNotes += "     $($o.Name): по зависимости добавлено — $($closed.Added -join ', ')" }
+}
+
+# Порядок как у платформы: узлы по uuid объекта, права — по канону типа. Иначе первая же
+# выгрузка из Конфигуратора переставит их и даст диф, которого никто не делал.
+$parsedObjects = @(Sort-ObjectsByUuid -objects $parsedObjects -configRoot $resolvedOutputDir)
+foreach ($o in $parsedObjects) { $o.Rights = @(Sort-RightsCanonical -objName $o.Name -rights $o.Rights) }
+
+# Записи, равные умолчанию роли, платформа не хранит — отбрасываем их сами и говорим об этом.
+$droppedByDefault = @()
+foreach ($obj in $parsedObjects) {
+	$defaultValue = Get-DefaultRightValue $obj.Name $sfno $sfab
+	$kept = @()
+	foreach ($right in $obj.Rights) {
+		# Право с ограничением отличается от умолчания самим ограничением — его платформа хранит,
+		# и выбросить его значило бы молча потерять написанное условие.
+		if ($right.Value -eq $defaultValue -and -not $right.Condition) { $droppedByDefault += "$($obj.Name).$($right.Name)"; continue }
+		$kept += ,$right
+	}
+	$obj.Rights = $kept
+}
+$parsedObjects = @($parsedObjects | Where-Object { $_.Rights.Count -gt 0 })
+
 # Object blocks
 $totalRights = 0
 foreach ($obj in $parsedObjects) {
@@ -1136,7 +1640,7 @@ if ($def.templates) {
 	foreach ($tpl in $def.templates) {
 		X "`t<restrictionTemplate>"
 		X "`t`t<name>$(Esc-XmlText "$($tpl.name)")</name>"
-		X "`t`t<condition>$(Esc-XmlText "$($tpl.condition)")</condition>"
+		X "`t`t<condition>$(Esc-XmlText (Resolve-TextFromFile "$($tpl.condition)" $script:textBaseDir))</condition>"
 		X "`t</restrictionTemplate>"
 		$templateCount++
 	}
@@ -1151,7 +1655,7 @@ $rightsXml = $script:xmlBuf.ToString()
 $outDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
 	$OutputDir
 } else {
-	Join-Path (Get-Location) $OutputDir
+	Join-Path (Get-Location).ProviderPath $OutputDir
 }
 
 # Determine Roles dir and config root
@@ -1197,17 +1701,18 @@ $enc = New-Object System.Text.UTF8Encoding($true)
 function Get-NewObjectPosition([string]$cfgDir) {
 	try {
 		if (-not $cfgDir) { $cfgDir = "." }
-		$pj = Find-V8Project (Get-Location).Path
+		$pj = Find-V8Project (Get-Location).ProviderPath
 		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return "end" }
-		$proj = Get-Content -Raw $pj | ConvertFrom-Json
+		# UTF-8 явно: PS 5.1 читает файл без BOM как ANSI, и configSrc с кириллицей не совпал бы
+		$proj = Get-Content -Raw -Encoding UTF8 $pj | ConvertFrom-Json
 		$projDir = [System.IO.Path]::GetDirectoryName($pj)
 		$cfgFull = [System.IO.Path]::GetFullPath($cfgDir).TrimEnd('\', '/')
 		if ($proj.databases) {
 			foreach ($db in $proj.databases) {
 				if ($db.configSrc -and $db.newObjectPosition) {
 					$src = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($projDir, $db.configSrc)).TrimEnd('\', '/')
-					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar)) {
+					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
 						if ("$($db.newObjectPosition)" -eq "byName") { return "byName" }
 						return "end"
 					}
@@ -1379,6 +1884,11 @@ Write-Host "     UUID: $uuid"
 Write-Host "     Metadata: $metadataPath"
 Write-Host "     Rights:   $rightsPath"
 Write-Host "     Objects: $($parsedObjects.Count), Rights: $totalRights, Templates: $templateCount"
+if ($droppedByDefault.Count -gt 0) {
+	[Console]::Error.WriteLine("[role-compile] Не записаны права, совпадающие с умолчанием роли (платформа их не хранит): $($droppedByDefault -join ', ')")
+	[Console]::Error.WriteLine("  Запрет хранится у реквизитов и табличных частей (они наследуют права объекта) либо в роли с setForNewObjects=true; выдача прав — наоборот.")
+}
+foreach ($note in $closureNotes) { Write-Host $note }
 switch ($regResult) {
 	"added"       { Write-Host "     Configuration.xml: <Role>$roleName</Role> added to ChildObjects" }
 	"already"     { Write-Host "     Configuration.xml: <Role>$roleName</Role> already registered" }

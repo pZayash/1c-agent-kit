@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# form-compile v1.196 — Compile 1C managed form from JSON or object metadata (гвард на группу additionalColumns без ключа columns)
+# form-compile v1.244 — Compile 1C managed form from JSON or object metadata
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 import argparse
 import copy
@@ -12,6 +12,42 @@ import xml.etree.ElementTree as ET
 from collections import OrderedDict
 
 from lxml import etree
+
+# --- Булевы флаги DSL: прощающий ввод ---
+# Флаг строкой или числом — однозначная ошибка автора JSON: true|да|истина|1 / false|нет|ложь|0 (без
+# регистра; 1/0 — и числом) приводим к bool молча. Иное — ошибка без записи: молчаливое «false» из «yes»
+# хуже отказа. Без общего читателя порты расходились: PS (-eq) принимал "false", py (is) — нет.
+def to_dsl_bool(value, key, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        t = value.strip().lower()
+        if t in ('true', 'да', 'истина', '1'):
+            return True
+        if t in ('false', 'нет', 'ложь', '0'):
+            return False
+    elif isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    shown = f'"{value}"' if isinstance(value, str) else f"{value}"
+    print(f"[ERROR] {key} = {shown}: expected true or false", file=sys.stderr)
+    sys.exit(1)
+
+
+def get_dsl_bool(obj, keys, default):
+    """Первый найденный ключ из keys (синонимы, без регистра) → to_dsl_bool; не dict / нет ключа → default."""
+    if not isinstance(obj, dict):
+        return default
+    for k in keys:
+        for actual in obj:
+            if isinstance(actual, str) and actual.lower() == k.lower():
+                return to_dsl_bool(obj[actual], k, default)
+    return default
+
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -184,15 +220,19 @@ def _sg_find_v8project(start_dir):
 
 def _sg_get_edit_mode(cfg_dir):
     try:
-        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(cfg_dir)
+        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(os.path.abspath(cfg_dir))
         if not pj:
             return "deny"
         proj = json.loads(open(pj, encoding="utf-8-sig").read())
-        cfg_full = os.path.normcase(os.path.abspath(cfg_dir)).rstrip("\\/")
+        # configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+        # проекта база не сопоставляется и берётся правило проекта. Пути — настоящие (realpath):
+        # на macOS /var — ссылка на /private/var, и getcwd с путём аргумента иначе не совпадут.
+        proj_dir = os.path.dirname(pj)
+        cfg_full = os.path.normcase(os.path.realpath(cfg_dir)).rstrip("\\/")
         for db in proj.get("databases", []):
             src = db.get("configSrc")
             if src:
-                src_full = os.path.normcase(os.path.abspath(src)).rstrip("\\/")
+                src_full = os.path.normcase(os.path.realpath(os.path.join(proj_dir, src))).rstrip("\\/")
                 if cfg_full == src_full or cfg_full.startswith(src_full + os.sep):
                     if db.get("editingAllowedCheck"):
                         return db["editingAllowedCheck"]
@@ -395,11 +435,17 @@ def parse_object_meta(object_path):
             f_syn = f_syn_node.text if f_syn_node is not None and f_syn_node.text else f_name
             f_type_node = _et_find(fp, 'md:Type')
             f_type = extract_type(f_type_node)
+            f_len_node = _et_find(fp, 'md:Type/v8:StringQualifiers/v8:Length')
+            f_fill_node = _et_find(fp, 'md:FillChecking')
+            f_fts_node = _et_find(fp, 'md:FullTextSearch')
             result.append({
                 'Name': f_name,
                 'Synonym': f_syn,
                 'Type': f_type,
                 'IsRef': is_ref_type(f_type),
+                'StringLength': int(f_len_node.text) if f_len_node is not None and f_len_node.text else 0,
+                'FillChecking': f_fill_node.text if f_fill_node is not None and f_fill_node.text else '',
+                'FullTextSearch': f_fts_node.text if f_fts_node is not None and f_fts_node.text else '',
             })
         return result
 
@@ -527,7 +573,7 @@ def load_preset(preset_name, script_dir, out_path_resolved):
             'additional': {'position': 'page', 'layout': '2col', 'bspGroup': True},
             'fieldDefaults': {'ref': {'choiceButton': True}, 'boolean': {'element': 'check'}},
             'commandBar': 'auto',
-            'properties': {'autoTitle': False},
+            'properties': {},
         },
         'document.list': {
             'columns': 'all', 'columnType': 'labelField', 'hiddenRef': True,
@@ -666,18 +712,341 @@ def new_field_element(attr_name, data_path, attr_type, field_defaults, extra_pro
     return el
 
 
+# --- Field rules from preset section "fields": skip, roles, props ---
+# Словари правил — объекты с ключами (пресет проекта меняет одно правило через deep merge).
+# Порядок обхода — по отсортированным ключам (ординально), как в PS-каноне.
+
+def get_fields_config(preset_data):
+    v = preset_data.get('fields')
+    return v if isinstance(v, dict) else {}
+
+
+def get_cfg_section(cfg, key):
+    if isinstance(cfg, dict):
+        v = _ci_get(cfg, key)
+        if isinstance(v, dict):
+            return v
+    return {}
+
+
+def _ci_get(d, key):
+    """\u041f\u043e\u0438\u0441\u043a \u043a\u043b\u044e\u0447\u0430 \u0431\u0435\u0437 \u0443\u0447\u0451\u0442\u0430 \u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0430 \u2014 \u043a\u0430\u043a \u0432 \u0445\u044d\u0448\u0442\u0430\u0431\u043b\u0438\u0446\u0435 PS."""
+    if not isinstance(d, dict):
+        return None
+    if key in d:
+        return d[key]
+    kl = key.lower()
+    for k in d:
+        if isinstance(k, str) and k.lower() == kl:
+            return d[k]
+    return None
+
+
+def get_sorted_keys(d):
+    return sorted(str(k) for k in d.keys())
+
+
+def get_field_type_class(f):
+    t = str(f.get('Type', ''))
+    if '|' in t:
+        return 'composite'
+    if re.search(r'EnumRef\.', t, re.I):
+        return 'enum'
+    if re.search(r'Ref\.', t, re.I):
+        return 'ref'
+    if t.lower() == 'xs:string':
+        ln = f.get('StringLength')
+        ln = int(ln) if ln is not None else 0
+        if ln == 0:
+            return 'stringUnlimited'
+        if ln <= 25:
+            return 'string25'
+        return 'string'
+    if t.lower() == 'xs:decimal':
+        return 'number'
+    if t.lower() == 'xs:datetime':
+        return 'date'
+    if t.lower() == 'xs:boolean':
+        return 'boolean'
+    return 'other'
+
+
+def find_matching_rule(rules, text):
+    for k in get_sorted_keys(rules):
+        rx = rules[k]
+        if isinstance(rx, str) and rx != '' and re.search(rx, text, re.I):
+            return k
+    return None
+
+
+def get_skip_reason(f, cfg, kind):
+    skip = get_cfg_section(cfg, 'skip')
+    r = find_matching_rule(get_cfg_section(skip, kind), f['Name'])
+    if r:
+        return r
+    r = find_matching_rule(get_cfg_section(skip, 'types'), str(f.get('Type', '')))
+    if r:
+        return r
+    return None
+
+
+def get_conditional_skips(ts, cfg):
+    res = {}
+    cond = get_cfg_section(get_cfg_section(cfg, 'skip'), 'columnsIfPresent')
+    names = [c['Name'] for c in ts['Columns']]
+    for k in get_sorted_keys(cond):
+        c = cond[k]
+        if isinstance(c, dict) and c.get('column') and c.get('when') and _ps_contains(names, c['when']):
+            res[str(c['column']).lower()] = k
+    return res
+
+
+def _ps_contains(lst, value):
+    """\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440 -contains PS: \u0441\u0440\u0430\u0432\u043d\u0435\u043d\u0438\u0435 \u0441\u0442\u0440\u043e\u043a \u0431\u0435\u0437 \u0443\u0447\u0451\u0442\u0430 \u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0430."""
+    vl = str(value).lower()
+    return any(str(x).lower() == vl for x in lst)
+
+
+def resolve_field_role(f, cfg):
+    roles = get_cfg_section(cfg, 'roles')
+    keys = get_sorted_keys(roles)
+    for by in ('names', 'types'):
+        text = str(f['Name']) if by == 'names' else str(f.get('Type', ''))
+        best = None
+        best_pr = None
+        for k in keys:
+            role = roles[k]
+            if not isinstance(role, dict):
+                continue
+            rx = _ci_get(role, by)
+            if not isinstance(rx, str) or rx == '' or not re.search(rx, text, re.I):
+                continue
+            pr = _ci_get(role, 'priority')
+            pr = int(pr) if pr is not None else 0
+            if best_pr is None or pr > best_pr:
+                best = k
+                best_pr = pr
+        if best:
+            return best
+    return None
+
+
+def get_field_props(f, cfg, section, name_override=''):
+    res = OrderedDict()
+    ps = get_cfg_section(cfg, section)
+    by_type = get_cfg_section(ps, 'byType')
+    cls = get_field_type_class(f)
+    bt = _ci_get(by_type, cls)
+    if isinstance(bt, dict):
+        for k in get_sorted_keys(bt):
+            res[k] = bt[k]
+    nm = name_override if name_override else str(f['Name'])
+    bn = _ci_get(get_cfg_section(ps, 'byName'), nm)
+    if isinstance(bn, dict):
+        for k in get_sorted_keys(bn):
+            res[k] = bn[k]
+    return res
+
+
+def merge_props(el, props):
+    if props:
+        for k in props:
+            el[k] = props[k]
+    return el
+
+
+def build_tabular_columns(ts, cfg, fd, line_number, skipped):
+    cols = []
+    if line_number:
+        ln = OrderedDict([('labelField', f"{ts['Name']}\u041d\u043e\u043c\u0435\u0440\u0421\u0442\u0440\u043e\u043a\u0438"), ('path', f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}.LineNumber")])
+        cols.append(merge_props(ln, get_field_props({'Name': '\u041d\u043e\u043c\u0435\u0440\u0421\u0442\u0440\u043e\u043a\u0438', 'Type': 'xs:decimal'}, cfg, 'columnProps', '')))
+    cond = get_conditional_skips(ts, cfg)
+    for col in ts['Columns']:
+        if not is_displayable_type(col['Type']):
+            continue
+        why = get_skip_reason(col, cfg, 'columns')
+        if not why and col['Name'].lower() in cond:
+            why = cond[col['Name'].lower()]
+        if why:
+            skipped.append(f"{ts['Name']}.{col['Name']} ({why})")
+            continue
+        el = new_field_element(f"{ts['Name']}{col['Name']}", f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}.{col['Name']}", col['Type'], fd, {})
+        cols.append(merge_props(el, get_field_props(col, cfg, 'columnProps', '')))
+    return set_columns_after(ts, cols, cfg)
+
+
+# Порядок колонок (fields.columnsAfter): колонка встаёт сразу после указанной, если обе выведены
+def set_columns_after(ts, cols, cfg):
+    rules = get_cfg_section(cfg, 'columnsAfter')
+    prefix = '\u041e\u0431\u044a\u0435\u043a\u0442.' + ts['Name'] + '.'
+    for k in get_sorted_keys(rules):
+        r = rules[k]
+        if not isinstance(r, dict) or not _ci_get(r, 'column') or not _ci_get(r, 'after'):
+            continue
+        ci = ai = -1
+        for i, el in enumerate(cols):
+            pth = str(el.get('path', ''))
+            if not pth.startswith(prefix):
+                continue
+            n = pth[len(prefix):]
+            if ci < 0 and re.search(_ci_get(r, 'column'), n, re.I):
+                ci = i
+            if ai < 0 and re.search(_ci_get(r, 'after'), n, re.I):
+                ai = i
+        if ci < 0 or ai < 0 or ci == ai + 1:
+            continue
+        moved = cols[ci]
+        rest = cols[:ci] + cols[ci + 1:]
+        at = ai - 1 if ci < ai else ai
+        cols = rest[:at + 1] + [moved] + rest[at + 1:]
+    return cols
+
+
+def get_visible_tabular_sections(meta, cfg, p, skipped):
+    legacy = []
+    ts_cfg = p.get('tabularSections') if isinstance(p, dict) else None
+    if ts_cfg and ts_cfg.get('exclude'):
+        legacy = list(ts_cfg['exclude'])
+    ts_rules = get_cfg_section(get_cfg_section(cfg, 'skip'), 'tabularSections')
+    res = []
+    for ts in meta['TabularSections']:
+        why = None
+        if _ps_contains(legacy, ts['Name']):
+            why = 'exclude'
+        if not why:
+            why = find_matching_rule(ts_rules, ts['Name'])
+        if why:
+            skipped.append(f"{ts['Name']} ({why})")
+            continue
+        res.append(ts)
+    return res
+
+
+def get_unique_element_name(base, used):
+    n = base
+    i = 1
+    while n.lower() in used:
+        n = f'{base}{i}'
+        i += 1
+    used[n.lower()] = True
+    return n
+
+
+def _used_names(meta):
+    used = {}
+    for a in meta['Attributes']:
+        used[a['Name'].lower()] = True
+    for ts in meta['TabularSections']:
+        used[ts['Name'].lower()] = True
+        for c in ts['Columns']:
+            used[f"{ts['Name']}{c['Name']}".lower()] = True
+    return used
+
+
+def write_from_object_report(skipped, placed):
+    if skipped:
+        print(f"[from-object] skipped: {', '.join(skipped)}")
+    for z in ('top', 'header.left', 'header.right', 'main.bottom', 'additional.left', 'additional.right', 'footer'):
+        if placed.get(z):
+            print(f"[from-object] {z}: {', '.join(placed[z])}")
+
+
+# Колонки списка в режиме "auto": реквизиты с ролью list:true и обязательные, в порядке метаданных, до maxColumns
+def select_list_attributes(meta, p, cfg, reserved):
+    mode = p.get('columns', 'all') if isinstance(p, dict) else 'all'
+    res = []
+    roles = get_cfg_section(cfg, 'roles')
+    for attr in meta['Attributes']:
+        if not is_displayable_type(attr['Type']):
+            continue
+        if isinstance(mode, str) and mode.lower() == 'all':
+            res.append(attr)
+            continue
+        if isinstance(mode, list):
+            if _ps_contains(mode, attr['Name']):
+                res.append(attr)
+            continue
+        if get_skip_reason(attr, cfg, 'attributes'):
+            continue
+        role = resolve_field_role(attr, cfg)
+        in_list = (role and _ci_get(roles[role], 'list') is True) or (str(attr.get('FillChecking', '')).lower() == 'showerror')
+        if in_list:
+            res.append(attr)
+    if isinstance(mode, str) and mode.lower() == 'auto':
+        # Что оставить: сначала колонки с ролью, затем обязательные (порядок метаданных); предел по числу
+        order_of = {}
+        with_role, required = [], []
+        for attr in res:
+            role = resolve_field_role(attr, cfg)
+            lo = _ci_get(roles[role], 'listOrder') if role else None
+            order_of[attr['Name']] = int(lo) if lo is not None else 50
+            if role and _ci_get(roles[role], 'list') is True:
+                with_role.append(attr)
+            else:
+                required.append(attr)
+        res = with_role + required
+        mx = int(p['maxColumns']) - reserved if p.get('maxColumns') is not None else 999
+        if mx < 0:
+            mx = 0
+        res = res[:mx]
+        # В каком порядке показать: по listOrder роли (по умолчанию 50), устойчиво по метаданным
+        kept = {a['Name'] for a in res}
+        res = sorted([a for a in meta['Attributes'] if a['Name'] in kept], key=lambda a: order_of[a['Name']])
+    return res
+
+
+def set_list_column_props(columns, cfg):
+    """Свойства колонок списка по имени колонки (раздел fields.listProps)."""
+    for c in columns:
+        merge_props(c, get_field_props({'Name': str(c.get('labelField', '')), 'Type': ''}, cfg, 'listProps', ''))
+
+
+def new_list_elements(table_el, p):
+    els = []
+    if get_dsl_bool(p, ['userSettingsGroup'], False):
+        els.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a'),
+                                ('title', '\u0413\u0440\u0443\u043f\u043f\u0430 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a'), ('showTitle', False), ('representation', 'none')]))
+        table_el['userSettingsGroup'] = '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a'
+    els.append(table_el)
+    return els
+
+
+# Подсказка о перегруженной форме: порог из fields.limits; решение — за моделью через form-edit
+def write_form_size_hint(main_count, area, tables, cfg):
+    limits = get_cfg_section(cfg, 'limits')
+    parts, norms = [], []
+    mf = _ci_get(limits, 'mainFields')
+    if mf is not None and main_count > int(mf):
+        parts.append(f'{area} has {main_count} fields')
+        norms.append(f'{int(mf)} fields on {area}')
+    tc = _ci_get(limits, 'tableColumns')
+    table_over = False
+    for t in tables:
+        if tc is not None and int(t['Count']) > int(tc):
+            parts.append(f'table "{t["Name"]}" has {t["Count"]} columns')
+            table_over = True
+    if table_over:
+        norms.append(f'{int(tc)} columns in a table')
+    if not parts:
+        return
+    print(f"[from-object] Form is large: {', '.join(parts)}; typical ERP forms keep up to {' and '.join(norms)}.")
+    print('  Keep the essentials visible; spread the rest across tabs by meaning (or onto "\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e"), or remove them from the form.')
+    print('  To edit the form, use the form-edit skill.')
+
+
 # --- Catalog DSL generators ---
 
 def generate_catalog_dsl(meta, preset_data, purpose):
     purpose_key = f"catalog.{purpose.lower()}"
     p = preset_data.get(purpose_key, {})
     fd = p.get('fieldDefaults', {})
+    cfg = get_fields_config(preset_data)
 
     dispatch = {
         'Folder': lambda: generate_catalog_folder_dsl(meta, p),
-        'List': lambda: generate_catalog_list_dsl(meta, p),
+        'List': lambda: generate_catalog_list_dsl(meta, p, cfg),
         'Choice': lambda: generate_catalog_choice_dsl(meta, p, preset_data),
-        'Item': lambda: generate_catalog_item_dsl(meta, p, fd),
+        'Item': lambda: generate_catalog_item_dsl(meta, p, fd, cfg),
     }
     return dispatch[purpose]()
 
@@ -715,20 +1084,24 @@ def generate_catalog_folder_dsl(meta, p):
     ])
 
 
-def generate_catalog_list_dsl(meta, p):
+def generate_catalog_list_dsl(meta, p, cfg):
     columns = []
     # Description always first
     columns.append(OrderedDict([('labelField', '\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435'), ('path', '\u0421\u043f\u0438\u0441\u043e\u043a.Description')]))
     # Code if present
+    reserved = 1
     if meta.get('CodeLength', 0) > 0:
         columns.append(OrderedDict([('labelField', '\u041a\u043e\u0434'), ('path', '\u0421\u043f\u0438\u0441\u043e\u043a.Code')]))
-    # Custom attributes
-    for attr in meta['Attributes']:
-        if not is_displayable_type(attr['Type']):
-            continue
+        reserved += 1
+    # Owner for subordinate catalogs
+    if meta.get('Owners'):
+        columns.append(OrderedDict([('labelField', '\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446'), ('path', '\u0421\u043f\u0438\u0441\u043e\u043a.Owner')]))
+        reserved += 1
+    for attr in select_list_attributes(meta, p, cfg, reserved):
         columns.append(OrderedDict([('labelField', attr['Name']), ('path', f"\u0421\u043f\u0438\u0441\u043e\u043a.{attr['Name']}")]))
+    set_list_column_props(columns, cfg)
     # Hidden ref
-    if p.get('hiddenRef', True) is not False:
+    if 'hiddenRef' not in p or get_dsl_bool(p, ['hiddenRef'], False):
         columns.append(OrderedDict([('labelField', '\u0421\u0441\u044b\u043b\u043a\u0430'), ('path', '\u0421\u043f\u0438\u0441\u043e\u043a.Ref'), ('userVisible', False)]))
 
     table_el = OrderedDict([
@@ -746,63 +1119,68 @@ def generate_catalog_list_dsl(meta, p):
 
     form_props = OrderedDict()
     if p.get('properties'):
-        for k in p['properties']:
-            form_props[k] = p['properties'][k]
+        for k, v in p['properties'].items():
+            form_props[k] = v
 
-    return OrderedDict([
-        ('title', meta['Synonym']),
-        ('properties', form_props),
-        ('elements', [table_el]),
-        ('attributes', [
-            OrderedDict([
-                ('name', '\u0421\u043f\u0438\u0441\u043e\u043a'), ('type', 'DynamicList'), ('main', True),
-                ('settings', OrderedDict([('mainTable', f"Catalog.{meta['Name']}"), ('dynamicDataRead', True)])),
-            ])
-        ]),
-    ])
+    dsl = OrderedDict()
+    if get_dsl_bool(p, ['title'], False):
+        dsl['title'] = meta['Synonym']
+    dsl['properties'] = form_props
+    dsl['elements'] = new_list_elements(table_el, p)
+    dsl['attributes'] = [
+        OrderedDict([
+            ('name', '\u0421\u043f\u0438\u0441\u043e\u043a'), ('type', 'DynamicList'), ('main', True),
+            ('settings', OrderedDict([('mainTable', f"Catalog.{meta['Name']}"), ('dynamicDataRead', True)])),
+        ])
+    ]
+    return dsl
 
 
 def generate_catalog_choice_dsl(meta, p, preset_data):
     # Start from list
-    list_key = 'catalog.list'
-    lp = preset_data.get(list_key, {})
-    dsl = generate_catalog_list_dsl(meta, lp)
+    lp = preset_data.get('catalog.list', {})
+    dsl = generate_catalog_list_dsl(meta, lp, get_fields_config(preset_data))
 
     # Add choice-specific properties
     dsl['properties']['windowOpeningMode'] = 'LockOwnerWindow'
     if p.get('properties'):
-        for k in p['properties']:
-            dsl['properties'][k] = p['properties'][k]
+        for k, v in p['properties'].items():
+            dsl['properties'][k] = v
 
-    # Set ChoiceMode on table
-    dsl['elements'][0]['choiceMode'] = True
+    # Set ChoiceMode on the list table
+    for el in dsl['elements']:
+        if el.get('table') == '\u0421\u043f\u0438\u0441\u043e\u043a':
+            el['choiceMode'] = True
 
     return dsl
 
 
-def generate_catalog_item_dsl(meta, p, fd):
+def generate_catalog_item_dsl(meta, p, fd, cfg):
     header_children = []
+    skipped = []
+    used = _used_names(meta)
 
     # Owner (if subordinate)
-    if meta.get('Owners') and len(meta['Owners']) > 0:
-        owner_el = OrderedDict([('input', '\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Owner'), ('readOnly', True)])
-        header_children.append(owner_el)
+    if meta.get('Owners'):
+        header_children.append(OrderedDict([('input', '\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Owner'), ('readOnly', True)]))
 
     # Code + Description
-    cd_layout = (p.get('codeDescription') or {}).get('layout', 'horizontal')
-    cd_order = (p.get('codeDescription') or {}).get('order', 'descriptionFirst')
+    cd = p.get('codeDescription') or {}
+    cd_layout = str(cd.get('layout') or 'horizontal').lower()
+    cd_order = str(cd.get('order') or 'descriptionFirst').lower()
     has_code = meta.get('CodeLength', 0) > 0
 
     if cd_layout == 'horizontal' and has_code:
-        cd_children = []
         desc_el = OrderedDict([('input', '\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Description')])
         code_el = OrderedDict([('input', '\u041a\u043e\u0434'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Code')])
-        if cd_order == 'descriptionFirst':
+        if cd_order == 'descriptionfirst':
             cd_children = [desc_el, code_el]
+            cd_name = '\u0413\u0440\u0443\u043f\u043f\u0430\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435\u041a\u043e\u0434'
         else:
             cd_children = [code_el, desc_el]
+            cd_name = '\u0413\u0440\u0443\u043f\u043f\u0430\u041a\u043e\u0434\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435'
         header_children.append(OrderedDict([
-            ('group', 'horizontal'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041a\u043e\u0434\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435'), ('showTitle', False),
+            ('group', 'horizontal'), ('name', get_unique_element_name(cd_name, used)), ('showTitle', False),
             ('representation', 'none'), ('children', cd_children),
         ]))
     else:
@@ -812,82 +1190,102 @@ def generate_catalog_item_dsl(meta, p, fd):
             header_children.append(OrderedDict([('input', '\u041a\u043e\u0434'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Code')]))
 
     # Parent (for hierarchical catalogs)
-    parent_pos = (p.get('parent') or {}).get('position', 'afterCodeDescription')
-    parent_title = (p.get('parent') or {}).get('title')
+    par = p.get('parent') or {}
+    parent_pos = str(par.get('position') or 'afterCodeDescription').lower()
+    parent_title = par.get('title') or None
     if meta.get('Hierarchical'):
         parent_el = OrderedDict([('input', '\u0420\u043e\u0434\u0438\u0442\u0435\u043b\u044c'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Parent')])
         if parent_title:
             parent_el['title'] = parent_title
-        if parent_pos == 'beforeCodeDescription':
-            insert_idx = 1 if (meta.get('Owners') and len(meta['Owners']) > 0) else 0
+        if parent_pos == 'beforecodedescription':
+            insert_idx = 1 if meta.get('Owners') else 0
             header_children.insert(insert_idx, parent_el)
         else:
-            # afterCodeDescription (default)
             header_children.append(parent_el)
 
-    # Custom attributes -> header
-    footer_field_names = (p.get('footer') or {}).get('fields', [])
+    # Реквизиты: в шапку по порядку метаданных; роль с зоной main.bottom и footer.fields — вниз формы
+    footer = p.get('footer') or {}
+    footer_field_names = list(footer.get('fields') or [])
+    roles = get_cfg_section(cfg, 'roles')
+    bottom_els = []
+    placed = {'header.left': [], 'main.bottom': []}
 
     for attr in meta['Attributes']:
-        if attr['Name'] in footer_field_names:
-            continue
         if not is_displayable_type(attr['Type']):
             continue
-        header_children.append(new_field_element(attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{attr['Name']}", attr['Type'], fd))
+        to_bottom = _ps_contains(footer_field_names, attr['Name'])
+        extra = None
+        role = resolve_field_role(attr, cfg)
+        if not to_bottom:
+            why = get_skip_reason(attr, cfg, 'attributes')
+            if why:
+                skipped.append(f"{attr['Name']} ({why})")
+                continue
+            rz = str(_ci_get(roles[role], 'zone') or '') if role else ''
+            if rz.lower() == 'hidden':
+                skipped.append(f"{attr['Name']} (hidden)")
+                continue
+            if rz.lower() == 'main.bottom':
+                to_bottom = True
+        # Свойства роли действуют и для закреплённого поля
+        if role and isinstance(_ci_get(roles[role], 'props'), dict):
+            extra = _ci_get(roles[role], 'props')
+        el = new_field_element(attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{attr['Name']}", attr['Type'], fd, {})
+        el = merge_props(el, get_field_props(attr, cfg, 'props', ''))
+        el = merge_props(el, extra)
+        if to_bottom:
+            bottom_els.append(el)
+            placed['main.bottom'].append(attr['Name'])
+        else:
+            header_children.append(el)
+            placed['header.left'].append(attr['Name'])
 
     # Build root elements
     root_elements = []
 
     # ГруппаШапка
     root_elements.append(OrderedDict([
-        ('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430'), ('showTitle', False),
+        ('group', 'vertical'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430', used)), ('showTitle', False),
         ('representation', 'none'), ('children', header_children),
     ]))
 
     # Tabular sections
-    ts_exclude = ['\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b', '\u041f\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u0438\u044f']
-    if (p.get('tabularSections') or {}).get('exclude'):
-        ts_exclude = p['tabularSections']['exclude']
-    ts_line_number = (p.get('tabularSections') or {}).get('lineNumber', True)
-
-    visible_ts = [ts for ts in meta['TabularSections'] if ts['Name'] not in ts_exclude]
-
-    for ts in visible_ts:
-        ts_cols = []
-        if ts_line_number:
-            ts_cols.append(OrderedDict([('labelField', f"{ts['Name']}\u041d\u043e\u043c\u0435\u0440\u0421\u0442\u0440\u043e\u043a\u0438"), ('path', f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}.LineNumber")]))
-        for col in ts['Columns']:
-            ts_cols.append(new_field_element(f"{ts['Name']}{col['Name']}", f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}.{col['Name']}", col['Type'], fd))
+    ts_cfg = p.get('tabularSections') or {}
+    ts_line_number = ts_cfg.get('lineNumber') if ts_cfg.get('lineNumber') is not None else True
+    table_sizes = []
+    for ts in get_visible_tabular_sections(meta, cfg, p, skipped):
+        ts_cols = build_tabular_columns(ts, cfg, fd, ts_line_number, skipped)
+        table_sizes.append({'Name': ts['Name'], 'Count': len(ts_cols) - 1 if ts_line_number else len(ts_cols)})
         root_elements.append(OrderedDict([('table', ts['Name']), ('path', f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}"), ('columns', ts_cols)]))
 
-    # Footer fields
-    for fn in footer_field_names:
-        f_attr = next((a for a in meta['Attributes'] if a['Name'] == fn), None)
-        if f_attr:
-            root_elements.append(new_field_element(f_attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{f_attr['Name']}", f_attr['Type'], fd))
+    # Нижние поля (Комментарий)
+    root_elements.extend(bottom_els)
 
     # BSP group
-    bsp_group = (p.get('additional') or {}).get('bspGroup', True)
+    add = p.get('additional') or {}
+    bsp_group = add.get('bspGroup') if add.get('bspGroup') is not None else True
     if bsp_group:
-        root_elements.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b')]))
+        root_elements.append(OrderedDict([('group', 'vertical'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b', used)), ('showTitle', True)]))
+
+    write_from_object_report(skipped, placed)
+    write_form_size_hint(len(placed['header.left']) + len(placed['main.bottom']), 'the form', table_sizes, cfg)
 
     # Properties
     form_props = OrderedDict()
     if p.get('properties'):
-        for k in p['properties']:
+        for k in get_sorted_keys(p['properties']):
             form_props[k] = p['properties'][k]
     # UseForFoldersAndItems
     if meta.get('Hierarchical') and meta.get('HierarchyType') == 'HierarchyFoldersAndItems':
         form_props['useForFoldersAndItems'] = 'Items'
 
-    return OrderedDict([
-        ('title', meta['Synonym']),
-        ('properties', form_props),
-        ('elements', root_elements),
-        ('attributes', [
-            OrderedDict([('name', '\u041e\u0431\u044a\u0435\u043a\u0442'), ('type', f"CatalogObject.{meta['Name']}"), ('main', True)])
-        ]),
-    ])
+    dsl = OrderedDict()
+    if get_dsl_bool(p, ['title'], False):
+        dsl['title'] = meta['Synonym']
+    dsl['properties'] = form_props
+    dsl['elements'] = root_elements
+    dsl['attributes'] = [OrderedDict([('name', '\u041e\u0431\u044a\u0435\u043a\u0442'), ('type', f"CatalogObject.{meta['Name']}"), ('main', True)])]
+    return dsl
 
 
 # --- Document DSL generators ---
@@ -896,27 +1294,26 @@ def generate_document_dsl(meta, preset_data, purpose):
     purpose_key = f"document.{purpose.lower()}"
     p = preset_data.get(purpose_key, {})
     fd = p.get('fieldDefaults', {})
+    cfg = get_fields_config(preset_data)
 
     dispatch = {
-        'List': lambda: generate_document_list_dsl(meta, p),
+        'List': lambda: generate_document_list_dsl(meta, p, cfg),
         'Choice': lambda: generate_document_choice_dsl(meta, p, preset_data),
-        'Item': lambda: generate_document_item_dsl(meta, p, fd),
+        'Item': lambda: generate_document_item_dsl(meta, p, fd, cfg),
     }
     return dispatch[purpose]()
 
 
-def generate_document_list_dsl(meta, p):
+def generate_document_list_dsl(meta, p, cfg):
     columns = []
     # Standard columns: Number + Date
-    columns.append(OrderedDict([('labelField', 'Номер'), ('path', 'Список.Number')]))
-    columns.append(OrderedDict([('labelField', 'Дата'), ('path', 'Список.Date')]))
-    # All custom attributes as labelField
-    for attr in meta['Attributes']:
-        if not is_displayable_type(attr['Type']):
-            continue
+    columns.append(OrderedDict([('labelField', '\u041d\u043e\u043c\u0435\u0440'), ('path', '\u0421\u043f\u0438\u0441\u043e\u043a.Number')]))
+    columns.append(OrderedDict([('labelField', '\u0414\u0430\u0442\u0430'), ('path', '\u0421\u043f\u0438\u0441\u043e\u043a.Date')]))
+    for attr in select_list_attributes(meta, p, cfg, 2):
         columns.append(OrderedDict([('labelField', attr['Name']), ('path', f"\u0421\u043f\u0438\u0441\u043e\u043a.{attr['Name']}")]))
+    set_list_column_props(columns, cfg)
     # Hidden ref
-    if p.get('hiddenRef', True):
+    if 'hiddenRef' not in p or get_dsl_bool(p, ['hiddenRef'], False):
         columns.append(OrderedDict([('labelField', '\u0421\u0441\u044b\u043b\u043a\u0430'), ('path', '\u0421\u043f\u0438\u0441\u043e\u043a.Ref'), ('userVisible', False)]))
 
     table_el = OrderedDict([
@@ -929,226 +1326,263 @@ def generate_document_list_dsl(meta, p):
 
     form_props = OrderedDict()
     if p.get('properties'):
-        for k in p['properties']:
-            form_props[k] = p['properties'][k]
+        for k, v in p['properties'].items():
+            form_props[k] = v
 
-    return OrderedDict([
-        ('title', meta['Synonym']),
-        ('properties', form_props),
-        ('elements', [table_el]),
-        ('attributes', [
-            OrderedDict([
-                ('name', '\u0421\u043f\u0438\u0441\u043e\u043a'), ('type', 'DynamicList'), ('main', True),
-                ('settings', OrderedDict([('mainTable', f"Document.{meta['Name']}"), ('dynamicDataRead', True)])),
-            ])
-        ]),
-    ])
+    dsl = OrderedDict()
+    if get_dsl_bool(p, ['title'], False):
+        dsl['title'] = meta['Synonym']
+    dsl['properties'] = form_props
+    dsl['elements'] = new_list_elements(table_el, p)
+    dsl['attributes'] = [
+        OrderedDict([
+            ('name', '\u0421\u043f\u0438\u0441\u043e\u043a'), ('type', 'DynamicList'), ('main', True),
+            ('settings', OrderedDict([('mainTable', f"Document.{meta['Name']}"), ('dynamicDataRead', True)])),
+        ])
+    ]
+    return dsl
 
 
 def generate_document_choice_dsl(meta, p, preset_data):
-    list_key = 'document.list'
-    lp = preset_data.get(list_key, {})
-    dsl = generate_document_list_dsl(meta, lp)
+    lp = preset_data.get('document.list', {})
+    dsl = generate_document_list_dsl(meta, lp, get_fields_config(preset_data))
 
     dsl['properties']['windowOpeningMode'] = 'LockOwnerWindow'
     if p.get('properties'):
-        for k in p['properties']:
-            dsl['properties'][k] = p['properties'][k]
+        for k, v in p['properties'].items():
+            dsl['properties'][k] = v
 
     return dsl
 
 
-def generate_document_item_dsl(meta, p, fd):
-    header_pos = (p.get('header') or {}).get('position', 'insidePage')
-    header_layout = (p.get('header') or {}).get('layout', '2col')
-    header_distribute = (p.get('header') or {}).get('distribute', 'even')
-    date_title = (p.get('header') or {}).get('dateTitle', '\u043e\u0442')
+def generate_document_item_dsl(meta, p, fd, cfg):
+    hdr = p.get('header') or {}
+    # Значения пресета сравниваются без учёта регистра, как -eq/-ne в PS-каноне
+    header_pos = str(hdr.get('position') or 'insidePage').lower()
+    header_layout = str(hdr.get('layout') or '2col').lower()
+    date_title = hdr.get('dateTitle') or '\u043e\u0442'
 
-    footer_fields = (p.get('footer') or {}).get('fields', [])
-    footer_pos = (p.get('footer') or {}).get('position', 'insidePage')
+    footer = p.get('footer') or {}
+    footer_fields = list(footer.get('fields') or [])
+    footer_pos = footer.get('position') or 'insidePage'
 
-    add_pos = (p.get('additional') or {}).get('position', 'page')
-    add_layout = (p.get('additional') or {}).get('layout', '2col')
-    add_bsp_group = (p.get('additional') or {}).get('bspGroup', True)
-    add_left = (p.get('additional') or {}).get('left', [])
-    add_right = (p.get('additional') or {}).get('right', [])
+    add = p.get('additional') or {}
+    add_pos = str(add.get('position') or 'page').lower()
+    add_layout = str(add.get('layout') or '2col').lower()
+    add_bsp_group = add.get('bspGroup') if add.get('bspGroup') is not None else True
+    ts_cfg = p.get('tabularSections') or {}
+    ts_line_number = ts_cfg.get('lineNumber') if ts_cfg.get('lineNumber') is not None else True
 
-    header_right = (p.get('header') or {}).get('right', [])
-
-    ts_exclude = ['\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b']
-    if (p.get('tabularSections') or {}).get('exclude'):
-        ts_exclude = p['tabularSections']['exclude']
-    ts_line_number = (p.get('tabularSections') or {}).get('lineNumber', True)
-
-    # Classify attributes
-    claimed = {}
+    # Закреплённые поля: имя → зона (имя без учёта регистра, как ключ хэштаблицы PS)
+    pinned = {}
     for fn in footer_fields:
-        claimed[fn] = 'footer'
-    for fn in header_right:
-        claimed[fn] = 'header.right'
-    for fn in add_left:
-        claimed[fn] = 'additional.left'
-    for fn in add_right:
-        claimed[fn] = 'additional.right'
+        pinned[fn.lower()] = 'footer' if str(footer_pos).lower() == 'belowpages' else 'main.bottom'
+    for src, zone in ((hdr.get('left'), 'header.left'), (hdr.get('right'), 'header.right'),
+                      (add.get('left'), 'additional.left'), (add.get('right'), 'additional.right')):
+        if src:
+            for fn in (src if isinstance(src, list) else [src]):
+                pinned[fn.lower()] = zone
 
-    unclaimed = [attr for attr in meta['Attributes'] if attr['Name'] not in claimed and is_displayable_type(attr['Type'])]
+    roles = get_cfg_section(cfg, 'roles')
+    unplaced = get_cfg_section(cfg, 'unplaced')
+    skipped = []
+    zone_names = ('top', 'header.left', 'header.right', 'header', 'main.bottom', 'additional.left', 'additional.right', 'additional', 'footer')
+    zones = {z: [] for z in zone_names}
 
-    # Distribute unclaimed
-    left_attrs = []
-    right_extra_attrs = []
-    if header_distribute == 'left':
-        left_attrs = unclaimed
-    elif header_distribute == 'right':
-        right_extra_attrs = unclaimed
-    else:  # "even"
-        import math
-        half = math.ceil(len(unclaimed) / 2) if unclaimed else 0
-        left_attrs = unclaimed[:half]
-        right_extra_attrs = unclaimed[half:]
+    # Без табличных частей форма без страниц: поля «Дополнительно» уходят в шапку
+    visible_ts = get_visible_tabular_sections(meta, cfg, p, skipped)
+    use_pages = len(visible_ts) > 0
 
-    # Build ГруппаНомерДата
-    num_date_children = [
-        OrderedDict([('input', '\u041d\u043e\u043c\u0435\u0440'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Number'), ('autoMaxWidth', False), ('width', 9)]),
-        OrderedDict([('input', '\u0414\u0430\u0442\u0430'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Date'), ('title', date_title)]),
-    ]
+    # 1. Зона каждого реквизита: закрепление → роль → правило для нераспознанных
+    for attr in meta['Attributes']:
+        if not is_displayable_type(attr['Type']):
+            continue
+        zone = None
+        extra = None
+        order = 0
+        is_pinned = attr['Name'].lower() in pinned
+        if not is_pinned:
+            why = get_skip_reason(attr, cfg, 'attributes')
+            if why:
+                skipped.append(f"{attr['Name']} ({why})")
+                continue
+        # Свойства и порядок роли действуют и для закреплённого поля; закрепление меняет только зону
+        role = resolve_field_role(attr, cfg)
+        if role:
+            if isinstance(_ci_get(roles[role], 'props'), dict):
+                extra = _ci_get(roles[role], 'props')
+            if _ci_get(roles[role], 'order') is not None:
+                order = int(_ci_get(roles[role], 'order'))
+        if is_pinned:
+            zone = pinned[attr['Name'].lower()]
+        elif role and _ci_get(roles[role], 'zone'):
+            zone = str(_ci_get(roles[role], 'zone'))
+        else:
+            fc = str(attr.get('FillChecking', '')).lower()
+            fts = str(attr.get('FullTextSearch', '')).lower()
+            kind = 'required' if fc == 'showerror' else ('notSearchable' if fts == 'dontuse' else 'optional')
+            uz = _ci_get(unplaced, kind)
+            zone = str(uz) if uz else 'header'
+        if zone.lower() == 'hidden':
+            skipped.append(f"{attr['Name']} (hidden)")
+            continue
+        # Неизвестная зона (опечатка в пресете) — в шапку, до поправок под раскладку
+        zone = next((z for z in zone_names if z.lower() == zone.lower()), 'header')
+        if (add_pos != 'page' or not use_pages) and zone.startswith('additional'):
+            zone = 'header'
+        if header_layout != '2col' and zone.startswith('header'):
+            zone = 'header.left'
+        if add_layout != '2col' and zone.startswith('additional'):
+            zone = 'additional.left'
+        zones[zone].append({'Attr': attr, 'Extra': extra, 'Order': order})
+
+    # Нераспознанные — в более короткую колонку (слева ещё группа Номер+Дата); distribute left/right — всё в одну
+    distribute = str(hdr.get('distribute') or 'even').lower()
+    left_count = 1 + len(zones['header.left'])
+    right_count = len(zones['header.right'])
+    if distribute == 'left':
+        right_count = float('inf')
+    if distribute == 'right':
+        left_count = float('inf')
+    for it in zones['header']:
+        if right_count < left_count:
+            zones['header.right'].append(it)
+            right_count += 1
+        else:
+            zones['header.left'].append(it)
+            left_count += 1
+    left_count = len(zones['additional.left'])
+    right_count = len(zones['additional.right'])
+    for it in zones['additional']:
+        if right_count < left_count:
+            zones['additional.right'].append(it)
+            right_count += 1
+        else:
+            zones['additional.left'].append(it)
+            left_count += 1
+
+    used = _used_names(meta)
+    placed = {}
+
+    def build_zone(z):
+        els = []
+        placed[z] = []
+        # Устойчиво по order роли (по умолчанию 0), внутри — порядок метаданных
+        for it in sorted(zones[z], key=lambda x: int(x.get('Order', 0))):
+            a = it['Attr']
+            el = new_field_element(a['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{a['Name']}", a['Type'], fd, {})
+            el = merge_props(el, get_field_props(a, cfg, 'props', ''))
+            el = merge_props(el, it['Extra'])
+            els.append(el)
+            placed[z].append(a['Name'])
+        return els
+
+    # Номер + Дата
+    num_el = merge_props(OrderedDict([('input', '\u041d\u043e\u043c\u0435\u0440'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Number')]),
+                         get_field_props({'Name': '\u041d\u043e\u043c\u0435\u0440', 'Type': ''}, cfg, 'props', '\u041d\u043e\u043c\u0435\u0440'))
+    date_el = merge_props(OrderedDict([('input', '\u0414\u0430\u0442\u0430'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.Date'), ('title', date_title)]),
+                          get_field_props({'Name': '\u0414\u0430\u0442\u0430', 'Type': ''}, cfg, 'props', '\u0414\u0430\u0442\u0430'))
     num_date_group = OrderedDict([
-        ('group', 'horizontal'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041d\u043e\u043c\u0435\u0440\u0414\u0430\u0442\u0430'), ('showTitle', False), ('children', num_date_children),
+        ('group', 'horizontal'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u041d\u043e\u043c\u0435\u0440\u0414\u0430\u0442\u0430', used)), ('showTitle', False),
+        ('children', [num_el, date_el]),
     ])
 
-    # Build left column
-    left_children = [num_date_group]
-    for attr in left_attrs:
-        left_children.append(new_field_element(attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{attr['Name']}", attr['Type'], fd))
+    left_children = [num_date_group] + build_zone('header.left')
+    right_children = build_zone('header.right')
+    header_name = get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430', used)
+    left_group = OrderedDict([('group', 'vertical'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430\u041b\u0435\u0432\u043e', used)), ('showTitle', False), ('children', left_children)])
+    header_cols = [left_group]
+    if right_children:
+        header_cols.append(OrderedDict([('group', 'vertical'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430\u041f\u0440\u0430\u0432\u043e', used)), ('showTitle', False), ('children', right_children)]))
+    header_group = OrderedDict([
+        ('group', 'horizontal'), ('name', header_name), ('showTitle', False), ('representation', 'none'),
+        ('children', header_cols),
+    ])
 
-    # Build right column
-    right_children = []
-    for rn in header_right:
-        r_attr = next((a for a in meta['Attributes'] if a['Name'] == rn), None)
-        if r_attr:
-            right_children.append(new_field_element(r_attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{r_attr['Name']}", r_attr['Type'], fd))
-    for attr in right_extra_attrs:
-        right_children.append(new_field_element(attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{attr['Name']}", attr['Type'], fd))
+    top_els = build_zone('top')
+    bottom_els = build_zone('main.bottom')
+    # Несколько нижних полей (Комментарий + Ответственный) — в одну строку
+    # (многострочное поле в такой строке — высотой в одну строку, как в ЕРП: 106 из 116; отдельно — блок)
+    if len(bottom_els) > 1:
+        for be in bottom_els:
+            if get_dsl_bool(be, ['multiLine'], False) and 'height' not in be:
+                be['height'] = 1
+        bottom_els = [OrderedDict([('group', 'horizontal'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430' + ''.join(placed['main.bottom']), used)), ('showTitle', False), ('children', bottom_els)])]
+    footer_els = build_zone('footer')
+    add_left_els = build_zone('additional.left')
+    add_right_els = build_zone('additional.right')
+    has_additional = (len(add_left_els) + len(add_right_els)) > 0
 
-    # Header group
-    if header_layout == '2col' and len(right_children) > 0:
-        header_group = OrderedDict([
-            ('group', 'horizontal'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430'), ('showTitle', False), ('representation', 'none'),
-            ('children', [
-                OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430\u041b\u0435\u0432\u043e'), ('showTitle', False), ('children', left_children)]),
-                OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430\u041f\u0440\u0430\u0432\u043e'), ('showTitle', False), ('children', right_children)]),
-            ]),
-        ])
-    else:
-        # 1col or no right items
-        all_header_fields = left_children + right_children
-        header_group = OrderedDict([
-            ('group', 'horizontal'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430'), ('showTitle', False), ('representation', 'none'),
-            ('children', [
-                OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0428\u0430\u043f\u043a\u0430\u041b\u0435\u0432\u043e'), ('showTitle', False), ('children', all_header_fields)]),
-            ]),
-        ])
-
-    # Footer elements
-    footer_elements = []
-    for fn in footer_fields:
-        f_attr = next((a for a in meta['Attributes'] if a['Name'] == fn), None)
-        if f_attr:
-            footer_elements.append(new_field_element(f_attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{f_attr['Name']}", f_attr['Type'], fd))
-
-    # Visible tabular sections
-    visible_ts = [ts for ts in meta['TabularSections'] if ts['Name'] not in ts_exclude]
-
-    # Additional page content
+    # Страница «Дополнительно»
     additional_page = None
-    if add_pos == 'page':
-        add_left_els = []
-        add_right_els = []
-        for aln in add_left:
-            al_attr = next((a for a in meta['Attributes'] if a['Name'] == aln), None)
-            if al_attr:
-                add_left_els.append(new_field_element(al_attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{al_attr['Name']}", al_attr['Type'], fd))
-        for arn in add_right:
-            ar_attr = next((a for a in meta['Attributes'] if a['Name'] == arn), None)
-            if ar_attr:
-                add_right_els.append(new_field_element(ar_attr['Name'], f"\u041e\u0431\u044a\u0435\u043a\u0442.{ar_attr['Name']}", ar_attr['Type'], fd))
+    if add_pos == 'page' and use_pages:
         add_page_children = []
-        if add_layout == '2col':
-            add_page_children.append(OrderedDict([
-                ('group', 'horizontal'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b'), ('showTitle', False),
-                ('children', [
-                    OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041b\u0435\u0432\u043e'), ('showTitle', False), ('children', add_left_els)]),
-                    OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0440\u0430\u0432\u043e'), ('showTitle', False), ('children', add_right_els)]),
-                ]),
-            ]))
-        else:
-            add_page_children.extend(add_left_els + add_right_els)
+        if has_additional:
+            if add_left_els and add_right_els:
+                add_page_children.append(OrderedDict([
+                    ('group', 'horizontal'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b', used)), ('showTitle', False),
+                    ('children', [
+                        OrderedDict([('group', 'vertical'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041b\u0435\u0432\u043e', used)), ('showTitle', False), ('children', add_left_els)]),
+                        OrderedDict([('group', 'vertical'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0440\u0430\u0432\u043e', used)), ('showTitle', False), ('children', add_right_els)]),
+                    ]),
+                ]))
+            else:
+                add_page_children.extend(add_left_els + add_right_els)
         if add_bsp_group:
-            add_page_children.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b')]))
-        additional_page = OrderedDict([('page', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e'), ('title', '\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e'), ('children', add_page_children)])
+            add_page_children.append(OrderedDict([('group', 'vertical'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b', used)), ('showTitle', True)]))
+        additional_page = OrderedDict([('page', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e', used)), ('title', '\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e'), ('children', add_page_children)])
 
-    # Build TS page elements
+    # Страницы ТЧ
     ts_pages = []
+    table_sizes = []
     for ts in visible_ts:
-        ts_cols = []
-        if ts_line_number:
-            ts_cols.append(OrderedDict([('labelField', f"{ts['Name']}\u041d\u043e\u043c\u0435\u0440\u0421\u0442\u0440\u043e\u043a\u0438"), ('path', f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}.LineNumber")]))
-        for col in ts['Columns']:
-            ts_cols.append(new_field_element(f"{ts['Name']}{col['Name']}", f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}.{col['Name']}", col['Type'], fd))
+        ts_cols = build_tabular_columns(ts, cfg, fd, ts_line_number, skipped)
+        table_sizes.append({'Name': ts['Name'], 'Count': len(ts_cols) - 1 if ts_line_number else len(ts_cols)})
         ts_pages.append(OrderedDict([
-            ('page', f"\u0413\u0440\u0443\u043f\u043f\u0430{ts['Name']}"), ('title', ts['Synonym']),
-            ('children', [
-                OrderedDict([('table', ts['Name']), ('path', f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}"), ('columns', ts_cols)])
-            ]),
+            ('page', get_unique_element_name(f"\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u0430{ts['Name']}", used)), ('title', ts['Synonym']),
+            ('children', [OrderedDict([('table', ts['Name']), ('path', f"\u041e\u0431\u044a\u0435\u043a\u0442.{ts['Name']}"), ('columns', ts_cols)])]),
         ]))
 
-    # Assemble root elements
+    # Сборка
     root_elements = []
-
-    if len(visible_ts) == 0:
-        # Simple form - no Pages
+    root_elements.extend(top_els)
+    if not use_pages:
         root_elements.append(header_group)
-        if footer_elements:
-            root_elements.extend(footer_elements)
+        root_elements.extend(bottom_els)
+        root_elements.extend(footer_els)
         if add_bsp_group and add_pos != 'none':
-            root_elements.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b')]))
+            root_elements.append(OrderedDict([('group', 'vertical'), ('name', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b', used)), ('showTitle', True)]))
     else:
-        # Pages form
-        if header_pos == 'abovePages':
+        pages_children = []
+        if header_pos == 'abovepages':
             root_elements.append(header_group)
-            pages_children = list(ts_pages)
-            if additional_page:
-                pages_children.append(additional_page)
-            root_elements.append(OrderedDict([('pages', '\u0413\u0440\u0443\u043f\u043f\u0430\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u044b'), ('children', pages_children)]))
+            root_elements.extend(bottom_els)
         else:
-            # insidePage (default)
-            osnovnoe_children = [header_group]
-            if footer_pos == 'insidePage' and footer_elements:
-                osnovnoe_children.extend(footer_elements)
-            pages_children = []
-            pages_children.append(OrderedDict([('page', '\u0413\u0440\u0443\u043f\u043f\u0430\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0435'), ('title', '\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0435'), ('children', osnovnoe_children)]))
-            pages_children.extend(ts_pages)
-            if additional_page:
-                pages_children.append(additional_page)
-            root_elements.append(OrderedDict([('pages', '\u0413\u0440\u0443\u043f\u043f\u0430\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u044b'), ('children', pages_children)]))
+            osnovnoe = [header_group] + bottom_els
+            pages_children.append(OrderedDict([('page', get_unique_element_name('\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u0430\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0435', used)), ('title', '\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0435'), ('children', osnovnoe)]))
+        pages_children.extend(ts_pages)
+        if additional_page is not None:
+            pages_children.append(additional_page)
+        root_elements.append(OrderedDict([('pages', get_unique_element_name('\u0413\u0440\u0443\u043f\u043f\u0430\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u044b', used)), ('children', pages_children)]))
+        root_elements.extend(footer_els)
 
-        # Footer below pages
-        if footer_pos == 'belowPages' and footer_elements:
-            root_elements.extend(footer_elements)
+    write_from_object_report(skipped, placed)
+    main_count = sum(len(placed.get(z, [])) for z in ('top', 'header.left', 'header.right', 'main.bottom'))
+    write_form_size_hint(main_count, 'the main page' if use_pages else 'the form', table_sizes, cfg)
 
     # Properties
-    form_props = OrderedDict([('autoTitle', False)])
+    form_props = OrderedDict()
     if p.get('properties'):
-        for k in p['properties']:
+        for k in get_sorted_keys(p['properties']):
             form_props[k] = p['properties'][k]
 
-    return OrderedDict([
-        ('title', meta['Synonym']),
-        ('properties', form_props),
-        ('elements', root_elements),
-        ('attributes', [
-            OrderedDict([('name', '\u041e\u0431\u044a\u0435\u043a\u0442'), ('type', f"DocumentObject.{meta['Name']}"), ('main', True)])
-        ]),
-    ])
+    dsl = OrderedDict()
+    if get_dsl_bool(p, ['title'], False):
+        dsl['title'] = meta['Synonym']
+    dsl['properties'] = form_props
+    dsl['elements'] = root_elements
+    dsl['attributes'] = [OrderedDict([('name', '\u041e\u0431\u044a\u0435\u043a\u0442'), ('type', f"DocumentObject.{meta['Name']}"), ('main', True)])]
+    return dsl
 
 
 # --- InformationRegister DSL generators ---
@@ -1315,6 +1749,42 @@ def generate_accumulation_register_list_dsl(meta, p):
     ])
 
 
+# Вставка полей после Наименования/группы «Наименование, код» — на корневом уровне или внутри группы шапки
+def _is_code_description_marker(el):
+    if not isinstance(el, dict):
+        return False
+    if el.get('input') == '\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435':
+        return True
+    return bool(re.match(r'^\u0413\u0440\u0443\u043f\u043f\u0430(\u041a\u043e\u0434\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435|\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435\u041a\u043e\u0434)\d*$', str(el.get('name') or '')))
+
+
+def add_after_code_description(dsl, new_els):
+    # корневой уровень
+    out, done = [], False
+    for el in dsl['elements']:
+        out.append(el)
+        if not done and _is_code_description_marker(el):
+            out.extend(new_els)
+            done = True
+    if done:
+        dsl['elements'] = out
+        return
+    # внутри групп первого уровня (ГруппаШапка)
+    for g in dsl['elements']:
+        if not isinstance(g, dict) or not g.get('group') or not g.get('children'):
+            continue
+        kids, hit = [], False
+        for el in g['children']:
+            kids.append(el)
+            if not hit and _is_code_description_marker(el):
+                kids.extend(new_els)
+                hit = True
+        if hit:
+            g['children'] = kids
+            return
+    dsl['elements'] = list(dsl['elements']) + list(new_els)
+
+
 # --- ChartOfCharacteristicTypes (delegates to Catalog) ---
 
 def generate_chart_of_characteristic_types_dsl(meta, preset_data, purpose):
@@ -1336,20 +1806,7 @@ def generate_chart_of_characteristic_types_dsl(meta, preset_data, purpose):
     # For Item forms: inject ValueType field after Description/ГруппаКодНаименование
     if purpose == 'Item' and dsl.get('elements'):
         vt_el = OrderedDict([('input', '\u0422\u0438\u043f\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.ValueType')])
-        els = dsl['elements']
-        if isinstance(els, list):
-            inserted = False
-            new_els = []
-            for el in els:
-                new_els.append(el)
-                if not inserted and isinstance(el, dict):
-                    name = el.get('input') or el.get('group') or ''
-                    if name in ('\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435', '\u0413\u0440\u0443\u043f\u043f\u0430\u041a\u043e\u0434\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435'):
-                        new_els.append(vt_el)
-                        inserted = True
-            if not inserted:
-                new_els.append(vt_el)
-            dsl['elements'] = new_els
+        add_after_code_description(dsl, [vt_el])
 
     return dsl
 
@@ -1376,22 +1833,7 @@ def generate_exchange_plan_dsl(meta, preset_data, purpose):
     if purpose == 'Item' and dsl.get('elements'):
         sent_el = OrderedDict([('input', '\u041d\u043e\u043c\u0435\u0440\u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043d\u043e\u0433\u043e'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.SentNo'), ('readOnly', True)])
         recv_el = OrderedDict([('input', '\u041d\u043e\u043c\u0435\u0440\u041f\u0440\u0438\u043d\u044f\u0442\u043e\u0433\u043e'), ('path', '\u041e\u0431\u044a\u0435\u043a\u0442.ReceivedNo'), ('readOnly', True)])
-        els = dsl['elements']
-        if isinstance(els, list):
-            inserted = False
-            new_els = []
-            for el in els:
-                new_els.append(el)
-                if not inserted and isinstance(el, dict):
-                    name = el.get('input') or el.get('group') or ''
-                    if name in ('\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435', '\u0413\u0440\u0443\u043f\u043f\u0430\u041a\u043e\u0434\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435'):
-                        new_els.append(sent_el)
-                        new_els.append(recv_el)
-                        inserted = True
-            if not inserted:
-                new_els.append(sent_el)
-                new_els.append(recv_el)
-            dsl['elements'] = new_els
+        add_after_code_description(dsl, [sent_el, recv_el])
 
     return dsl
 
@@ -1447,7 +1889,7 @@ def generate_chart_of_accounts_item_dsl(meta, p, fd, preset_data):
         for flag in meta['AccountingFlags']:
             flag_children.append(OrderedDict([('check', flag['Name']), ('path', f"\u041e\u0431\u044a\u0435\u043a\u0442.{flag['Name']}")]))
         elements.append(OrderedDict([
-            ('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0440\u0438\u0437\u043d\u0430\u043a\u0438\u0423\u0447\u0435\u0442\u0430'), ('title', '\u041f\u0440\u0438\u0437\u043d\u0430\u043a\u0438 \u0443\u0447\u0435\u0442\u0430'),
+            ('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0440\u0438\u0437\u043d\u0430\u043a\u0438\u0423\u0447\u0435\u0442\u0430'), ('showTitle', True), ('title', '\u041f\u0440\u0438\u0437\u043d\u0430\u043a\u0438 \u0443\u0447\u0435\u0442\u0430'),
             ('children', flag_children),
         ]))
 
@@ -1568,22 +2010,27 @@ def di_attr(el):
 
 
 # Базовая директория для @file-ссылок в query динсписка (устанавливается в main)
-QUERY_BASE_DIR = None
+# Без -JsonPath (режим по метаданным объекта) запросов во входе нет, но база пути должна
+# оставаться валидной — как и в PS-порте, где в этой ветке берётся текущий каталог.
+QUERY_BASE_DIR = os.getcwd()
 
 
-def resolve_query_value(val, base_dir):
-    if not val.startswith('@'):
+def resolve_text_from_file(val, base_dir):
+    if not val.startswith("@"):
         return val
     file_path = val[1:]
     if os.path.isabs(file_path):
         candidates = [file_path]
     else:
-        candidates = [os.path.join(base_dir or os.getcwd(), file_path), os.path.join(os.getcwd(), file_path)]
+        candidates = [
+            os.path.join(base_dir, file_path),
+            os.path.join(os.getcwd(), file_path),
+        ]
     for c in candidates:
         if os.path.exists(c):
             with open(c, 'r', encoding='utf-8-sig') as f:
                 return f.read().rstrip()
-    print(f"Query file not found: {file_path} (searched: {', '.join(candidates)})", file=sys.stderr)
+    print(f"Файл значения не найден: {file_path} (искали: {', '.join(candidates)})", file=sys.stderr)
     sys.exit(1)
 
 
@@ -1699,7 +2146,7 @@ def parse_filter_shorthand(s):
             elif re.match(r'^\d+(\.\d+)?$', val_part):
                 result['value'] = val_part
                 result['valueType'] = 'xs:decimal'
-            elif re.match(r'^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета)\.', val_part):
+            elif re.match(r'^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|ПланОбмена|Enum|Catalog|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|ExchangePlan)\.[^.]+\.[^.]+', val_part):
                 result['value'] = val_part
                 result['valueType'] = 'dcscor:DesignTimeValue'
             else:
@@ -1743,7 +2190,7 @@ def emit_filter_item(lines, item, indent):
         g = str(item['group'])
         group_type = {'And': 'AndGroup', 'Or': 'OrGroup', 'Not': 'NotGroup'}.get(g, g + 'Group')
         lines.append(f'{indent}<dcsset:item xsi:type="dcsset:FilterItemGroup">')
-        if item.get('use') is False:
+        if (not get_dsl_bool(item, ['use'], True)):
             lines.append(f'{indent}\t<dcsset:use>false</dcsset:use>')   # группа отключена (перед groupType)
         lines.append(f'{indent}\t<dcsset:groupType>{group_type}</dcsset:groupType>')
         if item.get('items'):
@@ -1751,7 +2198,7 @@ def emit_filter_item(lines, item, indent):
                 if isinstance(sub, str):
                     parsed = parse_filter_shorthand(sub)
                     obj = {'field': parsed['field'], 'op': parsed['op']}
-                    if parsed['use'] is False:
+                    if not get_dsl_bool(parsed, ['use'], True):
                         obj['use'] = False
                     if parsed['value'] is not None:
                         obj['value'] = parsed['value']
@@ -1776,7 +2223,7 @@ def emit_filter_item(lines, item, indent):
         return
 
     lines.append(f'{indent}<dcsset:item xsi:type="dcsset:FilterItemComparison">')
-    if item.get('use') is False:
+    if (not get_dsl_bool(item, ['use'], True)):
         lines.append(f'{indent}\t<dcsset:use>false</dcsset:use>')
     lines.append(f'{indent}\t<dcsset:left xsi:type="dcscor:Field">{esc_xml_text(str(item.get("field", "")))}</dcsset:left>')
     # Регистронезависимый лукап (зеркало PS): Like/LIKE/ПОДОБНО → канон; иначе — как есть
@@ -1794,7 +2241,7 @@ def emit_filter_item(lines, item, indent):
         else:
             for v in val:
                 vt = _value_type_for(v, item.get('valueType'))
-                v_str = str(v).lower() if isinstance(v, bool) else esc_xml_text(str(v))
+                v_str = str(v).lower() if isinstance(v, bool) else esc_xml_text(normalize_design_time_value(v) if vt == 'dcscor:DesignTimeValue' else str(v))
                 ns_attr = _value_type_ns_attr(vt, v)
                 lines.append(f'{indent}\t<dcsset:right{ns_attr} xsi:type="{vt}">{v_str}</dcsset:right>')
     elif val is not None and (
@@ -1822,7 +2269,7 @@ def emit_filter_item(lines, item, indent):
         lines.append(f'{indent}\t<dcsset:right xsi:type="{vt}"/>')
     elif val is not None:
         vt = _value_type_for(val, item.get('valueType'))
-        v_str = str(val).lower() if isinstance(val, bool) else esc_xml_text(str(val))
+        v_str = str(val).lower() if isinstance(val, bool) else esc_xml_text(normalize_design_time_value(val) if vt == 'dcscor:DesignTimeValue' else str(val))
         ns_attr = _value_type_ns_attr(vt, val)
         lines.append(f'{indent}\t<dcsset:right{ns_attr} xsi:type="{vt}">{v_str}</dcsset:right>')
     if item.get('presentation'):
@@ -1847,7 +2294,7 @@ def emit_filter(lines, items, indent, block_view_mode=None, block_user_setting_i
         if isinstance(item, str):
             parsed = parse_filter_shorthand(item)
             obj = {'field': parsed['field'], 'op': parsed['op']}
-            if parsed['use'] is False:
+            if not get_dsl_bool(parsed, ['use'], True):
                 obj['use'] = False
             if parsed['value'] is not None:
                 obj['value'] = parsed['value']
@@ -1904,7 +2351,7 @@ def emit_order(lines, items, indent, skip_auto=False, block_view_mode=None, bloc
             elif re.match(r'(?i)^(asc|возр)', direction):
                 direction = 'Asc'
             lines.append(f'{indent}\t<dcsset:item xsi:type="dcsset:OrderItemField">')
-            if item.get('use') is False:
+            if (not get_dsl_bool(item, ['use'], True)):
                 lines.append(f'{indent}\t\t<dcsset:use>false</dcsset:use>')
             lines.append(f'{indent}\t\t<dcsset:field>{esc_xml_text(str(item.get("field", "")))}</dcsset:field>')
             lines.append(f'{indent}\t\t<dcsset:orderType>{direction}</dcsset:orderType>')
@@ -1935,13 +2382,13 @@ def emit_appearance_value(lines, key, val, indent):
     inner_val = val
     nested_items = None
     if is_top_level_line:
-        if _has_key(val, 'use') and (_get(val, 'use') is False):
+        if _has_key(val, 'use') and (not to_dsl_bool(_get(val, 'use'), 'use', True)):
             use_wrapper = True
         if _has_key(val, 'items'):
             nested_items = _get(val, 'items')
     elif _has_key(val, 'value') and isinstance(val, dict):
         inner_val = _get(val, 'value')
-        if _has_key(val, 'use') and (_get(val, 'use') is False):
+        if _has_key(val, 'use') and (not to_dsl_bool(_get(val, 'use'), 'use', True)):
             use_wrapper = True
         if _has_key(val, 'items'):
             nested_items = _get(val, 'items')
@@ -1974,7 +2421,7 @@ def emit_appearance_value(lines, key, val, indent):
         # Локализуемый текст параметра оформления: платформа объявляет xsi:type на dcscor:value
         emit_mltext(lines, f'{indent}\t', 'dcscor:value', inner_val, xsi_type='v8:LocalStringType')
     else:
-        actual_val = str(inner_val)
+        actual_val = (str(inner_val).lower() if isinstance(inner_val, bool) else str(inner_val)) if inner_val is not None else ''
         key_type_map = {
             'Размещение': 'dcscor:DataCompositionTextPlacementType',
             'ГоризонтальноеПоложение': 'v8ui:HorizontalAlign',
@@ -2112,7 +2559,7 @@ def emit_calc_fields(lines, calc_fields, indent):
             type_str = str(type_str) if type_str else None
             ur = cf.get('useRestriction') or cf.get('restrict')
             if isinstance(ur, dict):
-                restrict = [k for k in ('field', 'condition', 'group', 'order') if ur.get(k)]
+                restrict = [k for k in ('field', 'condition', 'group', 'order') if to_dsl_bool(ur.get(k), k, False)]
             elif isinstance(ur, str):
                 restrict = [_CALC_RESTRICT_MAP.get(t.strip().lstrip('#'), t.strip().lstrip('#')) for t in ur.split() if t.strip()]
             elif isinstance(ur, list):
@@ -2159,7 +2606,7 @@ def parse_restrict(ur):
     if not ur:
         return []
     if isinstance(ur, dict):
-        return [k for k in ('field', 'condition', 'group', 'order') if ur.get(k)]
+        return [k for k in ('field', 'condition', 'group', 'order') if to_dsl_bool(ur.get(k), k, False)]
     if isinstance(ur, str):
         return [_CALC_RESTRICT_MAP.get(t.strip().lstrip('#'), t.strip().lstrip('#')) for t in ur.split() if t.strip()]
     if isinstance(ur, list):
@@ -2186,7 +2633,7 @@ def emit_conditional_appearance(lines, items, indent, block_view_mode=None, bloc
     lines.append(f'{indent}<{wrap_tag}>')
     for ca in (items or []):
         lines.append(f'{indent}\t<dcsset:item>')
-        if ca.get('use') is False:
+        if (not get_dsl_bool(ca, ['use'], True)):
             lines.append(f'{indent}\t\t<dcsset:use>false</dcsset:use>')
         if ca.get('selection') and len(ca['selection']) > 0:
             lines.append(f'{indent}\t\t<dcsset:selection>')
@@ -2263,64 +2710,325 @@ def new_id():
 _seen_element_names = set()  # пул имён элементов (глобально по всей форме)
 
 def _ensure_unique(name, seen, kind):
-    if name in seen:
+    if name.lower() in seen:
         print(f"[ERROR] Duplicate {kind} name '{name}' — names must be unique within their collection in a 1C form (set a unique 'name')", file=sys.stderr)
         sys.exit(1)
-    seen.add(name)
+    seen.add(name.lower())
 
 
 # --- Event handler name generator ---
 
-EVENT_SUFFIX_MAP = {
-    "OnChange": "\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438",
-    "StartChoice": "\u041d\u0430\u0447\u0430\u043b\u043e\u0412\u044b\u0431\u043e\u0440\u0430",
-    "ChoiceProcessing": "\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0412\u044b\u0431\u043e\u0440\u0430",
-    "AutoComplete": "\u0410\u0432\u0442\u043e\u041f\u043e\u0434\u0431\u043e\u0440",
-    "Clearing": "\u041e\u0447\u0438\u0441\u0442\u043a\u0430",
-    "Opening": "\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0435",
-    "Click": "\u041d\u0430\u0436\u0430\u0442\u0438\u0435",
-    "OnActivateRow": "\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0421\u0442\u0440\u043e\u043a\u0438",
-    "BeforeAddRow": "\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u044f",
-    "BeforeDeleteRow": "\u041f\u0435\u0440\u0435\u0434\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435\u043c",
-    "BeforeRowChange": "\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f",
-    "OnStartEdit": "\u041f\u0440\u0438\u041d\u0430\u0447\u0430\u043b\u0435\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f",
-    "OnEndEdit": "\u041f\u0440\u0438\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0438\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f",
-    "Selection": "\u0412\u044b\u0431\u043e\u0440\u0421\u0442\u0440\u043e\u043a\u0438",
-    "OnCurrentPageChange": "\u041f\u0440\u0438\u0421\u043c\u0435\u043d\u0435\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u044b",
-    "TextEditEnd": "\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u0412\u0432\u043e\u0434\u0430\u0422\u0435\u043a\u0441\u0442\u0430",
-    "URLProcessing": "\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438",
-    "DragStart": "\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f",
-    "Drag": "\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435",
-    "DragCheck": "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f",
-    "Drop": "\u041f\u043e\u043c\u0435\u0449\u0435\u043d\u0438\u0435",
-    "AfterDeleteRow": "\u041f\u043e\u0441\u043b\u0435\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u044f",
-}
+# --- Каталог событий формы (генерируется) ---
+# Tag ("Form" for the form itself) -> event -> (handler suffix, compile directive, params,
+# platform the event exists since ("" = 8.3.20), restriction). Params: a string or a tuple
+# ("platform", "params", ...) — the signature from that platform on. Restriction: a table data source
+# (DynamicList) or, for the form, the owners whose forms have the event (by the main attribute). Last —
+# the event position in <Events>: the platform writes events in this order whatever the input order.
+# Sources: Syntax Assistant 8.3.20-8.5, standard configurations (28.5k forms), load test on 7 platforms.
+# Regenerate: python debug/form-handlers/gen_event_catalog.py
+def get_form_event_catalog():
+    return {
+        "CalendarField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0414\u0430\u0442\u0430", "", "", 1),
+            "OnPeriodOutput": ("\u041f\u0440\u0438\u0412\u044b\u0432\u043e\u0434\u0435\u041f\u0435\u0440\u0438\u043e\u0434\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0444\u043e\u0440\u043c\u043b\u0435\u043d\u0438\u0435\u041f\u0435\u0440\u0438\u043e\u0434\u0430", "", "", 2),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0414\u0430\u0442\u0430", "", "", 3),
+            "OnActivateDate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0414\u0430\u0442\u044b", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 4),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 5),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0414\u0430\u0442\u0430", "", "", 6),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 7),
+        },
+        "ChartField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u0414\u0438\u0430\u0433\u0440\u0430\u043c\u043c\u044b, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+            "OnActivate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 3),
+        },
+        "CheckBoxField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+        },
+        "DendrogramField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u0414\u0435\u043d\u0434\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u044b, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+        },
+        "ExtendedTooltip": {
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+        },
+        "Form": {
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 0),
+            "BeforeReopenFromOtherServer": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0440\u0435\u043e\u0442\u043a\u0440\u044b\u0442\u0438\u0435\u043c\u0421\u0414\u0440\u0443\u0433\u043e\u0433\u043e\u0421\u0435\u0440\u0432\u0435\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u041e\u0442\u043a\u0430\u0437", "", "", 1),
+            "ValueChoice": ("\u0412\u044b\u0431\u043e\u0440\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 2),
+            "OnReopenFromOtherServer": ("\u041f\u0440\u0438\u041f\u0435\u0440\u0435\u043e\u0442\u043a\u0440\u044b\u0442\u0438\u0438\u0421\u0414\u0440\u0443\u0433\u043e\u0433\u043e\u0421\u0435\u0440\u0432\u0435\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 3),
+            "OnSaveDataInSettingsAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0438\u0414\u0430\u043d\u043d\u044b\u0445\u0412\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430\u0445\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "", 4),
+            "ChoiceProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0412\u044b\u0431\u043e\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0412\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0435\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0412\u044b\u0431\u043e\u0440\u0430", "", "", 5),
+            "BeforeLoadVariantAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u043e\u0439\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u0430\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 6),
+            "AfterWriteAtServer": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u0422\u0435\u043a\u0443\u0449\u0438\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 7),
+            "OnPasteFromClipboard": ("\u041f\u0440\u0438\u0412\u0441\u0442\u0430\u0432\u043a\u0435\u0418\u0437\u0411\u0443\u0444\u0435\u0440\u0430\u041e\u0431\u043c\u0435\u043d\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.24", "", 8),
+            "BeforeStart": ("\u041f\u0435\u0440\u0435\u0434\u0421\u0442\u0430\u0440\u0442\u043e\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437", "", "BusinessProcess", 9),
+            "NotificationProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041e\u043f\u043e\u0432\u0435\u0449\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0418\u043c\u044f\u0421\u043e\u0431\u044b\u0442\u0438\u044f, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a", "", "", 10),
+            "OnReadAtServer": ("\u041f\u0440\u0438\u0427\u0442\u0435\u043d\u0438\u0438\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u0422\u0435\u043a\u0443\u0449\u0438\u0439\u041e\u0431\u044a\u0435\u043a\u0442", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 11),
+            "NewWriteProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0417\u0430\u043f\u0438\u0441\u0438\u041d\u043e\u0432\u043e\u0433\u043e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041d\u043e\u0432\u044b\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 12),
+            "OnOpen": ("\u041f\u0440\u0438\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437", "", "", 13),
+            "BeforeLoadUserSettingsAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u043e\u0439\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 14),
+            "URLListGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0421\u043f\u0438\u0441\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u044b\u0445\u0421\u0441\u044b\u043b\u043e\u043a", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u043f\u0438\u0441\u043e\u043a\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u044b\u0445\u0421\u0441\u044b\u043b\u043e\u043a, \u041a\u043b\u044e\u0447\u041f\u043e\u0423\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e", "", "", 15),
+            "OnSaveVariantAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0438\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u0430\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 16),
+            "BeforeClose": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043a\u0440\u044b\u0442\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437, \u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u0435\u0420\u0430\u0431\u043e\u0442\u044b, \u0422\u0435\u043a\u0441\u0442\u041f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 17),
+            "ExternalEvent": ("\u0412\u043d\u0435\u0448\u043d\u0435\u0435\u0421\u043e\u0431\u044b\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u0421\u043e\u0431\u044b\u0442\u0438\u0435, \u0414\u0430\u043d\u043d\u044b\u0435", "", "", 18),
+            "CollaborationSystemUsersAutoComplete": ("\u0410\u0432\u0442\u043e\u041f\u043e\u0434\u0431\u043e\u0440\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439\u0421\u0438\u0441\u0442\u0435\u043c\u044b\u0412\u0437\u0430\u0438\u043c\u043e\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0422\u0435\u043a\u0441\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u041d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 19),
+            "OnSettingsChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.5", "Report", 20),
+            "URLGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041a\u043b\u044e\u0447, \u041f\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u0438\u0435, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 21),
+            "OnReopen": ("\u041f\u0440\u0438\u041f\u043e\u0432\u0442\u043e\u0440\u043d\u043e\u043c\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "", "", "", 22),
+            "OnLoadDataFromSettingsAtServer": ("\u041f\u0440\u0438\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0435\u0414\u0430\u043d\u043d\u044b\u0445\u0418\u0437\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "", 23),
+            "OnLoadUserSettingsAtServer": ("\u041f\u0440\u0438\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0435\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 24),
+            "OnLoadVariantAtServer": ("\u041f\u0440\u0438\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0435\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u0430\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 25),
+            "NavigationProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u0435\u0440\u0435\u0445\u043e\u0434\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0431\u044a\u0435\u043a\u0442\u041f\u0435\u0440\u0435\u0445\u043e\u0434\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 26),
+            "OnSaveUserSettingsAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0438\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 27),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 28),
+            "OnCreateAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0438\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041e\u0442\u043a\u0430\u0437, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 29),
+            "CollaborationSystemUsersChoiceFormGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0424\u043e\u0440\u043c\u044b\u0412\u044b\u0431\u043e\u0440\u0430\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439\u0421\u0438\u0441\u0442\u0435\u043c\u044b\u0412\u0437\u0430\u0438\u043c\u043e\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0424\u043e\u0440\u043c\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 30),
+            "OnComposeResult": ("\u041f\u0440\u0438\u041a\u043e\u043c\u043f\u043e\u043d\u043e\u0432\u043a\u0435\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.5", "Report", 31),
+            "ActivationProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0410\u043a\u0442\u0438\u0432\u043d\u044b\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a", "", "", 32),
+            "AfterComposeResult": ("\u041f\u043e\u0441\u043b\u0435\u041a\u043e\u043c\u043f\u043e\u043d\u043e\u0432\u043a\u0438\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.5", "Report", 33),
+            "OnChangeDisplaySettings": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432\u042d\u043a\u0440\u0430\u043d\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "", "", "", 34),
+            "BeforeWriteAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041e\u0442\u043a\u0430\u0437, \u0422\u0435\u043a\u0443\u0449\u0438\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 35),
+            "OnWriteAtServer": ("\u041f\u0440\u0438\u0417\u0430\u043f\u0438\u0441\u0438\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041e\u0442\u043a\u0430\u0437, \u0422\u0435\u043a\u0443\u0449\u0438\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 36),
+            "OnClose": ("\u041f\u0440\u0438\u0417\u0430\u043a\u0440\u044b\u0442\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u0435\u0420\u0430\u0431\u043e\u0442\u044b", "", "", 37),
+            "OnMainServerAvailabilityChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0441\u0442\u0438\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0433\u043e\u0421\u0435\u0440\u0432\u0435\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 38),
+            "OnUpdateUserSettingSetAtServer": ("\u041f\u0440\u0438\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0438\u0421\u043e\u0441\u0442\u0430\u0432\u0430\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "Report, SettingsComposer", 39),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 40),
+            "FillCheckProcessingAtServer": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0438\u0417\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041e\u0442\u043a\u0430\u0437, \u041f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u043c\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b", "", "", 41),
+            "BeforeLoadDataFromSettingsAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u043e\u0439\u0414\u0430\u043d\u043d\u044b\u0445\u0418\u0437\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "", 42),
+            "BeforeExecute": ("\u041f\u0435\u0440\u0435\u0434\u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437", "", "Task", 43),
+            "AddInDetachmentOnError": ("\u041e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435\u0412\u043d\u0435\u0448\u043d\u0435\u0439\u041a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u044b\u041f\u0440\u0438\u041e\u0448\u0438\u0431\u043a\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0418\u043c\u044f, \u041c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435", "8.3.23", "", 44),
+        },
+        "FormattedDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 1),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 2),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 3),
+        },
+        "GanttChartField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u0430\u0442\u0430", "", "", 1),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u0430\u0442\u0430", "", "", 2),
+            "BeforeCollapse": ("\u041f\u0435\u0440\u0435\u0434\u0421\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f, \u041e\u0442\u043a\u0430\u0437", "8.3.23", "", 3),
+            "OnActivateInterval": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.3.23", "", 4),
+            "OnActivateValue": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.3.23", "", 5),
+            "BeforeExpand": ("\u041f\u0435\u0440\u0435\u0434\u0420\u0430\u0437\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f, \u041e\u0442\u043a\u0430\u0437", "8.3.23", "", 6),
+            "OnIntervalEditEnd": ("\u041f\u0440\u0438\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0438\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b, \u041e\u0442\u043c\u0435\u043d\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "", "", 7),
+        },
+        "GeographicalSchemaField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 2),
+        },
+        "GraphicalSchemaField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 1),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 2),
+            "OnActivate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 3),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 4),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 5),
+        },
+        "HTMLDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DocumentComplete": ("\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0421\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 1),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 2),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 3),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 4),
+            "OnClick": ("\u041f\u0440\u0438\u041d\u0430\u0436\u0430\u0442\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0421\u043e\u0431\u044b\u0442\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 5),
+        },
+        "InputField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "EditTextChange": ("\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435\u0422\u0435\u043a\u0441\u0442\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0441\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "AutoComplete": ("\u0410\u0432\u0442\u043e\u041f\u043e\u0434\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0441\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0414\u0430\u043d\u043d\u044b\u0445, \u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+            "StartChoice": ("\u041d\u0430\u0447\u0430\u043b\u043e\u0412\u044b\u0431\u043e\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", ("8.3.20", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u0412\u044b\u0431\u043e\u0440\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u0435\u043c, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430"), "", "", 3),
+            "MultipleValueURLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438\u041c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u043e\u0433\u043e\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 4),
+            "MultipleValuesDelete": ("\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435\u041c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0445\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0439", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u044b, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 5),
+            "Tuning": ("\u0420\u0435\u0433\u0443\u043b\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 6),
+            "MultipleValuesAdd": ("\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u0435\u041c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0445\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0439", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 7),
+            "Opening": ("\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 8),
+            "Creating": ("\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 9),
+            "StartListChoice": ("\u041d\u0430\u0447\u0430\u043b\u043e\u0412\u044b\u0431\u043e\u0440\u0430\u0418\u0437\u0421\u043f\u0438\u0441\u043a\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 10),
+            "Clearing": ("\u041e\u0447\u0438\u0441\u0442\u043a\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 11),
+            "TextEditEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u0412\u0432\u043e\u0434\u0430\u0422\u0435\u043a\u0441\u0442\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0441\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0414\u0430\u043d\u043d\u044b\u0445, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 12),
+            "MultipleValueOpening": ("\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0435\u041c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u043e\u0433\u043e\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 13),
+            "ChoiceProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0412\u044b\u0431\u043e\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", ("8.3.20", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0435\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0435\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0414\u0430\u043d\u043d\u044b\u0435, \u0412\u044b\u0431\u043e\u0440\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u0435\u043c, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430"), "", "", 14),
+            "CommandGenerateProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0424\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f\u041a\u043e\u043c\u0430\u043d\u0434", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041a\u043e\u043c\u0430\u043d\u0434, \u041a\u043e\u043c\u0430\u043d\u0434\u044b", "8.3.23", "", 15),
+        },
+        "LabelDecoration": {
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+        },
+        "LabelField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+        },
+        "PDFDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.3.23", "", 0),
+            "URLClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 1),
+        },
+        "Pages": {
+            "OnCurrentPageChange": ("\u041f\u0440\u0438\u0421\u043c\u0435\u043d\u0435\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u044b", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0443\u0449\u0430\u044f\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u0430", "", "", 0),
+        },
+        "PeriodField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0414\u0430\u0442\u0430", "", "", 1),
+        },
+        "PictureDecoration": {
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 0),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 1),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 3),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 4),
+        },
+        "PictureField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 2),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 3),
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 4),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 5),
+        },
+        "PlannerField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u0430\u0442\u0430, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439", "", "", 1),
+            "BeforeCollapseDimensionItem": ("\u041f\u0435\u0440\u0435\u0434\u0421\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0430\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439, \u041e\u0442\u043a\u0430\u0437", "", "", 2),
+            "TimeScaleItemClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0435\u0428\u043a\u0430\u043b\u044b\u0412\u0440\u0435\u043c\u0435\u043d\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0428\u043a\u0430\u043b\u044b\u0412\u0440\u0435\u043c\u0435\u043d\u0438, \u0414\u0430\u0442\u0430", "", "", 3),
+            "BeforeCreate": ("\u041f\u0435\u0440\u0435\u0434\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0447\u0430\u043b\u043e, \u041a\u043e\u043d\u0435\u0446, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439, \u0422\u0435\u043a\u0441\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 4),
+            "InsideDragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f\u0412\u043d\u0443\u0442\u0440\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u0430\u0440\u0438\u0430\u043d\u0442\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f\u0413\u0440\u0430\u043d\u0438\u0446, \u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u041e\u0442\u043a\u0430\u0437", "", "", 5),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 6),
+            "DimensionItemClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0435\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 7),
+            "OnCurrentRepresentationPeriodChange": ("\u041f\u0440\u0438\u0421\u043c\u0435\u043d\u0435\u0422\u0435\u043a\u0443\u0449\u0435\u0433\u043e\u041f\u0435\u0440\u0438\u043e\u0434\u0430\u041e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0443\u0449\u0438\u0435\u041f\u0435\u0440\u0438\u043e\u0434\u044b\u041e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 8),
+            "OnEditEnd": ("\u041f\u0440\u0438\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0438\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u044b\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043c\u0435\u043d\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "", "", 9),
+            "WrappedTimeScaleHeaderClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u041f\u0435\u0440\u0435\u043d\u0435\u0441\u0435\u043d\u043d\u043e\u043c\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0435\u0428\u043a\u0430\u043b\u044b\u0412\u0440\u0435\u043c\u0435\u043d\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0430\u0442\u0430", "", "", 10),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 11),
+            "BeforeDelete": ("\u041f\u0435\u0440\u0435\u0434\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043a\u0430\u0437", "", "", 12),
+            "BeforeExpandDimensionItem": ("\u041f\u0435\u0440\u0435\u0434\u0420\u0430\u0437\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0430\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439, \u041e\u0442\u043a\u0430\u0437", "", "", 13),
+            "BeforeStartEdit": ("\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u044b\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 14),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u0430\u0442\u0430, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439", "", "", 15),
+            "CommandGenerateProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0424\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f\u041a\u043e\u043c\u0430\u043d\u0434", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", ("8.3.20", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u041a\u043e\u043c\u0430\u043d\u0434\u044b, \u041a\u043e\u043c\u0430\u043d\u0434\u0430\u041f\u043e\u0423\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e", "8.3.23", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041a\u043e\u043c\u0430\u043d\u0434, \u041a\u043e\u043c\u0430\u043d\u0434\u044b, \u041a\u043e\u043c\u0430\u043d\u0434\u0430\u041f\u043e\u0423\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e"), "", "", 16),
+            "BeforeStartQuickEdit": ("\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0411\u044b\u0441\u0442\u0440\u043e\u0433\u043e\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 17),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 18),
+            "OnActivate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 19),
+            "URLClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 20),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 21),
+            "PlannerActionClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u041f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0449\u0438\u043a\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u041f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0449\u0438\u043a\u0430, \u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0430\u041f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0449\u0438\u043a\u0430", "", "", 22),
+        },
+        "ProgressBarField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+        },
+        "RadioButtonField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+        },
+        "SpreadSheetDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.24", "", 1),
+            "AdditionalDetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0439\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", ("8.3.20", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b", "8.5", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u0412\u0441\u0435\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438\u041e\u0431\u043b\u0430\u0441\u0442\u0438, \u0414\u043b\u044f\u041f\u0430\u043d\u0435\u043b\u0438\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0439"), "", "", 2),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u041e\u0431\u043b\u0430\u0441\u0442\u044c", "", "", 3),
+            "OnActivate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 4),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0431\u043b\u0430\u0441\u0442\u044c, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 5),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b", "", "", 6),
+            "OnChangeAreaContent": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u0421\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0433\u043e\u041e\u0431\u043b\u0430\u0441\u0442\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0431\u043b\u0430\u0441\u0442\u044c, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b", "", "", 7),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 8),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 9),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u041e\u0431\u043b\u0430\u0441\u0442\u044c", "", "", 10),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 11),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 12),
+            "OnGenerateToolTipText": ("\u041f\u0440\u0438\u0424\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0438\u0422\u0435\u043a\u0441\u0442\u0430\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0431\u043b\u0430\u0441\u0442\u044c, \u0422\u0435\u043a\u0441\u0442\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.5", "", 13),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 14),
+        },
+        "Table": {
+            "OnEditEnd": ("\u041f\u0440\u0438\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0438\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u0430\u044f\u0421\u0442\u0440\u043e\u043a\u0430, \u041e\u0442\u043c\u0435\u043d\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "", "", 0),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0421\u0442\u0440\u043e\u043a\u0430, \u041f\u043e\u043b\u0435", "", "", 1),
+            "ValueChoice": ("\u0412\u044b\u0431\u043e\u0440\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0421\u0442\u0440\u043e\u043a\u0430, \u041f\u043e\u043b\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 3),
+            "OnSelectedRowsSetChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u0421\u043e\u0441\u0442\u0430\u0432\u0430\u0412\u044b\u0434\u0435\u043b\u0435\u043d\u043d\u044b\u0445\u0421\u0442\u0440\u043e\u043a", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.5", "", 4),
+            "BeforeAddRow": ("\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043a\u0430\u0437, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u0420\u043e\u0434\u0438\u0442\u0435\u043b\u044c, \u042d\u0442\u043e\u0413\u0440\u0443\u043f\u043f\u0430, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440", "", "", 5),
+            "OnCurrentParentChange": ("\u041f\u0440\u0438\u0421\u043c\u0435\u043d\u0435\u0422\u0435\u043a\u0443\u0449\u0435\u0433\u043e\u0420\u043e\u0434\u0438\u0442\u0435\u043b\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 6),
+            "BeforeDeleteRow": ("\u041f\u0435\u0440\u0435\u0434\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043a\u0430\u0437", "", "", 7),
+            "OnLoadUserSettingsAtServer": ("\u041f\u0440\u0438\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0435\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "DynamicList", 8),
+            "URLListGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0421\u043f\u0438\u0441\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u044b\u0445\u0421\u0441\u044b\u043b\u043e\u043a", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u043f\u0438\u0441\u043e\u043a\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u044b\u0445\u0421\u0441\u044b\u043b\u043e\u043a, \u041a\u043b\u044e\u0447\u041f\u043e\u0423\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e", "8.3.23", "DynamicList", 9),
+            "BeforeEditEnd": ("\u041f\u0435\u0440\u0435\u0434\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u043c\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u0430\u044f\u0421\u0442\u0440\u043e\u043a\u0430, \u041e\u0442\u043c\u0435\u043d\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f, \u041e\u0442\u043a\u0430\u0437", "", "", 10),
+            "OnActivateRow": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0421\u0442\u0440\u043e\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 11),
+            "URLGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043b\u044e\u0447, \u041f\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u0438\u0435, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "DynamicList", 12),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 13),
+            "OnActivateField": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u041f\u043e\u043b\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 14),
+            "BeforeExpand": ("\u041f\u0435\u0440\u0435\u0434\u0420\u0430\u0437\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0440\u043e\u043a\u0430, \u041e\u0442\u043a\u0430\u0437", "", "", 15),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0421\u0442\u0440\u043e\u043a\u0430, \u041f\u043e\u043b\u0435", "", "", 16),
+            "ChoiceProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0412\u044b\u0431\u043e\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0435\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 17),
+            "OnGetDataAtServer": ("\u041f\u0440\u0438\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u0438\u0414\u0430\u043d\u043d\u044b\u0445\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435\u0411\u0435\u0437\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u0430", "\u0418\u043c\u044f\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0430, \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0421\u0442\u0440\u043e\u043a\u0438", "", "DynamicList", 18),
+            "OnSaveUserSettingsAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0438\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "DynamicList", 19),
+            "BeforeCollapse": ("\u041f\u0435\u0440\u0435\u0434\u0421\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0440\u043e\u043a\u0430, \u041e\u0442\u043a\u0430\u0437", "", "", 20),
+            "BeforeRowChange": ("\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043a\u0430\u0437", "", "", 21),
+            "OnStartEdit": ("\u041f\u0440\u0438\u041d\u0430\u0447\u0430\u043b\u0435\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u0430\u044f\u0421\u0442\u0440\u043e\u043a\u0430, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435", "", "", 22),
+            "BeforeLoadUserSettingsAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u043e\u0439\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "DynamicList", 23),
+            "OnHover": ("\u041f\u0440\u0438\u041d\u0430\u0432\u0435\u0434\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0440\u043e\u043a\u0430, \u041f\u043e\u043b\u0435", "8.5", "", 24),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 25),
+            "NewWriteProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0417\u0430\u043f\u0438\u0441\u0438\u041d\u043e\u0432\u043e\u0433\u043e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041d\u043e\u0432\u044b\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 26),
+            "AfterDeleteRow": ("\u041f\u043e\u0441\u043b\u0435\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 27),
+            "OnUpdateUserSettingSetAtServer": ("\u041f\u0440\u0438\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0438\u0421\u043e\u0441\u0442\u0430\u0432\u0430\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "DynamicList", 28),
+            "OnActivateCell": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u042f\u0447\u0435\u0439\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 29),
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 30),
+            "RefreshRequestProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0417\u0430\u043f\u0440\u043e\u0441\u0430\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "", "", "", 31),
+        },
+        "TextDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 1),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 2),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 3),
+        },
+        "TrackBarField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+        },
+        "UsualGroup": {
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.5", "", 0),
+        },
+    }
 
-KNOWN_EVENTS = {
-    "input": ["OnChange", "StartChoice", "ChoiceProcessing", "AutoComplete", "TextEditEnd", "Clearing", "Creating", "EditTextChange"],
-    "check": ["OnChange"],
-    "radio": ["OnChange"],
-    "label": ["Click", "URLProcessing"],
-    "labelField": ["OnChange", "StartChoice", "ChoiceProcessing", "Click", "URLProcessing", "Clearing"],
-    "table": ["Selection", "BeforeAddRow", "AfterDeleteRow", "BeforeDeleteRow", "OnActivateRow", "OnEditEnd", "OnStartEdit", "BeforeRowChange", "BeforeEditEnd", "ValueChoice", "OnActivateCell", "OnActivateField", "Drag", "DragStart", "DragCheck", "DragEnd", "OnGetDataAtServer", "BeforeLoadUserSettingsAtServer", "OnUpdateUserSettingSetAtServer", "OnChange"],
-    "pages": ["OnCurrentPageChange"],
-    "page": ["OnCurrentPageChange"],
-    "button": ["Click"],
-    "picField": ["OnChange", "StartChoice", "ChoiceProcessing", "Click", "Clearing"],
-    "calendar": ["OnChange", "OnActivate"],
-    "picture": ["Click"],
-    "cmdBar": [],
-    "popup": [],
-    "group": [],
-}
 
-KNOWN_FORM_EVENTS = [
-    "OnCreateAtServer", "OnOpen", "BeforeClose", "OnClose", "NotificationProcessing",
-    "ChoiceProcessing", "OnReadAtServer", "AfterWriteAtServer", "BeforeWriteAtServer",
-    "AfterWrite", "BeforeWrite", "OnWriteAtServer", "FillCheckProcessingAtServer",
-    "OnLoadDataFromSettingsAtServer", "BeforeLoadDataFromSettingsAtServer",
-    "OnSaveDataInSettingsAtServer", "ExternalEvent", "OnReopen", "Opening",
-]
+# Form event order of the owners whose order differs from the catalog positions
+def get_form_event_order():
+    return {
+        "Document": ["AfterWrite", "BeforeReopenFromOtherServer", "ValueChoice", "OnReopenFromOtherServer", "OnSaveDataInSettingsAtServer", "ChoiceProcessing", "AfterWriteAtServer", "OnPasteFromClipboard", "NotificationProcessing", "OnReadAtServer", "NewWriteProcessing", "OnOpen", "URLListGetProcessing", "BeforeClose", "ExternalEvent", "CollaborationSystemUsersAutoComplete", "URLGetProcessing", "OnReopen", "OnLoadDataFromSettingsAtServer", "BeforeWrite", "BeforeWriteAtServer", "NavigationProcessing", "OnCreateAtServer", "CollaborationSystemUsersChoiceFormGetProcessing", "ActivationProcessing", "OnChangeDisplaySettings", "OnWriteAtServer", "OnClose", "OnMainServerAvailabilityChange", "URLProcessing", "FillCheckProcessingAtServer", "BeforeLoadDataFromSettingsAtServer", "AddInDetachmentOnError"],
+    }
+# --- конец каталога событий формы ---
+EVENT_CATALOG = get_form_event_catalog()
+FORM_EVENT_ORDER = get_form_event_order()
+
+# Format version of the form being compiled and its DSL (set in main): the event check needs both.
+_format_version = ''
+_form_owner = ''
+# Префикс имён расширения (set in main): обработчик с видом вызова получает его в имени по null.
+_ext_name_prefix = ''
+_defn = {}
+
+
+# Catalog entry of a tag's event (event name is case-sensitive: the platform accepts nothing else).
+def get_event_entry(xml_tag, event_name):
+    if not xml_tag or xml_tag not in EVENT_CATALOG:
+        return None
+    return EVENT_CATALOG[xml_tag].get(event_name)
+
+
+# Позиция события в <Events>: платформа пишет события в порядке каталога (у формы — в порядке владельца,
+# если он у владельца свой), внутри события — Before, затем After. Событие вне каталога — после известных.
+def get_event_rank(xml_tag, name, call_type=''):
+    ct = {'After': 1, 'Override': 2}.get(call_type or '', 0)
+    pos = 2 ** 31 - 1
+    own = FORM_EVENT_ORDER.get(_form_owner) if xml_tag == 'Form' and _form_owner else None
+    if own is not None:
+        if name in own:
+            pos = own.index(name)
+    else:
+        e = get_event_entry(xml_tag, name)
+        if e:
+            pos = e[5]
+    return pos * 4 + ct
+
 
 KNOWN_KEYS = {
     "group", "columnGroup", "buttonGroup", "input", "check", "radio", "label", "labelField", "table", "pages", "page",
@@ -2522,6 +3230,29 @@ REF_ROOT_SYNONYMS = {
     "КритерийОтбора": "FilterCriterion",
 }
 ENUM_VALUE_SYNONYMS = {"EnumValue", "ЗначениеПеречисления"}
+
+
+# Значение ссылки в dcscor:DesignTimeValue (отборы, параметры) — к виду Конфигуратора:
+# "Enum.X.EnumValue.Y" / "Enum.X.Y" → "Перечисление.X.Y", "Catalog.X.EmptyRef" → "Справочник.X.ПустаяСсылка".
+# Вид с сегментом EnumValue платформа не разрешает: сравнение с ним всегда ложно (замер 8.3.24).
+DESIGN_TIME_REF_ROOTS = {
+    "Enum": "Перечисление", "Catalog": "Справочник", "Document": "Документ", "ChartOfAccounts": "ПланСчетов",
+    "ChartOfCharacteristicTypes": "ПланВидовХарактеристик", "ChartOfCalculationTypes": "ПланВидовРасчета",
+    "ExchangePlan": "ПланОбмена", "BusinessProcess": "БизнесПроцесс", "Task": "Задача",
+}
+
+
+def normalize_design_time_value(v):
+    parts = str(v).split('.')
+    if len(parts) < 3:
+        return str(v)
+    # Сравнения без учёта регистра — как в PS-порте (ключи хэш-таблицы, -contains)
+    parts[0] = next((v for k, v in DESIGN_TIME_REF_ROOTS.items() if k.lower() == parts[0].lower()), parts[0])
+    if parts[0] == 'Перечисление' and len(parts) >= 4 and parts[2].lower() in {x.lower() for x in ENUM_VALUE_SYNONYMS}:
+        parts = parts[:2] + parts[3:]
+    if parts[-1] == 'EmptyRef':
+        parts[-1] = 'ПустаяСсылка'
+    return '.'.join(parts)
 
 
 def normalize_meta_type_ref(ref):
@@ -2833,11 +3564,31 @@ def normalize_radio_button_type(raw):
     return str(raw).strip()
 
 
-def get_handler_name(element_name, event_name):
-    suffix = EVENT_SUFFIX_MAP.get(event_name)
-    if suffix:
-        return f"{element_name}{suffix}"
-    return f"{element_name}{event_name}"
+# Handler name by the standard configurations' convention: <Element><Suffix>, a form event gets the suffix alone.
+# An event outside the catalog gets <Element><Event>.
+def get_handler_name(element_name, event_name, xml_tag='', call_type=''):
+    entry = get_event_entry(xml_tag, event_name)
+    name = f"{element_name}{entry[0]}" if entry and entry[0] else f"{element_name}{event_name}"
+    # Обработчик с видом вызова (расширение) — как называет Конфигуратор: префикс расширения + имя + вид вызова.
+    # Без этого имя совпало бы с процедурой исходной формы.
+    if call_type:
+        name = f"{_ext_name_prefix}{name}" + {'Before': '\u041f\u0435\u0440\u0435\u0434', 'After': '\u041f\u043e\u0441\u043b\u0435', 'Override': '\u0412\u043c\u0435\u0441\u0442\u043e'}.get(call_type, '')
+    return name
+
+
+# Префикс имён расширения — <NamePrefix> ближайшего вверх Configuration.xml; "" — не расширение или не задан.
+def get_extension_name_prefix(d):
+    while d:
+        cfg = os.path.join(d, 'Configuration.xml')
+        if os.path.isfile(cfg):
+            with open(cfg, encoding='utf-8-sig', errors='replace') as f:
+                m = re.search(r'<NamePrefix>([^<]*)</NamePrefix>', f.read())
+            return m.group(1) if m else ''
+        parent = os.path.dirname(d)
+        if not parent or parent == d:
+            break
+        d = parent
+    return ''
 
 
 def get_element_name(el, type_key):
@@ -2846,53 +3597,604 @@ def get_element_name(el, type_key):
     return str(el.get(type_key, ''))
 
 
+# Имя события из DSL. Совпало с событием тега без учёта регистра — имя из каталога (платформа примет только его).
+# Иначе: с заглавной — как есть (событие вне каталога, test_event_pairs предупредит); со строчной — не имя
+# события, а ключ не на своём месте (remove, handler…) — ошибка.
+def resolve_event_name(xml_tag, name, ctx):
+    name = '' if name is None else str(name)
+    if not name:
+        print(f"[ERROR] {ctx}: event name is empty — a list item object needs \"event\": "
+              f"{{ \"event\": \"OnChange\", \"handler\": \"Name\" }}", file=sys.stderr)
+        sys.exit(1)
+    if xml_tag and xml_tag in EVENT_CATALOG:
+        for k in EVENT_CATALOG[xml_tag]:
+            if k.lower() == name.lower():
+                return k
+    if name[:1].isascii() and name[:1].isupper():
+        return name
+    hint = ('to unbind a handler in form-edit, set the event to null: { "OnOpen": null }' if name in ('remove', 'delete')
+            else 'keys of events are event names (OnOpen), values are handler names')
+    print(f"[ERROR] {ctx}: '{name}' is not an event name — {hint}", file=sys.stderr)
+    sys.exit(1)
+
+
 # Собрать упорядоченный список событий элемента (имя, обработчик) из DSL.
-# Основной формат: el['events'] = { Событие: ИмяОбработчика } (None/"" → авто-имя по конвенции).
-# Legacy (принимается ради совместимости): el['on'] (массив) + el['handlers'] (переопределение имён).
-def get_event_pairs(el, element_name):
+# Объект { Событие: ИмяОбработчика | { handler, callType } | [ … ] } — имена явно;
+# список [ "Событие" | { event, handler?, callType? } ] — имена по конвенции (get_handler_name).
+# null в объекте здесь — ошибка: снимать у нового элемента нечего (снятие — в form-edit, до этой функции).
+# Legacy (принимается ради совместимости): el['on'] (как список) + el['handlers'] (переопределение имён).
+def get_event_pairs(el, element_name, xml_tag=''):
     pairs = []
+    ctx = 'Form events' if xml_tag == 'Form' else f"Element '{element_name}' events"
     events = el.get('events')
-    if events:
-        for ev_name, val in events.items():
-            handler = '' if val is None else str(val)
-            if not handler:
-                handler = get_handler_name(element_name, ev_name)
-            pairs.append((ev_name, handler))
+    lst = None
+    if isinstance(events, list):
+        lst = events
+    elif events:
+        if not isinstance(events, dict):
+            print(f"[ERROR] {ctx}: events — an object {{ \"OnChange\": \"Handler\" }} or a list of events [\"OnChange\"]", file=sys.stderr)
+            sys.exit(1)
+        for ev_key, val in events.items():
+            ev_name = resolve_event_name(xml_tag, ev_key, ctx)
+            # Значение — имя обработчика; объект { handler, callType } или массив таких объектов
+            # (в расширении на одно событие вешают и Before, и After)
+            if val == []:
+                print(f"[ERROR] {ctx}: '{ev_name}' — empty list, specify the handler name", file=sys.stderr)
+                sys.exit(1)
+            for v in (val if isinstance(val, list) else [val]):
+                if isinstance(v, dict):
+                    handler = '' if v.get('handler') is None else str(v.get('handler'))
+                    call_type = normalize_call_type(v.get('callType'), element_name, ev_name)
+                else:
+                    handler = '' if v is None else str(v)
+                    call_type = ''
+                if not handler:
+                    print(f"[ERROR] {ctx}: '{ev_name}' has no handler name — null unbinds a handler only when editing a form (form-edit); "
+                          f"for a handler named by convention list the event: \"events\": [\"{ev_name}\"]", file=sys.stderr)
+                    sys.exit(1)
+                pairs.append((ev_name, handler, call_type))
     elif el.get('on'):
+        lst = el['on'] if isinstance(el['on'], list) else [el['on']]
+    if lst is not None:
         handlers = el.get('handlers') or {}
-        for evt in el['on']:
-            evt_name = str(evt)
-            if handlers.get(evt_name):
-                handler = str(handlers[evt_name])
+        for evt in lst:
+            if isinstance(evt, dict):
+                evt_name = resolve_event_name(xml_tag, evt.get('event', ''), ctx)
+                handler = '' if evt.get('handler') is None else str(evt.get('handler'))
+                call_type = normalize_call_type(evt.get('callType'), element_name, evt_name)
             else:
-                handler = get_handler_name(element_name, evt_name)
-            pairs.append((evt_name, handler))
+                evt_name, handler, call_type = resolve_event_name(xml_tag, evt, ctx), '', ''
+            if not handler:
+                hk = next((k for k in handlers if str(k).lower() == evt_name.lower() and handlers[k]), None)
+                handler = str(handlers[hk]) if hk is not None else get_handler_name(element_name, evt_name, xml_tag, call_type)
+            pairs.append((evt_name, handler, call_type))
     return pairs
 
 
-# Проверить, подключено ли событие к элементу (в любом из форматов).
-def test_element_event(el, event_name):
+# Пары событий в порядке, в котором их пишет платформа (get_event_rank); равные — в порядке ввода.
+# Только для вывода <Events>: заготовки в модуле идут в порядке ввода.
+def sort_event_pairs(pairs, xml_tag):
+    return sorted(pairs, key=lambda p: get_event_rank(xml_tag, p[0], p[2]))
+
+
+# Вид вызова обработчика в расширении: Before / After / Override (регистр не важен); пусто — не указан.
+def normalize_call_type(raw, element_name, event_name):
+    if raw is None or str(raw) == '':
+        return ''
+    for v in ('Before', 'After', 'Override'):
+        if str(raw).lower() == v.lower():
+            return v
+    print(f"[ERROR] Element '{element_name}', event '{event_name}': callType '{raw}' — expected Before, After or Override", file=sys.stderr)
+    sys.exit(1)
+
+
+# Расстояние Левенштейна — для подсказки к неизвестному событию.
+def get_edit_distance(a, b):
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        prev = cur
+    return prev[len(b)]
+
+
+# Подсказка к неизвестному событию: ближайшие по написанию события вида элемента и виды, у которых такое событие есть.
+def get_event_hint(xml_tag, name):
+    parts = []
+    evs = EVENT_CATALOG.get(xml_tag)
+    if evs:
+        lim = max(2, len(name) // 3)
+        near = sorted('{:03d}|{}'.format(d, k) for k in evs
+                      for d in [get_edit_distance(name.lower(), k.lower())] if d <= lim)
+        if near:
+            parts.append('Did you mean: ' + ', '.join(x.split('|')[1] for x in near[:3]) + '?')
+    tags = sorted(t for t in EVENT_CATALOG if t != xml_tag and get_event_entry(t, name) is not None)
+    if tags:
+        parts.append(f"'{name}' is an event of: {', '.join(tags)}.")
+    return ' '.join(parts)
+
+
+# Events are checked against the catalog. An event the element lacks is dropped by the platform on load
+# (logged) — warn but still write it: the catalog comes from standard configurations and may miss a rare event.
+# source — type of the attribute the table is bound to ('' — unknown, the source is not checked).
+def test_event_pairs(pairs, xml_tag, element_name, source=''):
+    what = 'the form' if xml_tag == 'Form' else f"{xml_tag} '{element_name}'"
+    evs = EVENT_CATALOG.get(xml_tag)
+    for ev, _, _ in pairs:
+        ev = str(ev)
+        entry = get_event_entry(xml_tag, ev) if evs else None
+        if not entry:
+            # сводкой перед записью формы (report_unknown_events): модель исправит все сразу
+            _unknown_events.append({'tag': xml_tag, 'name': element_name, 'ev': ev, 'noEvents': not evs})
+            continue
+        since = entry[3]
+        if since and format_rank(_format_version) < PLATFORM_FORMAT_RANK.get(since, 0):
+            print(f"[WARN] Event '{ev}' of {what} exists since platform {since} — earlier platforms drop it on load")
+        only = entry[4]
+        if only and xml_tag == 'Form':
+            if _form_owner and _form_owner not in [x.strip() for x in only.split(',')]:
+                print(f"[WARN] Event '{ev}' of {what} exists only for forms of {only} (this form: {_form_owner}) — the platform drops it on load")
+        elif only and source and source.lower() != only.lower():
+            print(f"[WARN] Event '{ev}' of {what} exists only for a table bound to {only} (bound to {source}) — the platform drops it on load")
+
+# Сводка неизвестных событий за запуск — одним блоком перед записью формы. Формы ветки 8.3 — ошибка (форма не
+# пишется), 8.5 — предупреждение. Перечень событий вида — только если подсказать нечего, один раз на вид.
+def report_unknown_events():
+    if not _unknown_events:
+        return
+    # одно событие у нескольких элементов вида — одной строкой (одна и та же опечатка — одно исправление)
+    groups = {}
+    for u in _unknown_events:
+        g = groups.setdefault((u['tag'], u['ev']), {'u': u, 'names': []})
+        if u['name'] and u['name'] not in g['names']:
+            g['names'].append(u['name'])
+    lines, known_tags = [], []
+    for g in groups.values():
+        u = g['u']
+        where = 'the form' if u['tag'] == 'Form' else f"{u['tag']} " + ', '.join(f"'{n}'" for n in g['names'])
+        hint = get_event_hint(u['tag'], u['ev'])
+        line = f"  '{u['ev']}' for {where}"
+        if u['noEvents']:
+            line += f" — {u['tag']} has no events." + (f" {hint}" if hint else '')
+        elif hint:
+            line += f" — {hint}"
+        elif u['tag'] not in known_tags:
+            known_tags.append(u['tag'])
+        lines.append(line)
+    for t in known_tags:
+        lines.append(f"  Events of {t}: {', '.join(sorted(EVENT_CATALOG[t]))}")
+    if format_rank(_format_version) <= EVENT_CATALOG_CLOSED_RANK:
+        print('[ERROR] Unknown events — the platform drops them on load; the form is not written:\n' + '\n'.join(lines), file=sys.stderr)
+        sys.exit(1)
+    print('[WARN] Unknown events — the platform drops them on load (8.5 builds may add events):\n' + '\n'.join(lines))
+
+
+# Владелец формы по типу основного реквизита — как в ограничениях каталога событий ("" — не определить
+# или вид не замерен: события формы по владельцу тогда не сверяются).
+_FORM_OWNER_KINDS = {
+    'DataProcessorObject': 'DataProcessor', 'ExternalDataProcessorObject': 'DataProcessor',
+    'ReportObject': 'Report', 'ExternalReportObject': 'Report', 'DocumentObject': 'Document',
+    'CatalogObject': 'Catalog', 'ChartOfCharacteristicTypesObject': 'ChartOfCharacteristicTypes',
+    'ExchangePlanObject': 'ExchangePlan', 'ChartOfAccountsObject': 'ChartOfAccounts',
+    'ChartOfCalculationTypesObject': 'ChartOfCalculationTypes',
+    'BusinessProcessObject': 'BusinessProcess', 'TaskObject': 'Task',
+    'InformationRegisterRecordManager': 'InformationRegisterRecord',
+    'InformationRegisterRecordSet': 'InformationRegisterRecordSet', 'ConstantsSet': 'Constants',
+    'DynamicList': 'List',
+}
+
+
+# Флаг main строкой или числом ("true", 1) — как булево: иначе порты расходятся (PS `-eq $true` принимает
+# строку и 1, Python `is True` — нет)
+def normalize_main_flag(attrs):
+    for a in (attrs if isinstance(attrs, list) else []):
+        if not isinstance(a, dict) or 'main' not in a:
+            continue
+        v = a['main']
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ('true', 'false'):
+                a['main'] = s == 'true'
+        elif isinstance(v, int) and not isinstance(v, bool) and v in (0, 1):
+            a['main'] = v == 1
+
+
+def get_form_owner_kind(type_str):
+    t = re.sub(r'^\w+:(?=\w)', '', str(type_str or ''))
+    if t.lower() == 'settingscomposer':
+        return 'SettingsComposer'
+    k = t.split('.')[0].lower()
+    return next((v for n, v in _FORM_OWNER_KINDS.items() if n.lower() == k), '')
+
+
+# Type of the attribute the table is bound to ('' — undetermined: no path or the attribute is not in the DSL).
+def get_table_source(el):
+    if el.get('_dynList'):
+        return 'DynamicList'
+    root = str(el.get('path') or '').split('.')[0]
+    if not root:
+        return ''
+    for a in (_defn.get('attributes') or []):
+        if str(a.get('name') or '').lower() == root.lower():
+            return '' if a.get('type') is None else str(a.get('type'))
+    return ''
+
+
+# The element kind has no events: given events/on are not written — warn instead of losing them silently.
+def warn_events_ignored(el, xml_tag, element_name):
     events = el.get('events')
-    if events and event_name in events:
-        return True
-    return event_name in (el.get('on') or [])
+    on = el.get('on')
+    lst = list(on if isinstance(on, list) else ([] if on is None else [on]))
+    if isinstance(events, list):
+        names, lst = [], list(events) + lst
+    elif isinstance(events, dict):
+        names = list(events.keys())
+    else:
+        names = [str(events)] if events else []
+    for evt in lst:
+        if evt is not None:
+            names.append(str(evt.get('event', '')) if isinstance(evt, dict) else str(evt))
+    if names:
+        print(f"[WARN] {xml_tag} '{element_name}' has no events — ignored: {', '.join(names)}")
 
 
-def emit_events(lines, el, element_name, indent, type_key):
-    pairs = get_event_pairs(el, element_name)
+# First XML format version of the platform where a catalog event appeared.
+PLATFORM_FORMAT_RANK = {"8.3.20": 213, "8.3.23": 216, "8.3.24": 217, "8.3.25": 218, "8.3.26": 219, "8.3.27": 220, "8.5": 221}
+# Каталог событий полон по формат 2.20 включительно (ветка 8.3 закрыта): неизвестное событие — ошибка; выше — предупреждение
+EVENT_CATALOG_CLOSED_RANK = 220
+_unknown_events = []
+
+# --- Заготовки обработчиков в модуле формы ---
+# Привязки, которые затронул запуск, собираются в _handler_bindings; после записи Form.xml
+# update_form_module дописывает в модуль процедуры, которых там ещё нет, — в области по стандарту БСП.
+_handler_bindings = []
+# таблица, колонки которой сейчас эмитятся
+_handler_table = {'name': ''}
+
+
+# kind: form | element | command; table — таблица, внутри которой элемент (область «…ТаблицыФормы<Имя>»).
+# Одно имя на несколько событий — одна процедура: сигнатуру даёт первая привязка.
+def register_handler(handler, kind, xml_tag='', event_name='', table=''):
+    if not handler:
+        return
+    for b in _handler_bindings:
+        if b['handler'].lower() == handler.lower():
+            return
+    _handler_bindings.append({'handler': handler, 'kind': kind, 'xmlTag': xml_tag, 'eventName': event_name, 'table': table or ''})
+
+
+# Пустой модуль формы. Табличных областей нет: имя таблицы при создании формы неизвестно.
+def get_form_module_template():
+    out = []
+    for r in ('\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u0424\u043e\u0440\u043c\u044b',
+              '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0428\u0430\u043f\u043a\u0438\u0424\u043e\u0440\u043c\u044b',
+              '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u041a\u043e\u043c\u0430\u043d\u0434\u0424\u043e\u0440\u043c\u044b',
+              '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u041e\u043f\u043e\u0432\u0435\u0449\u0435\u043d\u0438\u0439',
+              '\u0421\u043b\u0443\u0436\u0435\u0431\u043d\u044b\u0435\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b\u0418\u0424\u0443\u043d\u043a\u0446\u0438\u0438'):
+        if out:
+            out.append('')
+        out += [f'#\u041e\u0431\u043b\u0430\u0441\u0442\u044c {r}', '', '#\u041a\u043e\u043d\u0435\u0446\u041e\u0431\u043b\u0430\u0441\u0442\u0438']
+    return out
+
+
+# Сканер BSL: строковые литералы (с "" и многострочными продолжениями «|») и комментарии // отделяются
+# от кода, номера строк сохраняются. Lines — строки текста; Code — они же без комментариев, литерал
+# заменён на ""; Literals — {Line, Text, Prefix — код этой строки слева от литерала}.
+def get_bsl_scan(text):
+    lines = text.replace("\r", "").split("\n")
+    code = []
+    mask = []
+    lits = []
+    in_str = False
+    cur = None
+    cur_line = 0
+    cur_prefix = ""
+    cur_col = -1
+    for i, line in enumerate(lines):
+        # строка без кавычек вне литерала — только отрезать комментарий
+        if not in_str and '"' not in line:
+            k = line.find('//')
+            code.append(line[:k] if k >= 0 else line)
+            mask.append(line[:k] + ' ' * (len(line) - k) if k >= 0 else line)
+            continue
+        sb = []
+        mk = list(line)
+        j = 0
+        if in_str:
+            # продолжение многострочного литерала: пробелы, затем «|»
+            while j < len(line) and line[j] in (' ', '\t'):
+                j += 1
+            # строка «//…» между строками литерала — комментарий, литерал продолжается на следующей
+            if line.startswith('//', j):
+                code.append("")
+                mask.append(' ' * len(line))
+                continue
+            if j < len(line) and line[j] == '|':
+                mk[j] = ' '
+                j += 1
+            cur += "\n"
+            cur_col = -1
+        while j < len(line):
+            c = line[j]
+            if in_str:
+                if c == '"':
+                    if j + 1 < len(line) and line[j + 1] == '"':
+                        cur += '"'
+                        mk[j] = ' '
+                        mk[j + 1] = ' '
+                        j += 2
+                        continue
+                    in_str = False
+                    lits.append({"Line": cur_line, "Text": cur, "Prefix": cur_prefix, "Col": cur_col})
+                    sb.append('""')
+                    j += 1
+                    continue
+                cur += c
+                mk[j] = ' '
+                j += 1
+                continue
+            if c == '/' and j + 1 < len(line) and line[j + 1] == '/':
+                for q in range(j, len(mk)):
+                    mk[q] = ' '
+                break
+            if c == '"':
+                in_str = True
+                cur = ""
+                cur_line = i + 1
+                cur_prefix = "".join(sb)
+                cur_col = j + 1
+                j += 1
+                continue
+            sb.append(c)
+            j += 1
+        code.append("".join(sb))
+        mask.append("".join(mk))
+    return {"Lines": lines, "Code": code, "Mask": mask, "Literals": lits}
+
+
+# Процедуры и функции модуля (имя, первая и последняя строка; первая — с аннотациями над заголовком)
+# и области (имя, строки #Область и #КонецОбласти, вложенность). Строки нумеруются с 1.
+# Заголовок — только в начале строки: продолжение литерала («|…») и комментарий заголовком не станут.
+def get_module_outline(lines):
+    procs, regions, opened = [], [], []
+    cur = None
+    for i, l in enumerate(lines):
+        if cur is not None:
+            # \u043a\u043e\u043d\u0435\u0446 \u043f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b \u2014 \u0432 \u043d\u0430\u0447\u0430\u043b\u0435 \u0441\u0442\u0440\u043e\u043a\u0438 \u0438\u043b\u0438 \u043f\u043e\u0441\u043b\u0435 \u00ab;\u00bb (`\u0412\u043e\u0437\u0432\u0440\u0430\u0442 \u0425;\u041a\u043e\u043d\u0435\u0446\u0424\u0443\u043d\u043a\u0446\u0438\u0438`)
+            if re.search(r'(^|;)\s*(\u041a\u043e\u043d\u0435\u0446\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b|\u041a\u043e\u043d\u0435\u0446\u0424\u0443\u043d\u043a\u0446\u0438\u0438|EndProcedure|EndFunction)(?!\w)', l, re.I):
+                cur['end'] = i + 1
+                procs.append(cur)
+                cur = None
+            continue
+        m = re.match(r'^\s*(?:(?:\u0410\u0441\u0438\u043d\u0445|Async)\s+)?(?:\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u0430|\u0424\u0443\u043d\u043a\u0446\u0438\u044f|Procedure|Function)\s+(\w+)\s*\(', l, re.I)
+        if m:
+            s = i
+            while s > 0 and re.match(r'^\s*&', lines[s - 1]):
+                s -= 1
+            cur = {'name': m.group(1), 'start': s + 1, 'end': i + 1}
+            continue
+        m = re.match(r'^\s*#(?:\u041e\u0431\u043b\u0430\u0441\u0442\u044c|Region)\s+(\S+)', l, re.I)
+        if m:
+            opened.append({'name': m.group(1), 'start': i + 1, 'end': 0, 'depth': len(opened)})
+            continue
+        if re.match(r'^\s*#(\u041a\u043e\u043d\u0435\u0446\u041e\u0431\u043b\u0430\u0441\u0442\u0438|EndRegion)(?!\w)', l, re.I) and opened:
+            r = opened.pop()
+            r['end'] = i + 1
+            regions.append(r)
+    return {'procs': procs, 'regions': regions}
+
+
+# Разметка модуля по коду без литералов и комментариев: «;КонецПроцедуры» в строке не закроет процедуру.
+def get_module_code_outline(lines):
+    return get_module_outline(get_bsl_scan('\n'.join(lines))['Code'])
+
+
+# Параметры обработчика события по версии формата формы: строка — одна сигнатура для всех платформ;
+# кортеж ("8.3.20", "А, Б", "8.3.23", "А, Б, В") — сигнатура с указанной платформы (по возрастанию).
+# Формат формы не определён — новейшая сигнатура.
+def get_event_params(entry):
+    p = entry[2]
+    if not isinstance(p, (list, tuple)):
+        return p
+    rank = format_rank(_format_version)
+    res = p[1]
+    for i in range(0, len(p), 2):
+        since = PLATFORM_FORMAT_RANK.get(p[i])
+        if since is None:
+            continue
+        if rank == 0 or rank >= since:
+            res = p[i + 1]
+    return res
+
+
+# Текст заготовки: директива и параметры — из каталога событий, у команды — (Команда) на клиенте.
+# None — событие вне каталога, сигнатура неизвестна.
+def get_handler_stub(b):
+    if b['kind'] == 'command':
+        directive, params = '\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435', '\u041a\u043e\u043c\u0430\u043d\u0434\u0430'
+    else:
+        entry = get_event_entry(b['xmlTag'], b['eventName'])
+        if not entry:
+            return None
+        directive, params = entry[1], get_event_params(entry)
+    return [f'&{directive}', f"\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u0430 {b['handler']}({params})", '\t// \u0412\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0435 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0430.', '\u041a\u043e\u043d\u0435\u0446\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b']
+
+
+# Порядок областей модуля формы по стандарту (типовые): куда встаёт новая область.
+def get_region_rank(name):
+    n = name.lower()
+    if n == '\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435\u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u044b\u0445':
+        return 0
+    if n == '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u0444\u043e\u0440\u043c\u044b':
+        return 1
+    if n in ('\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0448\u0430\u043f\u043a\u0438\u0444\u043e\u0440\u043c\u044b', '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0444\u043e\u0440\u043c\u044b'):
+        return 2
+    if n.startswith('\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0442\u0430\u0431\u043b\u0438\u0446\u044b\u0444\u043e\u0440\u043c\u044b'):
+        return 3
+    if n == '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u043a\u043e\u043c\u0430\u043d\u0434\u0444\u043e\u0440\u043c\u044b':
+        return 4
+    if n == '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u043e\u043f\u043e\u0432\u0435\u0449\u0435\u043d\u0438\u0439':
+        return 5
+    if n == '\u0441\u043b\u0443\u0436\u0435\u0431\u043d\u044b\u0435\u043f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b\u0438\u0444\u0443\u043d\u043a\u0446\u0438\u0438':
+        return 6
+    return -1
+
+
+# Область для привязки. Общая область элементов (без «шапки») — для всех элементов, и табличных тоже:
+# модуль уже так устроен.
+def get_handler_region_name(b, regions):
+    if b['kind'] == 'form':
+        return '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u0424\u043e\u0440\u043c\u044b'
+    if b['kind'] == 'command':
+        return '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u041a\u043e\u043c\u0430\u043d\u0434\u0424\u043e\u0440\u043c\u044b'
+    has = {r['name'].lower() for r in regions}
+    # своя область таблицы, если она уже есть, — важнее общей
+    if b['table'] and f"\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0422\u0430\u0431\u043b\u0438\u0446\u044b\u0424\u043e\u0440\u043c\u044b{b['table']}".lower() in has:
+        return f"\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0422\u0430\u0431\u043b\u0438\u0446\u044b\u0424\u043e\u0440\u043c\u044b{b['table']}"
+    if '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0444\u043e\u0440\u043c\u044b' in has and '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0448\u0430\u043f\u043a\u0438\u0444\u043e\u0440\u043c\u044b' not in has:
+        return '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0424\u043e\u0440\u043c\u044b'
+    if b['table']:
+        return f"\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0422\u0430\u0431\u043b\u0438\u0446\u044b\u0424\u043e\u0440\u043c\u044b{b['table']}"
+    return '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0428\u0430\u043f\u043a\u0438\u0424\u043e\u0440\u043c\u044b'
+
+
+# Вставить заготовку в модуль (список строк): в конец своей области, нет области — создать её на месте
+# по порядку областей, нет областей вообще — в конец модуля. Отделяется одной пустой строкой.
+def add_stub_to_module(lines, stub, b):
+    outline = get_module_code_outline(lines)
+    if not outline['regions']:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if lines:
+            lines.append('')
+        lines.extend(stub)
+        return
+    name = get_handler_region_name(b, outline['regions'])
+    target = None
+    for r in outline['regions']:
+        if r['name'].lower() == name.lower() and (target is None or r['start'] < target['start']):
+            target = r
+    if target is not None:
+        # перед #КонецОбласти, сняв пустые строки над ним
+        k = target['end'] - 1
+        while k - 1 > target['start'] - 1 and not lines[k - 1].strip():
+            k -= 1
+            del lines[k]
+        lines[k:k] = [''] + stub + ['']
+        return
+    block = [f'#\u041e\u0431\u043b\u0430\u0441\u0442\u044c {name}', ''] + stub + ['', '#\u041a\u043e\u043d\u0435\u0446\u041e\u0431\u043b\u0430\u0441\u0442\u0438']
+    rank = get_region_rank(name)
+    top = sorted([r for r in outline['regions'] if r['depth'] == 0], key=lambda r: r['start'])
+    after = before = None
+    for r in top:
+        rr = get_region_rank(r['name'])
+        if rr < 0:
+            continue
+        if rr <= rank:
+            after = r
+        elif before is None:
+            before = r
+    if after is not None:
+        lines[after['end']:after['end']] = [''] + block
+        return
+    if before is not None:
+        lines[before['start'] - 1:before['start'] - 1] = block + ['']
+        return
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines.extend([''] + block)
+
+
+# Дописать в модуль формы процедуры для привязок, которых в нём нет. Модуль — <каталог Form.xml>/Form/Module.bsl;
+# нет модуля — создаётся из шаблона, но только в раскладке выгрузки (Form.xml в каталоге Ext).
+# Кодировка и переводы строк существующего модуля сохраняются; новый — UTF-8 с BOM, CRLF, как у form-add.
+# Возвращает строки отчёта: что добавлено, что уже было, с диапазонами строк по итоговому тексту.
+def update_form_module(form_xml_path, shown_form_path):
+    if not _handler_bindings:
+        return []
+    xml_dir = os.path.dirname(form_xml_path)
+    path = os.path.join(xml_dir, 'Form', 'Module.bsl')
+    # путь для вывода — в том же виде, что путь к Form.xml в выводе навыка
+    sep = '\\' if ('\\' in shown_form_path and '/' not in shown_form_path) else '/'
+    shown = re.sub(r'[^\\/]+$', '', shown_form_path) + f'Form{sep}Module.bsl'
+    created = False
+    if os.path.exists(path):
+        with open(path, 'rb') as f:
+            raw = f.read()
+        bom = raw.startswith(b'\xef\xbb\xbf')
+        # строго: модуль не в UTF-8 перезапись испортила бы — такой не трогаем
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            return [f'[WARN] Form module is not UTF-8: {shown} — handler stubs not created']
+        if bom:
+            text = text[1:]
+        eol = '\r\n' if ('\r\n' in text or '\n' not in text) else '\n'
+        norm = text.replace('\r\n', '\n')
+        # сколько переводов строк в конце — столько и запишем: модуль не должен меняться вне вставок
+        tail = len(norm) - len(norm.rstrip('\n'))
+        src = norm.rstrip('\n').split('\n')
+        if not text.strip():
+            src = get_form_module_template()
+    elif os.path.basename(xml_dir).lower() == 'ext':
+        created, bom, eol, tail = True, True, '\r\n', 0
+        src = get_form_module_template()
+    else:
+        return [f'[WARN] Form module not found: {shown} \u2014 handler stubs not created']
+    lines = list(src)
+    status = {}
+    changed = False
+    for b in _handler_bindings:
+        key = b['handler'].lower()
+        outline = get_module_code_outline(lines)
+        if any(p['name'].lower() == key for p in outline['procs']):
+            status[key] = 'exists'
+            continue
+        stub = get_handler_stub(b)
+        if stub is None:
+            status[key] = f"not added: no signature known for event '{b['eventName']}' of {b['xmlTag']}"
+            continue
+        add_stub_to_module(lines, stub, b)
+        status[key] = 'added'
+        changed = True
+    if changed or created:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        out = eol.join(lines) + eol * tail
+        with open(path, 'wb') as f:
+            f.write((('\ufeff' if bom else '') + out).encode('utf-8'))
+    outline = get_module_code_outline(lines)
+    # \u0432 \u043f\u043e\u0440\u044f\u0434\u043a\u0435 \u0441\u0442\u0440\u043e\u043a \u043c\u043e\u0434\u0443\u043b\u044f; \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043d\u044b\u0435 \u2014 \u0432 \u043a\u043e\u043d\u0446\u0435
+    rows = []
+    for b in _handler_bindings:
+        key = b['handler'].lower()
+        st = status[key]
+        p = next((x for x in outline['procs'] if x['name'].lower() == key), None)
+        if st == 'added':
+            rows.append((p['start'], len(rows), f"  + {b['handler']} \u2014 empty stub added, lines {p['start']}-{p['end']}"))
+        elif st == 'exists':
+            rows.append((p['start'], len(rows), f"  = {b['handler']} \u2014 exists, lines {p['start']}-{p['end']}"))
+        else:
+            rows.append((sys.maxsize, len(rows), f"  ? {b['handler']} \u2014 {st}"))
+    report = [f'Handlers ({shown}, module created):' if created else f'Handlers ({shown}):']
+    report += [r[2] for r in sorted(rows)]
+    return report
+
+
+def emit_events(lines, el, element_name, indent, xml_tag, source=''):
+    pairs = get_event_pairs(el, element_name, xml_tag)
     if not pairs:
         return
-
-    # Validate event names
-    if type_key and type_key in KNOWN_EVENTS:
-        allowed = KNOWN_EVENTS[type_key]
-        for ev_name, _ in pairs:
-            if allowed and str(ev_name) not in allowed:
-                print(f"[WARN] Unknown event '{ev_name}' for {type_key} '{element_name}'. Known: {', '.join(allowed)}")
+    test_event_pairs(pairs, xml_tag, element_name, source)
+    table = element_name if xml_tag == 'Table' else _handler_table['name']
+    for ev_name, handler, _ in pairs:
+        register_handler(handler, 'element', xml_tag, ev_name, table)
 
     lines.append(f"{indent}<Events>")
-    for ev_name, handler in pairs:
-        lines.append(f'{indent}\t<Event name="{ev_name}">{handler}</Event>')
+    for ev_name, handler, call_type in sort_event_pairs(pairs, xml_tag):
+        ct_attr = f' callType="{call_type}"' if call_type else ''
+        lines.append(f'{indent}\t<Event name="{ev_name}"{ct_attr}>{handler}</Event>')
     lines.append(f"{indent}</Events>")
 
 
@@ -2911,7 +4213,7 @@ def _has_real_markup(text):
 def resolve_ml_formatted(val):
     # {text, formatted} = явный override; строка/мапа → авто-детект formatted
     if isinstance(val, dict) and 'text' in val:
-        return val['text'], bool(val.get('formatted'))
+        return val['text'], to_dsl_bool(val.get('formatted'), 'formatted', False)
     return val, _has_real_markup(val)
 
 
@@ -2944,7 +4246,7 @@ def emit_companion(lines, tag, name, indent, content=None):
     if isinstance(content, dict) and any(k in content for k in COMPANION_STRUCT_KEYS):
         # own-content ПЕРЕД Title (в корпусе layout-first 582 vs 10).
         emit_common_flags(lines, content, inner)
-        if content.get('hyperlink') is True:
+        if get_dsl_bool(content, ['hyperlink'], False):
             lines.append(f'{inner}<Hyperlink>true</Hyperlink>')
         emit_layout(lines, content, inner)
         emit_appearance(lines, content, inner, 'decoration')
@@ -2954,7 +4256,7 @@ def emit_companion(lines, tag, name, indent, content=None):
         if content.get('tooltip'):
             emit_mltext(lines, inner, 'ToolTip', content['tooltip'])
         # События компаньона (ExtendedTooltip = LabelDecoration: напр. URLProcessing у hyperlink-подсказки)
-        emit_events(lines, content, name, inner, 'label')
+        emit_events(lines, content, name, inner, 'ExtendedTooltip')
     else:
         emit_companion_title(lines, content, inner)
     lines.append(f'{indent}</{tag}>')
@@ -2971,7 +4273,7 @@ def emit_companion_panel(lines, tag, name, indent, panel):
         children = panel
     elif panel is not None:
         if panel.get('autofill') is not None:
-            autofill = bool(panel.get('autofill'))
+            autofill = to_dsl_bool(panel.get('autofill'), 'autofill', False)
         if panel.get('horizontalAlign'):
             halign = str(panel.get('horizontalAlign'))
         children = panel.get('children')
@@ -3088,13 +4390,14 @@ def get_addition_override(additions, type_key):
 def emit_xr_flag(lines, tag, val, indent):
     if val is None:
         return
-    if isinstance(val, bool):
+    if not isinstance(val, dict):
+        flag = to_dsl_bool(val, tag, False)
         lines.append(f"{indent}<{tag}>")
-        lines.append(f"{indent}\t<xr:Common>{'true' if val else 'false'}</xr:Common>")
+        lines.append(f"{indent}\t<xr:Common>{'true' if flag else 'false'}</xr:Common>")
         lines.append(f"{indent}</{tag}>")
         return
     # объектная форма { common, roles }
-    common = bool(val.get('common')) if val.get('common') is not None else False
+    common = to_dsl_bool(val.get('common'), 'common', False)
     lines.append(f"{indent}<{tag}>")
     lines.append(f"{indent}\t<xr:Common>{'true' if common else 'false'}</xr:Common>")
     roles = val.get('roles')
@@ -3105,27 +4408,27 @@ def emit_xr_flag(lines, tag, val, indent):
             rn = re.sub(r'^(Role|Роль)\.', '', rname)
             if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', rn):
                 rn = "Role." + rn
-            lines.append(f"{indent}\t<xr:Value name=\"{rn}\">{'true' if rval else 'false'}</xr:Value>")
+            lines.append(f"{indent}\t<xr:Value name=\"{rn}\">{'true' if to_dsl_bool(rval, str(rname), False) else 'false'}</xr:Value>")
     lines.append(f"{indent}</{tag}>")
 
 
 def emit_common_flags(lines, el, indent):
-    if el.get('visible') is False or el.get('hidden') is True:
+    if (not get_dsl_bool(el, ['visible'], True)) or get_dsl_bool(el, ['hidden'], False):
         lines.append(f"{indent}<Visible>false</Visible>")
     if el.get('userVisible') is not None:
         emit_xr_flag(lines, 'UserVisible', el.get('userVisible'), indent)
-    if el.get('enabled') is False or el.get('disabled') is True:
+    if (not get_dsl_bool(el, ['enabled'], True)) or get_dsl_bool(el, ['disabled'], False):
         lines.append(f"{indent}<Enabled>false</Enabled>")
-    if el.get('readOnly') is True:
+    if get_dsl_bool(el, ['readOnly'], False):
         lines.append(f"{indent}<ReadOnly>true</ReadOnly>")
 
 
 # Общие свойства элемента (любой тип, включая Button/cmdBar): default/skip/drag.
 def emit_common_element_props(lines, el, indent):
-    if el.get('defaultItem') is True:
+    if get_dsl_bool(el, ['defaultItem'], False):
         lines.append(f"{indent}<DefaultItem>true</DefaultItem>")
     if 'skipOnInput' in el and el['skipOnInput'] is not None:
-        siv = 'true' if el['skipOnInput'] is True else 'false'
+        siv = 'true' if get_dsl_bool(el, ['skipOnInput'], False) else 'false'
         lines.append(f"{indent}<SkipOnInput>{siv}</SkipOnInput>")
     # EnableStartDrag — фактическое значение (платформа эмитит и явный false, напр. SpreadSheet)
     if el.get('enableStartDrag') is not None:
@@ -3160,7 +4463,7 @@ def emit_picture_ref(lines, val, pic_tag, indent):
         src, lt = val, False
     else:
         src = val.get('src')
-        lt = val.get('loadTransparent') is True
+        lt = get_dsl_bool(val, ['loadTransparent'], False)
         tpx = val.get('transparentPixel')
     if not src:
         return
@@ -3198,12 +4501,12 @@ def emit_command_picture(lines, pic, elem_lt, indent):
     else:
         src = pic.get('src')
         if pic.get('loadTransparent') is not None:
-            lt = bool(pic.get('loadTransparent'))
+            lt = to_dsl_bool(pic.get('loadTransparent'), 'loadTransparent', False)
         tpx = pic.get('transparentPixel')
     if not src:
         return
     if lt is None and elem_lt is not None:
-        lt = bool(elem_lt)
+        lt = to_dsl_bool(elem_lt, 'loadTransparent', False)
     src_str = str(src)
     lines.append(f'{indent}<Picture>')
     if src_str.startswith('abs:'):
@@ -3703,6 +5006,8 @@ GENERIC_SCALARS = [
     ('AllowInputEmptyMultipleValues', 'allowInputEmptyMultipleValues', 'bool'),
     ('BehaviorOnHorizontalCompression', 'behaviorOnHorizontalCompression', 'value'),
 ]
+# Простые скаляры (pass-through) известны валидатору ключей — компилятор их выводит
+GENERIC_SCALAR_KEYS = {k for _, k, _ in GENERIC_SCALARS}
 
 
 def emit_generic_scalars(lines, el, indent):
@@ -3731,13 +5036,13 @@ def emit_layout(lines, el, indent, skip_height=False, multi_line_default=False):
         lines.append(f'{indent}</CommandSet>')
     emit_common_element_props(lines, el, indent)
     if 'autoMaxWidth' in el:
-        if el.get('autoMaxWidth') is False:
+        if (not get_dsl_bool(el, ['autoMaxWidth'], True)):
             lines.append(f"{indent}<AutoMaxWidth>false</AutoMaxWidth>")
     elif multi_line_default:
         lines.append(f"{indent}<AutoMaxWidth>false</AutoMaxWidth>")
     if el.get('maxWidth') is not None:
         lines.append(f"{indent}<MaxWidth>{el['maxWidth']}</MaxWidth>")
-    if el.get('autoMaxHeight') is False:
+    if (not get_dsl_bool(el, ['autoMaxHeight'], True)):
         lines.append(f"{indent}<AutoMaxHeight>false</AutoMaxHeight>")
     if el.get('maxHeight') is not None:
         lines.append(f"{indent}<MaxHeight>{el['maxHeight']}</MaxHeight>")
@@ -3903,6 +5208,13 @@ def resolve_type_str(type_str):
         type_str = type_str[4:]
     elif '.' in type_str and re.match(r'^d\d+p\d+:', type_str):
         type_str = type_str[type_str.index(':') + 1:]
+    # Хвосты, которые дописывает вывод meta-info к множествам типов: суффикс обобщённого метатипа
+    # и счётчик состава. Копипаста строки оттуда — обычный путь, поэтому хвост снимаем молча.
+    # Срезаем ТОЛЬКО эти известные формы: круглые скобки заняты параметризованными типами
+    # (Число(15,2)), слепой срез скобок сломал бы их.
+    type_str = re.sub(r'\s*\((?:все|all)\)\s*$', '', type_str, flags=re.IGNORECASE).strip()
+    type_str = re.sub(r'\s*[—-]\s*(?:типов|types):\s*\d+\s*$', '', type_str, flags=re.IGNORECASE).strip()
+    type_str = re.sub(r'\s*\((?:типов|types):\s*\d+\)\s*$', '', type_str, flags=re.IGNORECASE).strip()
     # Параметризованные типы: Number(15,2), Строка(100)
     m = re.match(r'^([^(]+)\((.+)\)$', type_str)
     if m:
@@ -3926,6 +5238,69 @@ def resolve_type_str(type_str):
     if resolved:
         return resolved
     return type_str
+# Разбор примитивного типа DSL: Number / String / Date / DateTime / Time — с синонимами
+# (decimal, numeric, Число, Строка, Дата …), в любом регистре, с пробелами в скобках.
+# Тело общее у всех навыков-компиляторов (семья в check-inline-drift); умолчание для голого типа
+# зависит от места (хранимый реквизит — 10,0 и 10, СКД — без ограничения) и приходит аргументами.
+# Возврат: None — не примитив (ссылки, Boolean, …); {'error'} — база примитива узнана, а
+# параметры нет (вызывающий сообщает ошибку своим способом); иначе описание квалификаторов.
+def parse_primitive_type(type_str, def_digits, def_fraction, def_length):
+    m = re.match(r'^\s*([^\s(]+)\s*(\(.*)?$', type_str or '')
+    if not m:
+        return None
+    rest = m.group(2) or ''
+    kind = {
+        'number': 'Number', 'decimal': 'Number', 'numeric': 'Number', 'число': 'Number',
+        'string': 'String', 'строка': 'String',
+        'date': 'Date', 'дата': 'Date', 'datetime': 'DateTime', 'датавремя': 'DateTime',
+        'time': 'Time', 'время': 'Time',
+    }.get(m.group(1).lower())
+    if not kind:
+        return None
+    bad = {'error': (f"Invalid type '{type_str}'. Expected Number, Number(D), Number(D,F), Number(D,F,nonneg), "
+                     "String, String(N), String(N,fixed), Date, DateTime, Time")}
+    parts = []
+    if rest:
+        m2 = re.match(r'^\((.*)\)\s*$', rest)
+        if not m2:
+            return bad
+        parts = [p.strip().lower() for p in m2.group(1).split(',')]
+    if kind == 'Number':
+        sign = 'Any'
+        if parts and (parts[-1] == 'nonneg' or parts[-1] == 'any'):
+            if parts[-1] == 'nonneg':
+                sign = 'Nonnegative'
+            parts = parts[:-1]
+        if len(parts) > 2:
+            return bad
+        for p in parts:
+            if not re.match(r'^[0-9]{1,9}$', p):
+                return bad
+        d = int(parts[0]) if len(parts) >= 1 else def_digits
+        f = int(parts[1]) if len(parts) >= 2 else (0 if len(parts) == 1 else def_fraction)
+        # Дробная часть у числа без ограничения (0,F) платформа молча обнуляет — это ошибка ввода
+        if d > 38 or f > d:
+            return bad
+        return {'kind': 'Number', 'digits': d, 'fraction': f, 'sign': sign}
+    if kind == 'String':
+        allowed = 'Variable'
+        if len(parts) == 2:
+            if parts[1] == 'fixed' or parts[1] == 'fix':
+                allowed = 'Fixed'
+            elif parts[1] != 'variable':
+                return bad
+        if len(parts) > 2 or (len(parts) >= 1 and not re.match(r'^[0-9]{1,9}$', parts[0])):
+            return bad
+        length = int(parts[0]) if len(parts) >= 1 else def_length
+        # Фиксированную длину у неограниченной строки платформа молча снимает — это ошибка ввода
+        if allowed == 'Fixed' and length == 0:
+            return bad
+        return {'kind': 'String', 'length': length, 'allowed': allowed}
+    if parts:
+        return bad
+    return {'kind': 'Date', 'fractions': kind}
+
+
 def emit_single_type(lines, type_str, indent):
     type_str = resolve_type_str(type_str)
     # TypeId — тип, заданный глобальным стабильным GUID (<v8:TypeId>, не <v8:Type>). Платформа так
@@ -3936,45 +5311,34 @@ def emit_single_type(lines, type_str, indent):
         lines.append(f'{indent}<v8:TypeId>{m.group(1)}</v8:TypeId>')
         return
     # boolean
-    if type_str == 'boolean':
+    if type_str.lower() == 'boolean':
         lines.append(f'{indent}<v8:Type>xs:boolean</v8:Type>')
         return
 
-    # string or string(N) or string(N,fixed) (AllowedLength: Variable дефолт / Fixed)
-    m = re.match(r'^string(\((\d+)(\s*,\s*(fixed|variable))?\))?$', type_str, re.IGNORECASE)
-    if m:
-        length = m.group(2) if m.group(2) else '0'
-        al = 'Fixed' if (m.group(4) and m.group(4).lower() == 'fixed') else 'Variable'
-        lines.append(f'{indent}<v8:Type>xs:string</v8:Type>')
-        lines.append(f'{indent}<v8:StringQualifiers>')
-        lines.append(f'{indent}\t<v8:Length>{length}</v8:Length>')
-        lines.append(f'{indent}\t<v8:AllowedLength>{al}</v8:AllowedLength>')
-        lines.append(f'{indent}</v8:StringQualifiers>')
-        return
-
-    # decimal(D,F) or decimal(D,F,nonneg)
-    m = re.match(r'^decimal\((\d+),(\d+)(,nonneg)?\)$', type_str)
-    if m:
-        digits = m.group(1)
-        fraction = m.group(2)
-        sign = 'Nonnegative' if m.group(3) else 'Any'
-        lines.append(f'{indent}<v8:Type>xs:decimal</v8:Type>')
-        lines.append(f'{indent}<v8:NumberQualifiers>')
-        lines.append(f'{indent}\t<v8:Digits>{digits}</v8:Digits>')
-        lines.append(f'{indent}\t<v8:FractionDigits>{fraction}</v8:FractionDigits>')
-        lines.append(f'{indent}\t<v8:AllowedSign>{sign}</v8:AllowedSign>')
-        lines.append(f'{indent}</v8:NumberQualifiers>')
-        return
-
-    # date / dateTime / time
-    m = re.match(r'^(date|dateTime|time)$', type_str)
-    if m:
-        fractions_map = {'date': 'Date', 'dateTime': 'DateTime', 'time': 'Time'}
-        fractions = fractions_map[type_str]
-        lines.append(f'{indent}<v8:Type>xs:dateTime</v8:Type>')
-        lines.append(f'{indent}<v8:DateQualifiers>')
-        lines.append(f'{indent}\t<v8:DateFractions>{fractions}</v8:DateFractions>')
-        lines.append(f'{indent}</v8:DateQualifiers>')
+    # Примитивы: string / decimal / date / dateTime / time. Голое число реквизита формы — 10,0,
+    # голая строка — неограниченная.
+    prim = parse_primitive_type(type_str, 10, 0, 0)
+    if prim:
+        if prim.get('error'):
+            raise ValueError(prim['error'])
+        if prim['kind'] == 'String':
+            lines.append(f'{indent}<v8:Type>xs:string</v8:Type>')
+            lines.append(f'{indent}<v8:StringQualifiers>')
+            lines.append(f'{indent}\t<v8:Length>{prim["length"]}</v8:Length>')
+            lines.append(f'{indent}\t<v8:AllowedLength>{prim["allowed"]}</v8:AllowedLength>')
+            lines.append(f'{indent}</v8:StringQualifiers>')
+        elif prim['kind'] == 'Number':
+            lines.append(f'{indent}<v8:Type>xs:decimal</v8:Type>')
+            lines.append(f'{indent}<v8:NumberQualifiers>')
+            lines.append(f'{indent}\t<v8:Digits>{prim["digits"]}</v8:Digits>')
+            lines.append(f'{indent}\t<v8:FractionDigits>{prim["fraction"]}</v8:FractionDigits>')
+            lines.append(f'{indent}\t<v8:AllowedSign>{prim["sign"]}</v8:AllowedSign>')
+            lines.append(f'{indent}</v8:NumberQualifiers>')
+        else:
+            lines.append(f'{indent}<v8:Type>xs:dateTime</v8:Type>')
+            lines.append(f'{indent}<v8:DateQualifiers>')
+            lines.append(f'{indent}\t<v8:DateFractions>{prim["fractions"]}</v8:DateFractions>')
+            lines.append(f'{indent}</v8:DateQualifiers>')
         return
 
     # V8 types
@@ -4066,10 +5430,7 @@ def emit_type(lines, type_str, indent, tag="Type", tag_attrs=""):
 
 # --- Element emitters ---
 
-def emit_element(lines, el, indent, in_cmd_bar=False):
-    # Companion-панели (объект/массив-значение) → commandBar/contextMenu, до тип-синонимов.
-    normalize_panel_synonyms(el)
-
+def normalize_element_type_synonyms(el):
     # Silent synonyms: model often writes XML name or Russian (ПолеПереключателя/RadioButtonField → radio).
     # commandBar/autoCommandBar/КоманднаяПанель → тип-элемент ТОЛЬКО при строковом значении (имя).
     for src, dst in ELEMENT_TYPE_SYNONYMS.items():
@@ -4077,6 +5438,941 @@ def emit_element(lines, el, indent, in_cmd_bar=False):
             if src in STR_ONLY_TYPE_SYNONYMS and not isinstance(el[src], str):
                 continue
             el[dst] = el.pop(src)
+
+
+# --- Перечисления свойств формы (генерируется) ---
+# Значения свойств-перечислений элементов формы и корня (ключ «Тип.Свойство» или общий «Свойство»).
+# Источник — XSD xcf-logform 2.10–2.21, сверено с корпусом БП/ERP 8.3.24 (17036 форм, расхождений нет)
+# и загрузкой в 8.3.24. Перегенерировать: python debug/form-dsl-revision/gen_enum_table.py
+valid_enum_values = {
+    "ActionPurpose": ["Usual", "Create", "Finish"],
+    "AppearanceInCard": ["Auto", "Extended"],
+    "AppearanceMode": ["Auto", "CommandBar", "UsualGroup"],
+    "AutoAddIncomplete": ["true", "false", "auto"],
+    "AutoCapitalizationOnTextInput": ["Auto", "None", "Words", "Sentences", "AllCharacters"],
+    "AutoChoiceIncomplete": ["true", "false", "auto"],
+    "AutoCorrectionOnTextInput": ["Auto", "Use", "DontUse"],
+    "AutoMarkIncomplete": ["true", "false", "auto"],
+    "AutoSaveDataInSettings": ["DontUse", "Use"],
+    "AutoShowClearButtonMode": ["Auto", "Always", "FilledOnly"],
+    "AutoShowOpenButtonMode": ["Auto", "Always", "FilledOnly"],
+    "AutoShowState": ["Auto", "DontShow", "Show", "ShowOnComposition"],
+    "AutoTime": ["DontUse", "Last", "First", "CurrentOrLast", "CurrentOrFirst"],
+    "AutoWidthInTable": ["Auto", "ByData", "None", "ByDataAndTitle"],
+    "AutofillHint": ["DontUse", "FullName", "GivenName", "FamilyName", "MiddleName", "NamePrefix", "NameSuffix", "Street", "City", "Region", "Country", "PostalCode", "UserName", "Password", "NewPassword", "OneTimeCode", "Email", "PhoneNumber", "CreditCardNumber"],
+    "BackPictureEffect": ["Auto", "None", "Semitransparency", "SemitransparencyAndBlur"],
+    "BackgroundShowMode": ["Auto", "DontShow", "ShowAndIncreaseSize", "ShowAndDontIncreaseSize"],
+    "Behavior": ["Usual", "Collapsible", "PopUp", "Auto"],
+    "BehaviorOnHorizontalCompression": ["Auto", "HideItemsByImportance", "MoveItemsByImportance"],
+    "ButtonImportance": ["Main", "Normal", "Supplementary"],
+    "CardBehaviorOnVerticalCompression": ["Auto", "MoveItemsToSwipeablePages", "HideItems"],
+    "CardPictureAndTitleAlign": ["Auto", "LeftHorizontallySidesVertically", "CenterHorizontallySidesVertically", "CenterHorizontallyCenterVertically"],
+    "CardRepresentationType": ["Usual", "Group"],
+    "CellActionsButtonViewMode": ["Auto", "DontShow", "ShowOnHover"],
+    "CellHyperlinkDisplayVariant": ["Auto", "Always", "OnRowHover"],
+    "CellHyperlinkRepresentation": ["Auto", "Show", "DontShow"],
+    "CellHyperlinksRepresentation": ["Auto", "AutoForSingle", "ForAll", "DontShow"],
+    "CellMark": ["None", "ShapeUnderTextOval", "IconCircle"],
+    "CheckBoxType": ["Auto", "CheckBox", "Tumbler", "Switcher"],
+    "ChildItemsTitleLocation": ["Auto", "Left", "LeftIfPossible", "Top"],
+    "ChildItemsWidth": ["Auto", "Equal", "LeftWide", "LeftWidest", "LeftNarrow", "LeftNarrowest"],
+    "ChildrenAlign": ["Auto", "None", "ItemsLeftTitlesLeft", "ItemsRightTitlesLeft", "ItemsLeftTitlesRight", "ItemsRightTitlesRight", "TitlesLeftDataLeft", "TitlesLeftDataRight", "TitlesRightDataLeft", "TitlesRightDataRight", "TitlesLeftDataAuto"],
+    "ChoiceButton": ["true", "false", "auto"],
+    "ChoiceButtonRepresentation": ["Auto", "ShowInDropList", "ShowInDropListAndInInputField", "ShowInInputField"],
+    "InputField.ChoiceFoldersAndItems": ["Items", "Folders", "FoldersAndItems", "Auto"],
+    "Table.ChoiceFoldersAndItems": ["Items", "Folders", "FoldersAndItems"],
+    "ChoiceHistoryOnInput": ["Auto", "DontUse"],
+    "ChoiceListButton": ["true", "false", "auto"],
+    "ClearButton": ["true", "false", "auto"],
+    "CollapseItemsByImportanceVariant": ["Auto", "Use", "DontUse"],
+    "CommandBarLocation": ["None", "Auto", "Top", "Bottom"],
+    "ComplexSettingsViewMode": ["Show", "DontShow"],
+    "ControlRepresentation": ["TitleHyperlink", "Picture", "Button", "ButtonInParentElement"],
+    "ConversationsRepresentation": ["Auto", "Show", "DontShow"],
+    "CreateButton": ["true", "false", "auto"],
+    "Command.CurrentRowUse": ["Use", "DontUse", "Auto"],
+    "Pages.CurrentRowUse": ["Use", "DontUse", "Auto"],
+    "Table.CurrentRowUse": ["Auto", "Choice", "SelectionPresentation", "SelectionPresentationAndChoice"],
+    "UsualGroup.CurrentRowUse": ["Use", "DontUse", "Auto"],
+    "DisplayImportance": ["Auto", "VeryHigh", "High", "Usual", "Low", "VeryLow"],
+    "DrawingSelectionShowMode": ["Show", "DontShow", "Auto"],
+    "DropListButton": ["true", "false", "auto"],
+    "EditMode": ["Directly", "Enter", "EnterOnInput", "Auto"],
+    "EditTextUpdate": ["Auto", "DontUse", "OnValueChange", "Always"],
+    "EnterKeyBehavior": ["ControlNavigation", "DefaultButton"],
+    "EqualColumnsWidth": ["true", "false", "auto"],
+    "EqualItemsWidth": ["true", "false", "auto"],
+    "ExtendedEdit": ["true", "false", "auto"],
+    "FileDragMode": ["AsFile", "AsFileRef"],
+    "FillCheck": ["DontCheck", "ShowError"],
+    "FixInCard": ["true", "false", "auto"],
+    "FixingInTable": ["None", "Left", "Right"],
+    "FooterHorizontalAlign": ["Left", "Center", "Right", "Auto"],
+    "ColumnGroup.Group": ["Horizontal", "Vertical", "InCell"],
+    "Form.Group": ["Horizontal", "Vertical", "HorizontalIfPossible", "AlwaysHorizontal", "Auto", "AutoScreenTypeSensitive"],
+    "Page.Group": ["Horizontal", "Vertical", "HorizontalIfPossible", "AlwaysHorizontal", "Auto", "AutoScreenTypeSensitive"],
+    "UsualGroup.Group": ["Horizontal", "Vertical", "HorizontalIfPossible", "AlwaysHorizontal", "Auto", "AutoScreenTypeSensitive"],
+    "GroupHorizontalAlign": ["Left", "Center", "Right", "Auto"],
+    "GroupVerticalAlign": ["Top", "Center", "Bottom", "Auto"],
+    "HeaderHorizontalAlign": ["Left", "Center", "Right", "Auto"],
+    "InputField.HeightControlVariant": ["Auto", "UseHeightInFormRows", "UseContentHeight"],
+    "Table.HeightControlVariant": ["Auto", "UseHeightInFormRows", "UseHeightInTableRows", "UseContentHeight"],
+    "HierarchyPanelLocation": ["Auto", "None"],
+    "HorizontalAlign": ["Left", "Center", "Right", "Auto"],
+    "HorizontalLinesBWA": ["true", "false", "auto"],
+    "HorizontalLocation": ["Left", "Center", "Right", "Auto"],
+    "Table.HorizontalScrollBar": ["DontUse", "UseAlways", "AutoUse"],
+    "HorizontalSpacing": ["Auto", "None", "Half", "Single", "OneAndHalf", "Double"],
+    "AutoCommandBar.HorizontalStretch": ["true", "false", "auto"],
+    "ButtonGroup.HorizontalStretch": ["true", "false", "auto"],
+    "CheckBoxField.HorizontalStretch": ["true", "false", "auto"],
+    "ColumnGroup.HorizontalStretch": ["true", "false", "auto"],
+    "CommandBar.HorizontalStretch": ["true", "false", "auto"],
+    "ContextMenu.HorizontalStretch": ["true", "false", "auto"],
+    "ExtendedTooltip.HorizontalStretch": ["true", "false", "auto"],
+    "InputField.HorizontalStretch": ["true", "false", "auto"],
+    "LabelDecoration.HorizontalStretch": ["true", "false", "auto"],
+    "LabelField.HorizontalStretch": ["true", "false", "auto"],
+    "Page.HorizontalStretch": ["true", "false", "auto"],
+    "Pages.HorizontalStretch": ["true", "false", "auto"],
+    "PictureDecoration.HorizontalStretch": ["true", "false", "auto"],
+    "Popup.HorizontalStretch": ["true", "false", "auto"],
+    "RadioButtonField.HorizontalStretch": ["true", "false", "auto"],
+    "SearchControlAddition.HorizontalStretch": ["true", "false", "auto"],
+    "SearchStringAddition.HorizontalStretch": ["true", "false", "auto"],
+    "UsualGroup.HorizontalStretch": ["true", "false", "auto"],
+    "ViewStatusAddition.HorizontalStretch": ["true", "false", "auto"],
+    "Importance": ["Main", "Normal", "Supplementary"],
+    "IncompleteChoiceMode": ["OnEnterPressed", "OnActivate"],
+    "InitialListView": ["Beginning", "End", "Auto"],
+    "InitialRowActivation": ["Auto", "Activate", "NoActivate"],
+    "InitialTreeView": ["NoExpand", "ExpandTopLevel", "ExpandAllLevels"],
+    "IntervalsSelectionMode": ["Auto", "Multiple", "Single", "None"],
+    "KeyType": ["Auto", "FieldValue", "RowKey", "RowNumber"],
+    "LocationInCommandBar": ["Auto", "InAdditionalSubmenu", "InCommandBar", "InCommandBarAndInAdditionalSubmenu"],
+    "MarkNegatives": ["true", "false", "auto"],
+    "MarkRequiredComplete": ["true", "false", "auto"],
+    "MarkingAppearance": ["DontShow", "TopLeft", "BottomRight", "BothSides"],
+    "MobileDeviceTableType": ["Auto", "List", "Cards"],
+    "MultiLine": ["true", "false", "auto"],
+    "MultipleValuePictureShape": ["Auto", "Rect", "Circle", "Square"],
+    "MultipleValuePictureSize": ["Auto", "Small", "Medium", "Large"],
+    "MultipleValuesHyperlink": ["true", "false", "auto"],
+    "OnMainServerUnavalableBehavior": ["Auto", "MakeDisable", "DontChangeBehavior"],
+    "OnScreenKeyboardReturnKeyText": ["Auto", "Return", "Go", "Join", "Next", "Search", "Send", "Done", "Continue"],
+    "OnlyInAllActions": ["true", "false", "auto"],
+    "OpenButton": ["true", "false", "auto"],
+    "Orientation": ["Horizontal", "Vertical", "HorizontalIfPossible"],
+    "Output": ["Auto", "Enable", "Disable"],
+    "PagesRepresentation": ["None", "TabsOnTop", "TabsOnBottom", "TabsOnLeftHorizontal", "TabsOnRightHorizontal", "Swipe", "Auto"],
+    "PasswordMode": ["true", "false", "auto"],
+    "PictureLocation": ["Auto", "Left", "Right", "Top", "Bottom"],
+    "PictureSize": ["RealSize", "Stretch", "Proportionally", "Tile", "AutoSize", "RealSizeIgnoreScale", "AutoSizeIgnoreScale", "ByFontSize"],
+    "PlacementArea": ["mainCmdsLeft", "autoCmds", "userCmds", "mainCmdsRight"],
+    "PointerType": ["Special", "Regular"],
+    "QuickChoice": ["true", "false", "auto"],
+    "RadioButtonType": ["Auto", "RadioButtons", "Tumbler"],
+    "RefreshRequest": ["None", "PullFromTop", "PullFromBottom", "PullFromTopOrBottom"],
+    "ReportFormType": ["Main", "Settings", "Variant"],
+    "ReportResultViewMode": ["Auto", "Default", "Compact"],
+    "Button.Representation": ["Text", "Picture", "PictureAndText", "Auto"],
+    "ButtonGroup.Representation": ["Auto", "Usual", "Compact"],
+    "Command.Representation": ["Text", "Picture", "TextPicture", "Auto"],
+    "Popup.Representation": ["Text", "Picture", "PictureAndText", "Auto"],
+    "ProgressBarField.Representation": ["Smooth", "Broken", "BrokenTilt"],
+    "Table.Representation": ["List", "HierarchicalList", "Tree"],
+    "UsualGroup.Representation": ["Auto", "None", "StrongSeparation", "WeakSeparation", "NormalSeparation", "GroupBox", "Line", "Margin"],
+    "RepresentationInContextMenu": ["None", "AdditionalInContextMenu", "OnlyInContextMenu", "Auto"],
+    "RowActionsShowType": ["Auto", "DontShow", "ShowOnHover", "ShowAlways"],
+    "RowInputMode": ["EndOfList", "EndOfWindow", "AfterCurrentRow", "BeforeCurrentRow"],
+    "RowSelectionMode": ["Auto", "Cell", "Row"],
+    "SaveColors": ["Auto", "ForUser", "ByKeyForUser", "DontUse"],
+    "SaveDataInSettings": ["DontUse", "UseList"],
+    "ScaleVariant": ["Auto", "Normal", "Compact", "NormalIfPossible"],
+    "ScalingMode": ["Auto", "Normal", "Compact"],
+    "Page.ScrollOnCompress": ["true", "false", "auto"],
+    "UsualGroup.ScrollOnCompress": ["true", "false", "auto"],
+    "SearchControlLocation": ["Auto", "None", "CommandBar"],
+    "SearchOnInput": ["Use", "DontUse", "Auto"],
+    "SearchStringLocation": ["Auto", "None", "CommandBar", "Top", "Bottom", "FormCaption", "PullFromTop"],
+    "SelectedRowsUse": ["Use", "DontUse", "Auto"],
+    "CalendarField.SelectionMode": ["Single", "Multiple", "Interval"],
+    "Table.SelectionMode": ["SingleRow", "MultiRow"],
+    "SelectionShowMode": ["WhenActive", "Always", "DontShow", "WhenMultipleCellsSelected", "WhenMultipleCellsSelectedWhenActive"],
+    "Shape": ["Auto", "Usual", "Oval"],
+    "ShapeRepresentation": ["Auto", "Always", "WhenActive", "None"],
+    "ShowCheckBoxesInDropList": ["true", "false", "auto"],
+    "ShowCommandBar": ["true", "false", "auto"],
+    "ShowHorizontalLinesFlag": ["true", "false", "auto"],
+    "ColumnGroup.ShowTitle": ["true", "false", "auto"],
+    "Form.ShowTitle": ["true", "false", "auto"],
+    "Page.ShowTitle": ["true", "false", "auto"],
+    "UsualGroup.ShowTitle": ["true", "false", "auto"],
+    "ShowTitleInCard": ["true", "false", "auto"],
+    "ShowVerticalLinesFlag": ["true", "false", "auto"],
+    "SkipOnInput": ["true", "false", "auto"],
+    "SpecialTextInputMode": ["Auto", "None", "DigitsAndPunctuation", "URL", "Email", "PhoneNumber", "Digits"],
+    "SpellCheckingOnTextInput": ["Auto", "Use", "DontUse"],
+    "SpinButton": ["true", "false", "auto"],
+    "SpreadsheetDocumentMultipleSelectionPanelViewMode": ["Auto", "DontShow", "ShowOnMultipleSelection", "ShowAlways"],
+    "TableLocation": ["Auto", "Left", "Right", "None"],
+    "TextSize": ["Enlarged", "Normal", "Reduced"],
+    "ThroughAlign": ["Use", "DontUse", "Auto"],
+    "TimeChoiceMode": ["Auto", "DontChoose", "CustomTime", "Interval1Minute", "Interval5Minutes", "Interval10Minutes", "Interval15Minutes", "Interval15And20Minutes", "Interval20Minutes", "Interval30Minutes", "Interval60Minutes"],
+    "TitleLocation": ["None", "Auto", "Left", "Top", "Right", "Bottom"],
+    "ToolTipRepresentation": ["Auto", "None", "Balloon", "Button", "ShowAuto", "ShowTop", "ShowLeft", "ShowBottom", "ShowRight"],
+    "TumblerRepresentation": ["Text", "Picture", "Auto"],
+    "Button.Type": ["CommandBarButton", "UsualButton", "Hyperlink", "CommandBarHyperlink"],
+    "UpdateOnDataChange": ["Auto", "DontUpdate"],
+    "UseAlternationRowColorBWA": ["true", "false", "auto"],
+    "UseCopy": ["true", "false", "auto"],
+    "UseForFoldersAndItems": ["Items", "Folders", "FoldersAndItems"],
+    "UsePostingMode": ["Regular", "RealTime", "Ask", "Auto"],
+    "ValuesSelectionMode": ["Auto", "Multiple", "Single", "None"],
+    "VerticalAlign": ["Top", "Center", "Bottom", "Auto"],
+    "VerticalLinesBWA": ["true", "false", "auto"],
+    "VerticalScroll": ["auto", "use", "useIfNecessary", "useWithoutStretch"],
+    "Table.VerticalScrollBar": ["DontUse", "UseAlways", "AutoUse"],
+    "VerticalSpacing": ["Auto", "None", "Half", "Single", "OneAndHalf", "Double"],
+    "AutoCommandBar.VerticalStretch": ["true", "false", "auto"],
+    "ButtonGroup.VerticalStretch": ["true", "false", "auto"],
+    "ColumnGroup.VerticalStretch": ["true", "false", "auto"],
+    "CommandBar.VerticalStretch": ["true", "false", "auto"],
+    "ContextMenu.VerticalStretch": ["true", "false", "auto"],
+    "ExtendedTooltip.VerticalStretch": ["true", "false", "auto"],
+    "InputField.VerticalStretch": ["true", "false", "auto"],
+    "LabelDecoration.VerticalStretch": ["true", "false", "auto"],
+    "LabelField.VerticalStretch": ["true", "false", "auto"],
+    "Page.VerticalStretch": ["true", "false", "auto"],
+    "Pages.VerticalStretch": ["true", "false", "auto"],
+    "PictureDecoration.VerticalStretch": ["true", "false", "auto"],
+    "Popup.VerticalStretch": ["true", "false", "auto"],
+    "UsualGroup.VerticalStretch": ["true", "false", "auto"],
+    "ViewMode": ["All", "QuickAccess"],
+    "ViewModeApplicationOnSetReportResult": ["Auto", "Apply", "DontApply"],
+    "ViewScalingMode": ["Auto", "Normal", "Large"],
+    "ViewStatusLocation": ["Auto", "None", "Top", "Bottom"],
+    "WarningOnEditRepresentation": ["Show", "DontShow", "Auto"],
+    "WidthInCard": ["Auto", "Full", "Half"],
+    "WindowOpeningMode": ["Auto", "DontBlock", "LockOwner", "LockWholeInterface", "Independent", "LockOwnerWindow"],
+}
+# Старые имена значений, которые платформа принимает и переводит в современные (замер выгрузки 8.3.24)
+enum_value_aliases = {
+    "TitlesLeftDataLeft": "ItemsLeftTitlesLeft",
+    "TitlesLeftDataRight": "ItemsRightTitlesLeft",
+    "TitlesRightDataLeft": "ItemsLeftTitlesRight",
+    "TitlesRightDataRight": "ItemsRightTitlesRight",
+    "GroupBox": "StrongSeparation",
+    "Margin": "NormalSeparation",
+    "Square": "Rect",
+}
+# Умолчания: значение, которое платформа у этого типа не пишет (выброшено при загрузке-выгрузке 8.3.24
+# и ни разу не встречается в корпусе) — тег с ним не пишется
+enum_default_values = {
+    "Attribute.FillCheck": "DontCheck",
+    "AutoCommandBar.GroupHorizontalAlign": "Auto",
+    "AutoCommandBar.GroupVerticalAlign": "Auto",
+    "AutoCommandBar.HorizontalAlign": "Left",
+    "AutoCommandBar.HorizontalStretch": "auto",
+    "AutoCommandBar.ToolTipRepresentation": "Auto",
+    "AutoCommandBar.VerticalStretch": "auto",
+    "Button.GroupHorizontalAlign": "Auto",
+    "Button.GroupVerticalAlign": "Auto",
+    "Button.LocationInCommandBar": "Auto",
+    "Button.OnMainServerUnavalableBehavior": "Auto",
+    "Button.PictureLocation": "Auto",
+    "Button.PlacementArea": "userCmds",
+    "Button.Representation": "Auto",
+    "Button.RepresentationInContextMenu": "Auto",
+    "Button.Shape": "Auto",
+    "Button.ShapeRepresentation": "Auto",
+    "Button.SkipOnInput": "auto",
+    "Button.ToolTipRepresentation": "Auto",
+    "ButtonGroup.GroupHorizontalAlign": "Auto",
+    "ButtonGroup.GroupVerticalAlign": "Auto",
+    "ButtonGroup.HorizontalStretch": "auto",
+    "ButtonGroup.PlacementArea": "userCmds",
+    "ButtonGroup.Representation": "Auto",
+    "ButtonGroup.ToolTipRepresentation": "Auto",
+    "ButtonGroup.VerticalStretch": "auto",
+    "CalendarField.EditMode": "Enter",
+    "CalendarField.FixingInTable": "None",
+    "CalendarField.FooterHorizontalAlign": "Auto",
+    "CalendarField.GroupHorizontalAlign": "Auto",
+    "CalendarField.GroupVerticalAlign": "Auto",
+    "CalendarField.HeaderHorizontalAlign": "Left",
+    "CalendarField.HorizontalAlign": "Auto",
+    "CalendarField.OnMainServerUnavalableBehavior": "Auto",
+    "CalendarField.SelectionMode": "Single",
+    "CalendarField.SkipOnInput": "auto",
+    "CalendarField.TitleLocation": "Auto",
+    "CalendarField.ToolTipRepresentation": "Auto",
+    "CalendarField.VerticalAlign": "Auto",
+    "CalendarField.WarningOnEditRepresentation": "Auto",
+    "ChartField.EditMode": "Enter",
+    "ChartField.FixingInTable": "None",
+    "ChartField.FooterHorizontalAlign": "Auto",
+    "ChartField.GroupHorizontalAlign": "Auto",
+    "ChartField.GroupVerticalAlign": "Auto",
+    "ChartField.HeaderHorizontalAlign": "Left",
+    "ChartField.HorizontalAlign": "Auto",
+    "ChartField.OnMainServerUnavalableBehavior": "Auto",
+    "ChartField.SkipOnInput": "auto",
+    "ChartField.TitleLocation": "Auto",
+    "ChartField.ToolTipRepresentation": "Auto",
+    "ChartField.VerticalAlign": "Auto",
+    "ChartField.WarningOnEditRepresentation": "Auto",
+    "CheckBoxField.EditMode": "Enter",
+    "CheckBoxField.EqualItemsWidth": "auto",
+    "CheckBoxField.FixingInTable": "None",
+    "CheckBoxField.FooterHorizontalAlign": "Auto",
+    "CheckBoxField.GroupHorizontalAlign": "Auto",
+    "CheckBoxField.GroupVerticalAlign": "Auto",
+    "CheckBoxField.HeaderHorizontalAlign": "Left",
+    "CheckBoxField.HorizontalAlign": "Auto",
+    "CheckBoxField.OnMainServerUnavalableBehavior": "Auto",
+    "CheckBoxField.SkipOnInput": "auto",
+    "CheckBoxField.TitleLocation": "Auto",
+    "CheckBoxField.ToolTipRepresentation": "Auto",
+    "CheckBoxField.VerticalAlign": "Auto",
+    "CheckBoxField.WarningOnEditRepresentation": "Auto",
+    "Column.FillCheck": "DontCheck",
+    "ColumnGroup.FixingInTable": "None",
+    "ColumnGroup.Group": "Vertical",
+    "ColumnGroup.GroupHorizontalAlign": "Auto",
+    "ColumnGroup.GroupVerticalAlign": "Auto",
+    "ColumnGroup.HeaderHorizontalAlign": "Auto",
+    "ColumnGroup.HorizontalStretch": "auto",
+    "ColumnGroup.ToolTipRepresentation": "Auto",
+    "ColumnGroup.VerticalStretch": "auto",
+    "Command.CurrentRowUse": "Auto",
+    "Command.Representation": "Auto",
+    "CommandBar.GroupHorizontalAlign": "Auto",
+    "CommandBar.GroupVerticalAlign": "Auto",
+    "CommandBar.HorizontalLocation": "Left",
+    "CommandBar.HorizontalStretch": "auto",
+    "CommandBar.ToolTipRepresentation": "Auto",
+    "CommandBar.VerticalStretch": "auto",
+    "ContextMenu.GroupHorizontalAlign": "Auto",
+    "ContextMenu.GroupVerticalAlign": "Auto",
+    "ContextMenu.HorizontalStretch": "auto",
+    "ContextMenu.ToolTipRepresentation": "Auto",
+    "ContextMenu.VerticalStretch": "auto",
+    "ExtendedTooltip.GroupHorizontalAlign": "Auto",
+    "ExtendedTooltip.GroupVerticalAlign": "Auto",
+    "ExtendedTooltip.HorizontalAlign": "Left",
+    "ExtendedTooltip.HorizontalStretch": "auto",
+    "ExtendedTooltip.OnMainServerUnavalableBehavior": "Auto",
+    "ExtendedTooltip.SkipOnInput": "auto",
+    "ExtendedTooltip.ToolTipRepresentation": "Auto",
+    "ExtendedTooltip.VerticalAlign": "Auto",
+    "ExtendedTooltip.VerticalStretch": "auto",
+    "Form.AutoSaveDataInSettings": "DontUse",
+    "Form.ChildItemsWidth": "Auto",
+    "Form.ChildrenAlign": "Auto",
+    "Form.CollapseItemsByImportanceVariant": "Auto",
+    "Form.CommandBarLocation": "Auto",
+    "Form.ConversationsRepresentation": "Auto",
+    "Form.EnterKeyBehavior": "ControlNavigation",
+    "Form.Group": "Vertical",
+    "Form.HorizontalAlign": "Auto",
+    "Form.HorizontalSpacing": "Auto",
+    "Form.SaveDataInSettings": "DontUse",
+    "Form.ScalingMode": "Auto",
+    "Form.VerticalAlign": "Auto",
+    "Form.VerticalScroll": "auto",
+    "Form.VerticalSpacing": "Auto",
+    "Form.WindowOpeningMode": "Independent",
+    "FormattedDocumentField.EditMode": "Enter",
+    "FormattedDocumentField.FixingInTable": "None",
+    "FormattedDocumentField.FooterHorizontalAlign": "Auto",
+    "FormattedDocumentField.GroupHorizontalAlign": "Auto",
+    "FormattedDocumentField.GroupVerticalAlign": "Auto",
+    "FormattedDocumentField.HeaderHorizontalAlign": "Left",
+    "FormattedDocumentField.HorizontalAlign": "Auto",
+    "FormattedDocumentField.OnMainServerUnavalableBehavior": "Auto",
+    "FormattedDocumentField.Output": "Auto",
+    "FormattedDocumentField.SkipOnInput": "auto",
+    "FormattedDocumentField.TitleLocation": "Auto",
+    "FormattedDocumentField.ToolTipRepresentation": "Auto",
+    "FormattedDocumentField.VerticalAlign": "Auto",
+    "FormattedDocumentField.WarningOnEditRepresentation": "Auto",
+    "GraphicalSchemaField.EditMode": "Enter",
+    "GraphicalSchemaField.FixingInTable": "None",
+    "GraphicalSchemaField.FooterHorizontalAlign": "Auto",
+    "GraphicalSchemaField.GroupHorizontalAlign": "Auto",
+    "GraphicalSchemaField.GroupVerticalAlign": "Auto",
+    "GraphicalSchemaField.HeaderHorizontalAlign": "Left",
+    "GraphicalSchemaField.HorizontalAlign": "Auto",
+    "GraphicalSchemaField.OnMainServerUnavalableBehavior": "Auto",
+    "GraphicalSchemaField.Output": "Auto",
+    "GraphicalSchemaField.SkipOnInput": "auto",
+    "GraphicalSchemaField.TitleLocation": "Auto",
+    "GraphicalSchemaField.ToolTipRepresentation": "Auto",
+    "GraphicalSchemaField.VerticalAlign": "Auto",
+    "GraphicalSchemaField.WarningOnEditRepresentation": "Auto",
+    "HTMLDocumentField.EditMode": "Enter",
+    "HTMLDocumentField.FixingInTable": "None",
+    "HTMLDocumentField.FooterHorizontalAlign": "Auto",
+    "HTMLDocumentField.GroupHorizontalAlign": "Auto",
+    "HTMLDocumentField.GroupVerticalAlign": "Auto",
+    "HTMLDocumentField.HeaderHorizontalAlign": "Left",
+    "HTMLDocumentField.HorizontalAlign": "Auto",
+    "HTMLDocumentField.OnMainServerUnavalableBehavior": "Auto",
+    "HTMLDocumentField.Output": "Auto",
+    "HTMLDocumentField.SkipOnInput": "auto",
+    "HTMLDocumentField.TitleLocation": "Auto",
+    "HTMLDocumentField.ToolTipRepresentation": "Auto",
+    "HTMLDocumentField.VerticalAlign": "Auto",
+    "HTMLDocumentField.WarningOnEditRepresentation": "Auto",
+    "InputField.AutoCapitalizationOnTextInput": "Auto",
+    "InputField.AutoChoiceIncomplete": "auto",
+    "InputField.AutoCorrectionOnTextInput": "Auto",
+    "InputField.AutoMarkIncomplete": "auto",
+    "InputField.AutoShowClearButtonMode": "Auto",
+    "InputField.AutoShowOpenButtonMode": "Auto",
+    "InputField.AutofillHint": "DontUse",
+    "InputField.ChoiceButton": "auto",
+    "InputField.ChoiceButtonRepresentation": "Auto",
+    "InputField.ChoiceFoldersAndItems": "Auto",
+    "InputField.ChoiceHistoryOnInput": "Auto",
+    "InputField.ChoiceListButton": "auto",
+    "InputField.ClearButton": "auto",
+    "InputField.CreateButton": "auto",
+    "InputField.DropListButton": "auto",
+    "InputField.EditMode": "Enter",
+    "InputField.EditTextUpdate": "Auto",
+    "InputField.ExtendedEdit": "auto",
+    "InputField.FixingInTable": "None",
+    "InputField.FooterHorizontalAlign": "Auto",
+    "InputField.GroupHorizontalAlign": "Auto",
+    "InputField.GroupVerticalAlign": "Auto",
+    "InputField.HeaderHorizontalAlign": "Left",
+    "InputField.HeightControlVariant": "Auto",
+    "InputField.HorizontalAlign": "Auto",
+    "InputField.HorizontalStretch": "auto",
+    "InputField.IncompleteChoiceMode": "OnEnterPressed",
+    "InputField.MarkNegatives": "auto",
+    "InputField.MultiLine": "auto",
+    "InputField.MultipleValuePictureShape": "Auto",
+    "InputField.MultipleValuePictureSize": "Auto",
+    "InputField.MultipleValuesHyperlink": "auto",
+    "InputField.OnMainServerUnavalableBehavior": "Auto",
+    "InputField.OnScreenKeyboardReturnKeyText": "Auto",
+    "InputField.OpenButton": "auto",
+    "InputField.PasswordMode": "auto",
+    "InputField.QuickChoice": "auto",
+    "InputField.ShowCheckBoxesInDropList": "auto",
+    "InputField.SkipOnInput": "auto",
+    "InputField.SpecialTextInputMode": "Auto",
+    "InputField.SpellCheckingOnTextInput": "Auto",
+    "InputField.SpinButton": "auto",
+    "InputField.TitleLocation": "Auto",
+    "InputField.ToolTipRepresentation": "Auto",
+    "InputField.VerticalAlign": "Auto",
+    "InputField.VerticalStretch": "auto",
+    "InputField.WarningOnEditRepresentation": "Auto",
+    "LabelDecoration.GroupHorizontalAlign": "Auto",
+    "LabelDecoration.GroupVerticalAlign": "Auto",
+    "LabelDecoration.HorizontalAlign": "Left",
+    "LabelDecoration.HorizontalStretch": "auto",
+    "LabelDecoration.OnMainServerUnavalableBehavior": "Auto",
+    "LabelDecoration.SkipOnInput": "auto",
+    "LabelDecoration.ToolTipRepresentation": "Auto",
+    "LabelDecoration.VerticalAlign": "Auto",
+    "LabelDecoration.VerticalStretch": "auto",
+    "LabelField.EditMode": "Enter",
+    "LabelField.FixingInTable": "None",
+    "LabelField.FooterHorizontalAlign": "Auto",
+    "LabelField.GroupHorizontalAlign": "Auto",
+    "LabelField.GroupVerticalAlign": "Auto",
+    "LabelField.HeaderHorizontalAlign": "Left",
+    "LabelField.HorizontalAlign": "Auto",
+    "LabelField.HorizontalStretch": "auto",
+    "LabelField.MarkNegatives": "auto",
+    "LabelField.OnMainServerUnavalableBehavior": "Auto",
+    "LabelField.PasswordMode": "auto",
+    "LabelField.SkipOnInput": "auto",
+    "LabelField.TitleLocation": "Auto",
+    "LabelField.ToolTipRepresentation": "Auto",
+    "LabelField.VerticalAlign": "Auto",
+    "LabelField.VerticalStretch": "auto",
+    "LabelField.WarningOnEditRepresentation": "Auto",
+    "Page.ChildItemsWidth": "Auto",
+    "Page.ChildrenAlign": "Auto",
+    "Page.Group": "Vertical",
+    "Page.GroupHorizontalAlign": "Auto",
+    "Page.GroupVerticalAlign": "Auto",
+    "Page.HorizontalAlign": "Auto",
+    "Page.HorizontalSpacing": "Auto",
+    "Page.HorizontalStretch": "auto",
+    "Page.ToolTipRepresentation": "Auto",
+    "Page.VerticalAlign": "Auto",
+    "Page.VerticalSpacing": "Auto",
+    "Page.VerticalStretch": "auto",
+    "Pages.CurrentRowUse": "Auto",
+    "Pages.GroupHorizontalAlign": "Auto",
+    "Pages.GroupVerticalAlign": "Auto",
+    "Pages.HorizontalStretch": "auto",
+    "Pages.PagesRepresentation": "Auto",
+    "Pages.ToolTipRepresentation": "Auto",
+    "Pages.VerticalStretch": "auto",
+    "PeriodField.EditMode": "Enter",
+    "PeriodField.FixingInTable": "None",
+    "PeriodField.FooterHorizontalAlign": "Auto",
+    "PeriodField.GroupHorizontalAlign": "Auto",
+    "PeriodField.GroupVerticalAlign": "Auto",
+    "PeriodField.HeaderHorizontalAlign": "Left",
+    "PeriodField.HorizontalAlign": "Auto",
+    "PeriodField.OnMainServerUnavalableBehavior": "Auto",
+    "PeriodField.SkipOnInput": "auto",
+    "PeriodField.TitleLocation": "Auto",
+    "PeriodField.ToolTipRepresentation": "Auto",
+    "PeriodField.VerticalAlign": "Auto",
+    "PeriodField.WarningOnEditRepresentation": "Auto",
+    "PictureDecoration.FileDragMode": "AsFileRef",
+    "PictureDecoration.GroupHorizontalAlign": "Auto",
+    "PictureDecoration.GroupVerticalAlign": "Auto",
+    "PictureDecoration.HorizontalStretch": "auto",
+    "PictureDecoration.OnMainServerUnavalableBehavior": "Auto",
+    "PictureDecoration.PictureSize": "RealSize",
+    "PictureDecoration.SkipOnInput": "auto",
+    "PictureDecoration.ToolTipRepresentation": "Auto",
+    "PictureDecoration.VerticalStretch": "auto",
+    "PictureField.EditMode": "Enter",
+    "PictureField.FileDragMode": "AsFileRef",
+    "PictureField.FixingInTable": "None",
+    "PictureField.FooterHorizontalAlign": "Auto",
+    "PictureField.GroupHorizontalAlign": "Auto",
+    "PictureField.GroupVerticalAlign": "Auto",
+    "PictureField.HeaderHorizontalAlign": "Left",
+    "PictureField.HorizontalAlign": "Auto",
+    "PictureField.OnMainServerUnavalableBehavior": "Auto",
+    "PictureField.PictureSize": "RealSize",
+    "PictureField.SkipOnInput": "auto",
+    "PictureField.TitleLocation": "Auto",
+    "PictureField.ToolTipRepresentation": "Auto",
+    "PictureField.VerticalAlign": "Auto",
+    "PictureField.WarningOnEditRepresentation": "Auto",
+    "PlannerField.EditMode": "Enter",
+    "PlannerField.FixingInTable": "None",
+    "PlannerField.FooterHorizontalAlign": "Auto",
+    "PlannerField.GroupHorizontalAlign": "Auto",
+    "PlannerField.GroupVerticalAlign": "Auto",
+    "PlannerField.HeaderHorizontalAlign": "Left",
+    "PlannerField.HorizontalAlign": "Auto",
+    "PlannerField.OnMainServerUnavalableBehavior": "Auto",
+    "PlannerField.SkipOnInput": "auto",
+    "PlannerField.TitleLocation": "Auto",
+    "PlannerField.ToolTipRepresentation": "Auto",
+    "PlannerField.VerticalAlign": "Auto",
+    "PlannerField.WarningOnEditRepresentation": "Auto",
+    "Popup.GroupHorizontalAlign": "Auto",
+    "Popup.GroupVerticalAlign": "Auto",
+    "Popup.HorizontalStretch": "auto",
+    "Popup.PlacementArea": "userCmds",
+    "Popup.Representation": "Auto",
+    "Popup.Shape": "Auto",
+    "Popup.ShapeRepresentation": "Auto",
+    "Popup.ToolTipRepresentation": "Auto",
+    "Popup.VerticalStretch": "auto",
+    "ProgressBarField.EditMode": "Enter",
+    "ProgressBarField.FixingInTable": "None",
+    "ProgressBarField.FooterHorizontalAlign": "Auto",
+    "ProgressBarField.GroupHorizontalAlign": "Auto",
+    "ProgressBarField.GroupVerticalAlign": "Auto",
+    "ProgressBarField.HeaderHorizontalAlign": "Left",
+    "ProgressBarField.HorizontalAlign": "Auto",
+    "ProgressBarField.OnMainServerUnavalableBehavior": "Auto",
+    "ProgressBarField.Orientation": "Horizontal",
+    "ProgressBarField.Representation": "Smooth",
+    "ProgressBarField.SkipOnInput": "auto",
+    "ProgressBarField.TitleLocation": "Auto",
+    "ProgressBarField.ToolTipRepresentation": "Auto",
+    "ProgressBarField.VerticalAlign": "Auto",
+    "ProgressBarField.WarningOnEditRepresentation": "Auto",
+    "RadioButtonField.EditMode": "Enter",
+    "RadioButtonField.EqualColumnsWidth": "auto",
+    "RadioButtonField.FixingInTable": "None",
+    "RadioButtonField.FooterHorizontalAlign": "Auto",
+    "RadioButtonField.GroupHorizontalAlign": "Auto",
+    "RadioButtonField.GroupVerticalAlign": "Auto",
+    "RadioButtonField.HeaderHorizontalAlign": "Left",
+    "RadioButtonField.HorizontalAlign": "Auto",
+    "RadioButtonField.OnMainServerUnavalableBehavior": "Auto",
+    "RadioButtonField.SkipOnInput": "auto",
+    "RadioButtonField.TitleLocation": "Auto",
+    "RadioButtonField.ToolTipRepresentation": "Auto",
+    "RadioButtonField.VerticalAlign": "Auto",
+    "RadioButtonField.WarningOnEditRepresentation": "Auto",
+    "SearchControlAddition.GroupHorizontalAlign": "Auto",
+    "SearchControlAddition.GroupVerticalAlign": "Auto",
+    "SearchControlAddition.HorizontalStretch": "auto",
+    "SearchControlAddition.PlacementArea": "userCmds",
+    "SearchControlAddition.ToolTipRepresentation": "Auto",
+    "SearchStringAddition.GroupHorizontalAlign": "Auto",
+    "SearchStringAddition.GroupVerticalAlign": "Auto",
+    "SearchStringAddition.HorizontalStretch": "auto",
+    "SearchStringAddition.PlacementArea": "userCmds",
+    "SearchStringAddition.ToolTipRepresentation": "Auto",
+    "Settings.KeyType": "Auto",
+    "SpreadSheetDocumentField.DrawingSelectionShowMode": "Auto",
+    "SpreadSheetDocumentField.EditMode": "Enter",
+    "SpreadSheetDocumentField.FixingInTable": "None",
+    "SpreadSheetDocumentField.FooterHorizontalAlign": "Auto",
+    "SpreadSheetDocumentField.GroupHorizontalAlign": "Auto",
+    "SpreadSheetDocumentField.GroupVerticalAlign": "Auto",
+    "SpreadSheetDocumentField.HeaderHorizontalAlign": "Left",
+    "SpreadSheetDocumentField.HorizontalAlign": "Auto",
+    "SpreadSheetDocumentField.OnMainServerUnavalableBehavior": "Auto",
+    "SpreadSheetDocumentField.Output": "Auto",
+    "SpreadSheetDocumentField.PointerType": "Special",
+    "SpreadSheetDocumentField.SelectionShowMode": "Always",
+    "SpreadSheetDocumentField.SkipOnInput": "auto",
+    "SpreadSheetDocumentField.TitleLocation": "Auto",
+    "SpreadSheetDocumentField.ToolTipRepresentation": "Auto",
+    "SpreadSheetDocumentField.VerticalAlign": "Auto",
+    "SpreadSheetDocumentField.ViewScalingMode": "Auto",
+    "SpreadSheetDocumentField.WarningOnEditRepresentation": "Auto",
+    "Table.AutoAddIncomplete": "auto",
+    "Table.AutoMarkIncomplete": "auto",
+    "Table.BehaviorOnHorizontalCompression": "Auto",
+    "Table.CommandBarLocation": "Auto",
+    "Table.CurrentRowUse": "Auto",
+    "Table.FileDragMode": "AsFileRef",
+    "Table.GroupHorizontalAlign": "Auto",
+    "Table.GroupVerticalAlign": "Auto",
+    "Table.HeightControlVariant": "Auto",
+    "Table.HorizontalScrollBar": "AutoUse",
+    "Table.InitialListView": "Auto",
+    "Table.InitialTreeView": "NoExpand",
+    "Table.OnMainServerUnavalableBehavior": "Auto",
+    "Table.Output": "Auto",
+    "Table.RefreshRequest": "None",
+    "Table.Representation": "HierarchicalList",
+    "Table.RowInputMode": "EndOfList",
+    "Table.RowSelectionMode": "Cell",
+    "Table.SearchControlLocation": "Auto",
+    "Table.SearchOnInput": "Auto",
+    "Table.SearchStringLocation": "Auto",
+    "Table.SelectionMode": "MultiRow",
+    "Table.SkipOnInput": "auto",
+    "Table.TitleLocation": "None",
+    "Table.ToolTipRepresentation": "Auto",
+    "Table.VerticalScrollBar": "AutoUse",
+    "Table.ViewStatusLocation": "Auto",
+    "TextDocumentField.EditMode": "Enter",
+    "TextDocumentField.FixingInTable": "None",
+    "TextDocumentField.FooterHorizontalAlign": "Auto",
+    "TextDocumentField.GroupHorizontalAlign": "Auto",
+    "TextDocumentField.GroupVerticalAlign": "Auto",
+    "TextDocumentField.HeaderHorizontalAlign": "Left",
+    "TextDocumentField.HorizontalAlign": "Auto",
+    "TextDocumentField.OnMainServerUnavalableBehavior": "Auto",
+    "TextDocumentField.Output": "Auto",
+    "TextDocumentField.SkipOnInput": "auto",
+    "TextDocumentField.TitleLocation": "Auto",
+    "TextDocumentField.ToolTipRepresentation": "Auto",
+    "TextDocumentField.VerticalAlign": "Auto",
+    "TextDocumentField.WarningOnEditRepresentation": "Auto",
+    "TrackBarField.EditMode": "Enter",
+    "TrackBarField.FixingInTable": "None",
+    "TrackBarField.FooterHorizontalAlign": "Auto",
+    "TrackBarField.GroupHorizontalAlign": "Auto",
+    "TrackBarField.GroupVerticalAlign": "Auto",
+    "TrackBarField.HeaderHorizontalAlign": "Left",
+    "TrackBarField.HorizontalAlign": "Auto",
+    "TrackBarField.MarkingAppearance": "BottomRight",
+    "TrackBarField.OnMainServerUnavalableBehavior": "Auto",
+    "TrackBarField.Orientation": "Horizontal",
+    "TrackBarField.SkipOnInput": "auto",
+    "TrackBarField.TitleLocation": "Auto",
+    "TrackBarField.ToolTipRepresentation": "Auto",
+    "TrackBarField.VerticalAlign": "Auto",
+    "TrackBarField.WarningOnEditRepresentation": "Auto",
+    "UsualGroup.Behavior": "Auto",
+    "UsualGroup.ChildItemsWidth": "Auto",
+    "UsualGroup.ChildrenAlign": "Auto",
+    "UsualGroup.ControlRepresentation": "TitleHyperlink",
+    "UsualGroup.CurrentRowUse": "Auto",
+    "UsualGroup.Group": "HorizontalIfPossible",
+    "UsualGroup.GroupHorizontalAlign": "Auto",
+    "UsualGroup.GroupVerticalAlign": "Auto",
+    "UsualGroup.HorizontalAlign": "Auto",
+    "UsualGroup.HorizontalSpacing": "Auto",
+    "UsualGroup.HorizontalStretch": "auto",
+    "UsualGroup.Representation": "WeakSeparation",
+    "UsualGroup.ThroughAlign": "Auto",
+    "UsualGroup.ToolTipRepresentation": "Auto",
+    "UsualGroup.VerticalAlign": "Auto",
+    "UsualGroup.VerticalSpacing": "Auto",
+    "UsualGroup.VerticalStretch": "auto",
+    "ViewStatusAddition.GroupHorizontalAlign": "Auto",
+    "ViewStatusAddition.GroupVerticalAlign": "Auto",
+    "ViewStatusAddition.HorizontalLocation": "Auto",
+    "ViewStatusAddition.HorizontalStretch": "auto",
+    "ViewStatusAddition.PlacementArea": "userCmds",
+    "ViewStatusAddition.ToolTipRepresentation": "Auto",
+}
+# Узлы, у которых проверяются и приводятся значения перечислений (тег узла)
+enum_scope_types = {
+    'Attribute',
+    'AutoCommandBar',
+    'Button',
+    'ButtonGroup',
+    'CalendarField',
+    'ChartField',
+    'CheckBoxField',
+    'Column',
+    'ColumnGroup',
+    'Command',
+    'CommandBar',
+    'ContextMenu',
+    'ExtendedTooltip',
+    'Form',
+    'FormattedDocumentField',
+    'GanttChartField',
+    'GraphicalSchemaField',
+    'HTMLDocumentField',
+    'InputField',
+    'LabelDecoration',
+    'LabelField',
+    'Page',
+    'Pages',
+    'PeriodField',
+    'PictureDecoration',
+    'PictureField',
+    'PlannerField',
+    'Popup',
+    'ProgressBarField',
+    'RadioButtonField',
+    'SearchControlAddition',
+    'SearchStringAddition',
+    'Settings',
+    'SpreadSheetDocumentField',
+    'Table',
+    'TextDocumentField',
+    'TrackBarField',
+    'UsualGroup',
+    'ViewStatusAddition',
+}
+# Значение из соседнего перечисления того же свойства → значение этого типа (ввод DSL; в XML — ошибка)
+enum_input_synonyms = {
+    "Command.Representation": {"PictureAndText": "TextPicture"},
+    "Button.Representation": {"TextPicture": "PictureAndText"},
+    "Popup.Representation": {"TextPicture": "PictureAndText"},
+    "Table.SelectionMode": {"Single": "SingleRow", "Multiple": "MultiRow"},
+    "CalendarField.SelectionMode": {"SingleRow": "Single", "MultiRow": "Multiple"},
+}
+# --- /Перечисления свойств формы ---
+obj_type = None
+
+
+def normalize_enum_value(prop_name, value):
+    valid = valid_enum_values.get(f"{obj_type}.{prop_name}") or valid_enum_values.get(prop_name)
+    # 1. Check alias dictionary — silent auto-correct. Словарь общий для всех свойств: у свойства со
+    # списком алиас берётся, только если его результат в списке (иначе «None» дало бы Nonperiodical везде)
+    alias_key = next((k for k in enum_value_aliases if k.lower() == value.lower()), None)
+    if alias_key is not None:
+        aliased = enum_value_aliases[alias_key]
+        if not valid or aliased in valid:
+            return aliased
+    # 2. Case-insensitive match against valid values — silent. Список вида объекта — раньше общего.
+    if valid:
+        for v in valid:
+            if v.lower() == value.lower():
+                return v
+        # 3. Known property, unknown value — error with hint
+        print(f"Invalid value '{value}' for property '{prop_name}'. Valid values: {', '.join(valid)}", file=sys.stderr)
+        sys.exit(1)
+    # 4. Unknown property — pass-through (no validation data)
+    return value
+
+# Значение из соседнего перечисления того же свойства (у кнопки PictureAndText, у команды TextPicture) →
+# значение этого типа. Только ввод DSL: в XML такое значение платформа не загружает
+def resolve_enum_input_synonym(typ, tag, value):
+    syn = enum_input_synonyms.get(f'{typ}.{tag}') or {}
+    return next((b for a, b in syn.items() if a.lower() == value.lower()), value)
+
+
+# Значения перечислений в выводе эмиттера — к каноническому виду (normalize_enum_value): простой тег
+# элемента формы известного типа или корня формы. Регистр и старые имена исправляются молча,
+# неизвестное значение — ошибка с перечнем допустимых. root_type — тип для тегов прямо под корнем
+# фрагмента (свойства формы во фрагменте form-edit). Значение-умолчание типа (enum_default_values) — тег
+# не пишется, как не пишет его платформа; keep_defaults оставляет такие теги (проба set в form-edit).
+def normalize_enum_tags(text, root_type='', keep_defaults=False):
+    global obj_type
+    crlf = '\r\n' in text
+    lines = text.replace('\r\n', '\n').split('\n')
+    stack = []
+    for i, line in enumerate(lines):
+        m = re.fullmatch(r'\t*</([A-Za-z_][\w.:-]*)>', line)
+        if m:
+            if stack and stack[-1][0] == m.group(1):
+                stack.pop()
+            continue
+        m = re.fullmatch(r'(\t*)<([A-Za-z_][\w.:-]*)(\s[^>]*)?>', line)
+        if m and not line.endswith('/>'):
+            stack.append((m.group(2), len(m.group(1)), m.group(3) or ''))
+            continue
+        if not stack:
+            continue
+        m = re.fullmatch(r'(\t*)<([A-Za-z]\w*)>([^<]+)</([A-Za-z]\w*)>', line)
+        if not m or m.group(2) != m.group(4):
+            continue
+        name, ind, attrs = stack[-1]
+        if len(m.group(1)) != ind + 1:
+            continue
+        if len(stack) == 1:
+            ptype = 'Form' if name == 'Form' else root_type
+        else:
+            ptype = name
+        if not ptype or ptype not in enum_scope_types:
+            continue
+        # Settings — только настройки динамического списка (у ValueList/Planner/Chart свои), как в form-validate
+        if ptype == 'Settings' and 'xsi:type="DynamicList"' not in attrs:
+            continue
+        obj_type = ptype
+        tag = m.group(2)
+        v = normalize_enum_value(tag, resolve_enum_input_synonym(ptype, tag, m.group(3)))
+        if not keep_defaults and enum_default_values.get(f'{ptype}.{tag}') == v:
+            lines[i] = None
+            continue
+        if v != m.group(3):
+            lines[i] = f'{m.group(1)}<{tag}>{v}</{tag}>'
+    out = '\n'.join(l for l in lines if l is not None)
+    return out.replace('\n', '\r\n') if crlf else out
+
+
+# --- Канонический порядок дочерних тегов элемента ---
+# В каком порядке платформа пишет свойства и вложенные узлы элемента формы. Построено по корпусу
+# выгрузок (БП и ERP, 8.3.24, 17036 форм): для каждого типа элемента — граф «тег A раньше тега B»,
+# противоречий нет. Эмиттер пишет теги в этом порядке — иначе первая же выгрузка из базы их переставит.
+CHILD_TAG_ORDER = {
+    "AutoCommandBar": "HorizontalAlign Autofill ChildItems",
+    "Button": "Type Visible TitleHeight UserVisible Representation DefaultButton SkipOnInput Enabled DefaultItem Width AutoMaxWidth MaxWidth Height AutoMaxHeight HorizontalStretch MaxHeight VerticalStretch GroupHorizontalAlign Check GroupVerticalAlign CommandName Parameter DataPath TextColor BackColor BorderColor Font Picture Title Shape ToolTipRepresentation RepresentationInContextMenu ShapeRepresentation PictureLocation LocationInCommandBar CommandUniqueness ExtendedTooltip",
+    "ButtonGroup": "EnableContentChange Visible Title GroupVerticalAlign ToolTip HorizontalStretch GroupHorizontalAlign ToolTipRepresentation CommandSource Representation VerticalStretch ExtendedTooltip ChildItems",
+    "CalendarField": "DataPath SkipOnInput Title TitleLocation ToolTip ToolTipRepresentation Width AutoMaxWidth Height HorizontalStretch SelectionMode ShowCurrentDate ShowMonthsPanel WidthInMonths HeightInMonths ContextMenu ExtendedTooltip Events",
+    "ChartField": "DataPath Enabled Title TitleFont Visible TitleLocation GroupHorizontalAlign Width AutoMaxWidth MaxHeight MaxWidth Height AutoMaxHeight HorizontalStretch VerticalStretch ContextMenu ExtendedTooltip Events",
+    "CheckBoxField": "DataPath Visible Enabled UserVisible DefaultItem ReadOnly SkipOnInput Title TitleTextColor TitleFont TitleLocation TitleHeight ToolTip FooterHorizontalAlign HorizontalAlign ToolTipRepresentation Shortcut GroupHorizontalAlign VerticalAlign GroupVerticalAlign WarningOnEditRepresentation WarningOnEdit EditMode AutoCellHeight CellHyperlink FixingInTable ShowInHeader FooterDataPath HeaderPicture HeaderHorizontalAlign ShowInFooter CheckBoxType EditFormat ItemHeight ItemTitleHeight ItemWidth EqualItemsWidth ThreeState ContextMenu ExtendedTooltip Events",
+    "ColumnGroup": "Visible Enabled ReadOnly UserVisible EnableContentChange Title GroupVerticalAlign TitleFont TitleTextColor ToolTip ToolTipRepresentation Width Height HorizontalStretch GroupHorizontalAlign VerticalStretch Group ShowTitle ShowInHeader HeaderDataPath HeaderHorizontalAlign HeaderFormat HeaderPicture FixingInTable ExtendedTooltip ChildItems",
+    "CommandBar": "Enabled Visible EnableContentChange Title ToolTip ToolTipRepresentation Width Height HorizontalStretch VerticalStretch GroupHorizontalAlign GroupVerticalAlign HorizontalLocation CommandSource ExtendedTooltip ChildItems",
+    "FormattedDocumentField": "DataPath DefaultItem Enabled ReadOnly SkipOnInput Title TitleLocation CommandSet Font ToolTip EditMode Width AutoMaxWidth Height AutoMaxHeight BorderColor HorizontalStretch MaxWidth ContextMenu ExtendedTooltip Events",
+    "GanttChartField": "DataPath DefaultItem TitleLocation Width Height HorizontalStretch VerticalStretch ContextMenu ExtendedTooltip Table Events",
+    "GraphicalSchemaField": "DataPath DefaultItem ReadOnly Title TitleLocation WarningOnEditRepresentation Width Height Edit ContextMenu ExtendedTooltip Events",
+    "HTMLDocumentField": "DataPath DefaultItem Enabled ReadOnly SkipOnInput Title TitleTextColor TitleFont TitleLocation ToolTipRepresentation Visible WarningOnEditRepresentation Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch Output BorderColor ContextMenu ExtendedTooltip Events",
+    "InputField": "DataPath Visible UserVisible DefaultItem Enabled ReadOnly SkipOnInput Title TitleBackColor TitleTextColor TitleFont TitleLocation TitleHeight ToolTip ToolTipRepresentation WarningOnEditRepresentation WarningOnEdit Shortcut HorizontalAlign VerticalAlign GroupHorizontalAlign GroupVerticalAlign EditMode CellHyperlink FixingInTable AutoCellHeight ShowInHeader HeaderHorizontalAlign HeaderPicture ShowInFooter FooterDataPath FooterText FooterTextColor FooterFont FooterHorizontalAlign FooterPicture Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch AllowInputEmptyMultipleValues MultipleValuesFont MultipleValuesTextColor MultipleValuesBackColor VerticalStretch Wrap MarkNegatives PasswordMode MultiLine ExtendedEdit DropListButton ChoiceButton ChoiceButtonRepresentation ClearButton SpinButton OpenButton CreateButton Mask ListChoiceMode ExtendedEditMultipleValues AutoChoiceIncomplete Format MultipleValuePictureShape QuickChoice ChoiceFoldersAndItems EditFormat AutoMarkIncomplete ChooseType AutoShowOpenButtonMode IncompleteChoiceMode ShowCheckBoxesInDropList MultipleValueDataPath MultipleValuePictureDataPath MultipleValuePresentDataPath SpellCheckingOnTextInput TypeDomainEnabled TextEdit AvailableTypes ChoiceForm ChoiceParameterLinks ChoiceParameters EditTextUpdate MinValue ChoiceButtonPicture MaxValue ChoiceList AutoCorrectionOnTextInput AutoShowClearButtonMode ChoiceListButton ChoiceListHeight DropListWidth TextColor BackColor BorderColor Font HeightControlVariant SpecialTextInputMode InputHint ChoiceHistoryOnInput TypeLink ContextMenu ExtendedTooltip Events",
+    "LabelDecoration": "UserVisible Visible Enabled Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch SkipOnInput TextColor Font Shortcut Title ToolTip ToolTipRepresentation GroupHorizontalAlign GroupVerticalAlign Hyperlink HorizontalAlign VerticalAlign BackColor BorderColor Border TitleHeight ContextMenu ExtendedTooltip Events",
+    "LabelField": "DataPath Visible Enabled UserVisible DefaultItem ReadOnly SkipOnInput Title TitleTextColor TitleFont TitleLocation TitleHeight ToolTip ToolTipRepresentation HorizontalAlign VerticalAlign GroupHorizontalAlign GroupVerticalAlign WarningOnEditRepresentation WarningOnEdit EditMode FixingInTable CellHyperlink AutoCellHeight FooterText ShowInHeader HeaderHorizontalAlign FooterDataPath HeaderPicture ShowInFooter FooterHorizontalAlign Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch MarkNegatives VerticalStretch Format Border BorderColor Hiperlink PasswordMode TextColor BackColor Font ContextMenu ExtendedTooltip Events",
+    "Page": "Visible Enabled ReadOnly EnableContentChange UserVisible Title GroupVerticalAlign Shortcut TitleTextColor TitleFont ToolTip ToolTipRepresentation Width Height HorizontalStretch VerticalStretch ChildrenAlign Picture Format Group ChildItemsWidth HorizontalSpacing VerticalSpacing HorizontalAlign VerticalAlign ShowTitle BackColor TitleDataPath ScrollOnCompress ExtendedTooltip ChildItems",
+    "Pages": "Enabled ReadOnly EnableContentChange UserVisible Visible Title TitleFont ToolTip ToolTipRepresentation Width Height HorizontalStretch VerticalStretch GroupHorizontalAlign GroupVerticalAlign PagesRepresentation CurrentRowUse ExtendedTooltip Events ChildItems",
+    "PeriodField": "DataPath TitleLocation ContextMenu ExtendedTooltip",
+    "PictureDecoration": "Enabled Visible Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch SkipOnInput TextColor Font Title ToolTip ToolTipRepresentation GroupHorizontalAlign GroupVerticalAlign Hyperlink PictureSize Zoomable ImageScale NonselectedPictureText EnableStartDrag EnableDrag Picture BorderColor Border FileDragMode ContextMenu ExtendedTooltip Events",
+    "PictureField": "DataPath TitleBackColor UserVisible Visible Enabled ReadOnly SkipOnInput Title TitleTextColor TitleLocation TitleHeight ToolTip GroupHorizontalAlign GroupVerticalAlign Shortcut ToolTipRepresentation HorizontalAlign WarningOnEditRepresentation EditMode AutoCellHeight FixingInTable CellHyperlink ShowInHeader FooterDataPath HeaderPicture FooterText HeaderHorizontalAlign ShowInFooter FooterHorizontalAlign Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch PictureSize Zoomable Hyperlink NonselectedPictureText EnableDrag TextColor ValuesPicture BorderColor Border Font FileDragMode ContextMenu ExtendedTooltip Events",
+    "PlannerField": "DataPath TitleLocation ContextMenu ExtendedTooltip Events",
+    "Popup": "UserVisible Visible EnableContentChange Title Shape TitleTextColor TitleFont ToolTip ToolTipRepresentation VerticalStretch Width HorizontalStretch Picture CommandSource Representation BackColor ShapeRepresentation BorderColor ExtendedTooltip ChildItems",
+    "ProgressBarField": "DataPath Title Visible ReadOnly TitleLocation ToolTip ToolTipRepresentation Width AutoMaxHeight AutoMaxWidth HorizontalStretch MaxValue ShowPercent ContextMenu ExtendedTooltip",
+    "RadioButtonField": "DataPath DefaultItem Enabled SkipOnInput UserVisible Visible ReadOnly Title TitleTextColor TitleFont TitleLocation FooterHorizontalAlign TitleHeight ToolTip ToolTipRepresentation EditMode GroupHorizontalAlign Shortcut VerticalAlign GroupVerticalAlign WarningOnEditRepresentation WarningOnEdit RadioButtonType ItemHeight ItemTitleHeight ItemWidth ColumnsCount EqualColumnsWidth ChoiceList Font TextColor ContextMenu ExtendedTooltip Events",
+    "SpreadSheetDocumentField": "DataPath Enabled ReadOnly SkipOnInput UserVisible Visible DefaultItem Title TitleLocation DrawingSelectionShowMode FooterHorizontalAlign GroupHorizontalAlign ToolTip ToolTipRepresentation CommandSet Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch ShowGrid ShowHeaders VerticalScrollBar HorizontalScrollBar Protection SelectionShowMode Edit Output PointerType ShowGroups EnableStartDrag EnableDrag BorderColor ShowCellNames ShowRowAndColumnNames ViewScalingMode ContextMenu ExtendedTooltip Events",
+    "Table": "Representation Visible UserVisible TitleLocation CommandBarLocation Autofill Enabled TitleHeight ReadOnly SkipOnInput DefaultItem ChangeRowSet ChangeRowOrder Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HeightInTableRows HeightControlVariant AutoMaxRowsCount MaxRowsCount ChoiceMode MultipleChoice RowInputMode SelectionMode RowSelectionMode Header FooterHeight HeaderHeight Footer HorizontalScrollBar VerticalScrollBar HorizontalLines VerticalLines UseAlternationRowColor AutoInsertNewRow AutoAddIncomplete AutoMarkIncomplete SearchOnInput InitialListView InitialTreeView HorizontalStretch Output VerticalStretch EnableStartDrag EnableDrag FileDragMode DataPath Font RowPictureDataPath RowsPicture BackColor BorderColor TextColor Title BehaviorOnHorizontalCompression GroupVerticalAlign Shortcut TitleTextColor TitleFont CommandSet ToolTip ToolTipRepresentation SearchStringLocation ViewStatusLocation SearchControlLocation GroupHorizontalAlign CurrentRowUse RefreshRequest AutoRefresh AutoRefreshPeriod Period ChoiceFoldersAndItems RestoreCurrentRow RowFilter TopLevelParent ShowRoot AllowRootChoice UpdateOnDataChange UserSettingsGroup AllowGettingCurrentRowURL ViewMode SettingsNamedItemDetailedRepresentation ContextMenu AutoCommandBar ExtendedTooltip SearchStringAddition ViewStatusAddition SearchControlAddition Events ChildItems",
+    "TextDocumentField": "DataPath DefaultItem ReadOnly Title TitleFont TitleLocation EditMode ToolTip Width AutoMaxWidth Font MaxWidth Height AutoMaxHeight ContextMenu ExtendedTooltip Events",
+    "TrackBarField": "DataPath Title TitleLocation HorizontalAlign ToolTip ToolTipRepresentation Width AutoMaxWidth HorizontalStretch MaxWidth Height AutoMaxHeight MinValue MarkingAppearance MaxValue LargeStep Step MarkingStep ContextMenu ExtendedTooltip Events",
+    "UsualGroup": "UserVisible Visible Enabled ReadOnly EnableContentChange Title TitleTextColor TitleFont ToolTip ToolTipRepresentation Shortcut Width Height HorizontalStretch VerticalStretch GroupHorizontalAlign GroupVerticalAlign Group ChildrenAlign HorizontalSpacing VerticalSpacing HorizontalAlign VerticalAlign Behavior CollapsedRepresentationTitle Collapsed ControlRepresentation Representation CurrentRowUse Format ShowLeftMargin United ChildItemsWidth ShowTitle BackColor ThroughAlign TitleDataPath ExtendedTooltip Events ChildItems",
+}
+CHILD_RANK = {t: {c: i for i, c in enumerate(v.split(" "))} for t, v in CHILD_TAG_ORDER.items()}
+
+
+def get_child_rank(parent_tag, child_tag):
+    return CHILD_RANK.get(parent_tag, {}).get(child_tag, -1)
+
+
+_TAG_OPEN_RE = re.compile(r'^(\t*)<([A-Za-z_][\w.:-]*)(?=[\s/>])')
+
+
+# Вывод эмиттера (тег на строке, вложенность — табами) — в порядок корпуса: дети каждого элемента
+# переставляются целыми блоками строк, содержимое блоков не меняется. Незнакомый тег идёт за
+# предыдущим знакомым.
+def sort_element_tag_order(text):
+    crlf = '\r\n' in text
+    lines = text.replace('\r\n', '\n').split('\n')
+    _sort_tag_blocks(lines, 0, len(lines), '')
+    out = '\n'.join(lines)
+    return out.replace('\n', '\r\n') if crlf else out
+
+
+def _tag_block_end(lines, i, ind, name):
+    line = lines[i]
+    if line.endswith('/>') and '</' not in line:
+        return i + 1
+    if line.endswith('</' + name + '>'):
+        return i + 1
+    if re.fullmatch(r'\t*<' + re.escape(name) + r'(\s[^>]*)?>', line):
+        close = ind + '</' + name + '>'
+        j = i + 1
+        while j < len(lines) and lines[j] != close:
+            j += 1
+        return j + 1
+    # многострочный текст — до строки, которая кончается закрывающим тегом
+    j = i + 1
+    while j < len(lines) and not lines[j - 1].endswith('</' + name + '>'):
+        j += 1
+    return j
+
+
+def _sort_tag_blocks(lines, lo, hi, parent):
+    ind = None
+    for i in range(lo, hi):
+        m = re.match(r'^(\t*)<[A-Za-z_]', lines[i])
+        if m:
+            ind = m.group(1)
+            break
+    if ind is None:
+        return
+    blocks = []
+    i = lo
+    while i < hi:
+        m = _TAG_OPEN_RE.match(lines[i])
+        if m and m.group(1) == ind:
+            e = _tag_block_end(lines, i, ind, m.group(2))
+            blocks.append((m.group(2), i, e))
+            i = e
+        else:
+            i += 1
+    for name, s, e in blocks:
+        if e - s > 2 and re.fullmatch(r'\t*<' + re.escape(name) + r'(\s[^>]*)?>', lines[s]):
+            _sort_tag_blocks(lines, s + 1, e - 1, name)
+    if len(blocks) < 2 or not parent:
+        return
+    ptag = parent.split(':')[-1]
+    if ptag not in CHILD_TAG_ORDER:
+        return
+    a, z = blocks[0][1], blocks[-1][2]
+    if sum(e - s for _, s, e in blocks) != z - a:
+        return   # между детьми есть посторонние строки — не трогаем
+    last = -1
+    keyed = []
+    for k, (name, s, e) in enumerate(blocks):
+        r = get_child_rank(ptag, name.split(':')[-1])
+        if r < 0:
+            r = last
+        last = r
+        keyed.append(((r + 1) * 100000 + k, k))
+    srt = sorted(keyed)
+    if [k for _, k in srt] == list(range(len(srt))):
+        return
+    seq = []
+    for _, k in srt:
+        _, s, e = blocks[k]
+        seq += lines[s:e]
+    lines[a:z] = seq
+
+
+def emit_element(lines, el, indent, in_cmd_bar=False):
+    # Companion-панели (объект/массив-значение) → commandBar/contextMenu, до тип-синонимов.
+    normalize_panel_synonyms(el)
+
+    # Синонимы типа (XML-имя, русское имя) → канонический ключ DSL
+    normalize_element_type_synonyms(el)
 
     # Синонимы ключей-свойств (русские имена 1С → канон. англ.). Case/space-insensitive.
     # Канон побеждает: если задан и русский, и англ. ключ — англ. остаётся, русский отбрасываем.
@@ -4104,7 +6400,8 @@ def emit_element(lines, el, indent, in_cmd_bar=False):
     for p_name in el.keys():
         if p_name.startswith('_'):
             continue
-        if p_name not in KNOWN_KEYS and p_name not in APPEARANCE_SPEC and p_name not in APPEARANCE_SYNONYMS:
+        if p_name not in KNOWN_KEYS and p_name not in APPEARANCE_SPEC and p_name not in APPEARANCE_SYNONYMS \
+                and p_name not in GENERIC_SCALAR_KEYS:
             print(f"WARNING: Element '{el.get(type_key, '')}': unknown key '{p_name}' -- ignored. Check SKILL.md for valid keys.", file=sys.stderr)
 
     name = get_element_name(el, type_key)
@@ -4172,7 +6469,7 @@ def emit_group(lines, el, name, eid, indent):
         'horizontal': 'Horizontal',
         'vertical': 'Vertical',
         'alwayshorizontal': 'AlwaysHorizontal',
-        'alwaysvertical': 'AlwaysVertical',
+        'alwaysvertical': 'Vertical',  # старое написание; у группы такого значения нет
         'horizontalifpossible': 'HorizontalIfPossible',
         'collapsible': 'Vertical',
     }
@@ -4190,7 +6487,7 @@ def emit_group(lines, el, name, eid, indent):
     elif el.get('behavior') and behavior_val not in bmap:
         _warn_unrecognized('behavior', el.get('behavior'), ('collapsible', 'popup'), name)
     # Collapsed — у Collapsible и PopUp (не привязано к одному behavior)
-    if el.get('collapsed') is True:
+    if get_dsl_bool(el, ['collapsed'], False):
         lines.append(f'{inner}<Collapsed>true</Collapsed>')
 
     # Representation
@@ -4209,14 +6506,23 @@ def emit_group(lines, el, name, eid, indent):
         lines.append(f'{inner}<CurrentRowUse>{el["currentRowUse"]}</CurrentRowUse>')
 
     # ShowTitle
-    if el.get('showTitle') is not None:
-        lines.append(f'{inner}<ShowTitle>{"true" if el["showTitle"] else "false"}</ShowTitle>')
+    # Обычная группа без showTitle: заголовок показан, если он задан (title или titleDataPath), иначе скрыт — служебная группа
+    # раскладки без заголовка давала бы пустую строку-заголовок (умолчание платформы — показан).
+    # У сворачиваемой/всплывающей заголовок — переключатель: умолчание платформы, пишется лишь явный false.
+    if behavior_val in ('collapsible', 'popup'):
+        if el.get('showTitle') is not None and not el['showTitle']:
+            lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
+    elif el.get('showTitle') is not None:
+        if str(el['showTitle']).lower() != 'true':
+            lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
+    elif not el.get('title') and not el.get('titleDataPath'):
+        lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
     # Заголовок свёрнутого представления (collapsible/popup) — мультиязычный текст
     if el.get('collapsedTitle'):
         emit_mltext(lines, inner, 'CollapsedRepresentationTitle', el['collapsedTitle'])
 
     # United
-    if el.get('united') is False:
+    if (not get_dsl_bool(el, ['united'], True)):
         lines.append(f'{inner}<United>false</United>')
 
     # Формат значения пути к данным заголовка (<Format>; парный к titleDataPath группы)
@@ -4233,6 +6539,7 @@ def emit_group(lines, el, name, eid, indent):
 
     # Companion: ExtendedTooltip
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
+    emit_events(lines, el, name, inner, 'UsualGroup')
 
     # Children
     if el.get('children') and len(el['children']) > 0:
@@ -4247,6 +6554,7 @@ def emit_group(lines, el, name, eid, indent):
 def emit_column_group(lines, el, name, eid, indent):
     lines.append(f'{indent}<ColumnGroup name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'ColumnGroup', name)
 
     emit_title(lines, el, name, inner)
 
@@ -4262,8 +6570,9 @@ def emit_column_group(lines, el, name, eid, indent):
     elif group_val:
         _warn_unrecognized('columnGroup orientation', el.get('columnGroup'), ('vertical', 'horizontal', 'inCell'), name)
 
-    if el.get('showTitle') is not None:
-        lines.append(f'{inner}<ShowTitle>{"true" if el["showTitle"] else "false"}</ShowTitle>')
+    # ShowTitle=true — умолчание платформы (в корпусе только false): пишем лишь false
+    if el.get('showTitle') is not None and not el['showTitle']:
+        lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
     # showInHeader эмитится общим emit_common_element_props (через emit_layout)
 
     emit_common_flags(lines, el, inner)
@@ -4297,8 +6606,7 @@ def emit_input(lines, el, name, eid, indent):
     emit_common_flags(lines, el, inner)
 
     if el.get('titleLocation'):
-        loc_map = {'none': 'None', 'left': 'Left', 'right': 'Right', 'top': 'Top', 'bottom': 'Bottom'}
-        loc = loc_map.get(str(el['titleLocation']), str(el['titleLocation']))
+        loc = map_title_loc(el['titleLocation'])
         lines.append(f'{inner}<TitleLocation>{loc}</TitleLocation>')
 
     if el.get('multiLine') is not None:
@@ -4323,7 +6631,7 @@ def emit_input(lines, el, name, eid, indent):
     if el.get('editMode'):
         lines.append(f'{inner}<EditMode>{el["editMode"]}</EditMode>')
     emit_column_pics(lines, el, inner)
-    if el.get('textEdit') is False:
+    if (not get_dsl_bool(el, ['textEdit'], True)):
         lines.append(f'{inner}<TextEdit>false</TextEdit>')
     # InputField-специфичные скаляры (захват «как есть»: платформа эмитит явное не-дефолтное значение)
     for key, tag in (('wrap', 'Wrap'), ('openButton', 'OpenButton'), ('listChoiceMode', 'ListChoiceMode'),
@@ -4350,7 +6658,7 @@ def emit_input(lines, el, name, eid, indent):
     if el.get('choiceButtonRepresentation'):
         lines.append(f'{inner}<ChoiceButtonRepresentation>{el["choiceButtonRepresentation"]}</ChoiceButtonRepresentation>')
     emit_picture_ref(lines, el.get('choiceButtonPicture'), 'ChoiceButtonPicture', inner)
-    emit_layout(lines, el, inner, multi_line_default=(el.get('multiLine') is True))
+    emit_layout(lines, el, inner, multi_line_default=(get_dsl_bool(el, ['multiLine'], False)))
 
     if el.get('inputHint'):
         emit_mltext(lines, inner, 'InputHint', el['inputHint'])
@@ -4379,7 +6687,7 @@ def emit_input(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'input')
+    emit_events(lines, el, name, inner, 'InputField')
 
     lines.append(f'{indent}</InputField>')
 
@@ -4430,7 +6738,7 @@ def emit_check(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'check')
+    emit_events(lines, el, name, inner, 'CheckBoxField')
 
     lines.append(f'{indent}</CheckBoxField>')
 
@@ -4468,7 +6776,7 @@ def emit_radio_button_field(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}КонтекстноеМеню', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}РасширеннаяПодсказка', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'radio')
+    emit_events(lines, el, name, inner, 'RadioButtonField')
 
     lines.append(f'{indent}</RadioButtonField>')
 
@@ -4481,7 +6789,7 @@ def emit_decoration_title(lines, el, name, indent, auto=False):
     if title_val:
         text, fmt = resolve_ml_formatted(title_val)
         if 'formatted' in el:
-            fmt = bool(el['formatted'])
+            fmt = to_dsl_bool(el['formatted'], 'formatted', False)
         lines.append(f'{indent}<Title formatted="{"true" if fmt else "false"}">')
         emit_ml_items(lines, f'{indent}\t', text)
         lines.append(f'{indent}</Title>')
@@ -4498,7 +6806,7 @@ def emit_label(lines, el, name, eid, indent):
     # Порядок как у платформы: own-content (флаги/hyperlink/layout/оформление) ПЕРЕД Title
     # (корпус layout-first 16970 vs 44 — заодно убирает шум атрибуции харнесса на многострочном Title).
     emit_common_flags(lines, el, inner)
-    if el.get('hyperlink') is True:
+    if get_dsl_bool(el, ['hyperlink'], False):
         lines.append(f'{inner}<Hyperlink>true</Hyperlink>')
     emit_layout(lines, el, inner)
     emit_appearance(lines, el, inner, 'decoration')
@@ -4509,7 +6817,7 @@ def emit_label(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'label')
+    emit_events(lines, el, name, inner, 'LabelDecoration')
 
     lines.append(f'{indent}</LabelDecoration>')
 
@@ -4536,7 +6844,7 @@ def emit_label_field(lines, el, name, eid, indent):
         lines.append(f'{inner}<PasswordMode>{"true" if el["passwordMode"] else "false"}</PasswordMode>')
     emit_column_pics(lines, el, inner)
     # ВНИМАНИЕ: у LabelField платформенный тег <Hiperlink> (опечатка 1С), не <Hyperlink>.
-    if el.get('hyperlink') is True:
+    if get_dsl_bool(el, ['hyperlink'], False):
         lines.append(f'{inner}<Hiperlink>true</Hiperlink>')
     emit_layout(lines, el, inner)
 
@@ -4558,7 +6866,7 @@ def emit_label_field(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'labelField')
+    emit_events(lines, el, name, inner, 'LabelField')
 
     lines.append(f'{indent}</LabelField>')
 
@@ -4567,7 +6875,7 @@ def emit_label_field(lines, el, name, eid, indent):
 def emit_dynlist_table_block(lines, el, indent):
     # (useAlternationRowColor — общее свойство таблицы, эмитится в emit_table)
     # Group A (гарант. блок): дефолт + override
-    ar = 'true' if el.get('autoRefresh') is True else 'false'
+    ar = 'true' if get_dsl_bool(el, ['autoRefresh'], False) else 'false'
     lines.append(f'{indent}<AutoRefresh>{ar}</AutoRefresh>')
     arp = el['autoRefreshPeriod'] if el.get('autoRefreshPeriod') is not None else 60
     lines.append(f'{indent}<AutoRefreshPeriod>{arp}</AutoRefreshPeriod>')
@@ -4578,18 +6886,18 @@ def emit_dynlist_table_block(lines, el, indent):
     lines.append(f'{indent}</Period>')
     cfi = el.get('choiceFoldersAndItems') or 'Items'
     lines.append(f'{indent}<ChoiceFoldersAndItems>{cfi}</ChoiceFoldersAndItems>')
-    rcr = 'true' if el.get('restoreCurrentRow') is True else 'false'
+    rcr = 'true' if get_dsl_bool(el, ['restoreCurrentRow'], False) else 'false'
     lines.append(f'{indent}<RestoreCurrentRow>{rcr}</RestoreCurrentRow>')
     lines.append(f'{indent}<TopLevelParent xsi:nil="true"/>')
-    sr = 'false' if el.get('showRoot') is False else 'true'
+    sr = 'false' if (not get_dsl_bool(el, ['showRoot'], True)) else 'true'
     lines.append(f'{indent}<ShowRoot>{sr}</ShowRoot>')
-    arc = 'true' if el.get('allowRootChoice') is True else 'false'
+    arc = 'true' if get_dsl_bool(el, ['allowRootChoice'], False) else 'false'
     lines.append(f'{indent}<AllowRootChoice>{arc}</AllowRootChoice>')
     uodc = el.get('updateOnDataChange') or 'Auto'
     lines.append(f'{indent}<UpdateOnDataChange>{uodc}</UpdateOnDataChange>')
     if el.get('userSettingsGroup'):
         lines.append(f'{indent}<UserSettingsGroup>{el["userSettingsGroup"]}</UserSettingsGroup>')
-    agcru = 'false' if el.get('allowGettingCurrentRowURL') is False else 'true'
+    agcru = 'false' if (not get_dsl_bool(el, ['allowGettingCurrentRowURL'], True)) else 'true'
     lines.append(f'{indent}<AllowGettingCurrentRowURL>{agcru}</AllowGettingCurrentRowURL>')
 
 
@@ -4610,10 +6918,10 @@ def emit_table(lines, el, name, eid, indent):
         lines.append(f'{inner}<TitleLocation>{map_title_loc(el["titleLocation"])}</TitleLocation>')
     # ChangeRowSet/Order — явное значение (в т.ч. false: платформа пишет его на ValueTable)
     if 'changeRowSet' in el and el['changeRowSet'] is not None:
-        lines.append(f'{inner}<ChangeRowSet>{"true" if el["changeRowSet"] is True else "false"}</ChangeRowSet>')
+        lines.append(f'{inner}<ChangeRowSet>{"true" if get_dsl_bool(el, ["changeRowSet"], False) else "false"}</ChangeRowSet>')
     if 'changeRowOrder' in el and el['changeRowOrder'] is not None:
-        lines.append(f'{inner}<ChangeRowOrder>{"true" if el["changeRowOrder"] is True else "false"}</ChangeRowOrder>')
-    if el.get('autoInsertNewRow') is True:
+        lines.append(f'{inner}<ChangeRowOrder>{"true" if get_dsl_bool(el, ["changeRowOrder"], False) else "false"}</ChangeRowOrder>')
+    if get_dsl_bool(el, ['autoInsertNewRow'], False):
         lines.append(f'{inner}<AutoInsertNewRow>true</AutoInsertNewRow>')
     # RowFilter — nil-плейсхолдер (ключ присутствует → эмитим)
     if 'rowFilter' in el:
@@ -4622,9 +6930,9 @@ def emit_table(lines, el, name, eid, indent):
     # эмитится generic-ом emit_layout ниже). Таблица может нести оба (237 в корпусе).
     if el.get('heightInTableRows'):
         lines.append(f'{inner}<HeightInTableRows>{el["heightInTableRows"]}</HeightInTableRows>')
-    if el.get('header') is False:
+    if (not get_dsl_bool(el, ['header'], True)):
         lines.append(f'{inner}<Header>false</Header>')
-    if el.get('footer') is True:
+    if get_dsl_bool(el, ['footer'], False):
         lines.append(f'{inner}<Footer>true</Footer>')
 
     if el.get('commandBarLocation'):
@@ -4632,12 +6940,12 @@ def emit_table(lines, el, name, eid, indent):
     if el.get('searchStringLocation'):
         lines.append(f'{inner}<SearchStringLocation>{el["searchStringLocation"]}</SearchStringLocation>')
 
-    if el.get('choiceMode') is True:
+    if get_dsl_bool(el, ['choiceMode'], False):
         lines.append(f'{inner}<ChoiceMode>true</ChoiceMode>')
     # Скаляры таблицы (захват «как есть»). Autofill — СВОЁ свойство таблицы (≠ AutoCommandBar autofill = tableAutofill).
     if el.get('autofill') is not None:
         lines.append(f'{inner}<Autofill>{"true" if el["autofill"] else "false"}</Autofill>')
-    if el.get('multipleChoice') is True:
+    if get_dsl_bool(el, ['multipleChoice'], False):
         lines.append(f'{inner}<MultipleChoice>true</MultipleChoice>')
     if el.get('searchOnInput'):
         lines.append(f'{inner}<SearchOnInput>{el["searchOnInput"]}</SearchOnInput>')
@@ -4648,15 +6956,15 @@ def emit_table(lines, el, name, eid, indent):
         lines.append(f'{inner}<HeaderHeight>{el["headerHeight"]}</HeaderHeight>')
     if el.get('footerHeight') is not None:
         lines.append(f'{inner}<FooterHeight>{el["footerHeight"]}</FooterHeight>')
-    if el.get('useAlternationRowColor') is True:
+    if get_dsl_bool(el, ['useAlternationRowColor'], False):
         lines.append(f'{inner}<UseAlternationRowColor>true</UseAlternationRowColor>')
     if el.get('selectionMode'):
         lines.append(f'{inner}<SelectionMode>{el["selectionMode"]}</SelectionMode>')
     if el.get('rowSelectionMode'):
         lines.append(f'{inner}<RowSelectionMode>{el["rowSelectionMode"]}</RowSelectionMode>')
-    if el.get('verticalLines') is False:
+    if (not get_dsl_bool(el, ['verticalLines'], True)):
         lines.append(f'{inner}<VerticalLines>false</VerticalLines>')
-    if el.get('horizontalLines') is False:
+    if (not get_dsl_bool(el, ['horizontalLines'], True)):
         lines.append(f'{inner}<HorizontalLines>false</HorizontalLines>')
     if el.get('initialTreeView'):
         lines.append(f'{inner}<InitialTreeView>{el["initialTreeView"]}</InitialTreeView>')
@@ -4709,11 +7017,14 @@ def emit_table(lines, el, name, eid, indent):
     # Columns
     if el.get('columns') and len(el['columns']) > 0:
         lines.append(f'{inner}<ChildItems>')
+        prev_table = _handler_table['name']
+        _handler_table['name'] = name
         for col in el['columns']:
             emit_element(lines, col, f'{inner}\t')
+        _handler_table['name'] = prev_table
         lines.append(f'{inner}</ChildItems>')
 
-    emit_events(lines, el, name, inner, 'table')
+    emit_events(lines, el, name, inner, 'Table', get_table_source(el))
 
     lines.append(f'{indent}</Table>')
 
@@ -4739,7 +7050,7 @@ def emit_pages(lines, el, name, eid, indent):
     # Companion
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'pages')
+    emit_events(lines, el, name, inner, 'Pages')
 
     # Children (pages)
     if el.get('children') and len(el['children']) > 0:
@@ -4754,6 +7065,7 @@ def emit_pages(lines, el, name, eid, indent):
 def emit_page(lines, el, name, eid, indent):
     lines.append(f'{indent}<Page name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'Page', name)
 
     emit_title(lines, el, name, inner, auto=True)
     emit_common_flags(lines, el, inner)
@@ -4767,7 +7079,7 @@ def emit_page(lines, el, name, eid, indent):
             'horizontal': 'Horizontal',
             'vertical': 'Vertical',
             'alwayshorizontal': 'AlwaysHorizontal',
-            'alwaysvertical': 'AlwaysVertical',
+            'alwaysvertical': 'Vertical',  # старое написание; у страницы такого значения нет
             'horizontalifpossible': 'HorizontalIfPossible',
         }
         orientation = orientation_map.get(str(el['group']).lower())
@@ -4775,8 +7087,9 @@ def emit_page(lines, el, name, eid, indent):
             lines.append(f'{inner}<Group>{orientation}</Group>')
         else:
             _warn_unrecognized('page group orientation', el['group'], ('vertical', 'horizontalIfPossible', 'alwaysHorizontal'), name)
-    if el.get('showTitle') is not None:
-        lines.append(f'{inner}<ShowTitle>{"true" if el["showTitle"] else "false"}</ShowTitle>')
+    # ShowTitle=true — умолчание платформы (в корпусе только false): пишем лишь false
+    if el.get('showTitle') is not None and not el['showTitle']:
+        lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
     # Формат значения пути к данным заголовка (<Format>; парный к titleDataPath страницы)
     if el.get('format'):
         emit_mltext(lines, inner, 'Format', el['format'])
@@ -4869,11 +7182,11 @@ def emit_button(lines, el, name, eid, indent, in_cmd_bar=False):
     emit_title(lines, el, name, inner, auto=not (el.get('command') or el.get('commandName') or el.get('stdCommand')))
     emit_common_flags(lines, el, inner)
 
-    if el.get('defaultButton') is True:
+    if get_dsl_bool(el, ['defaultButton'], False):
         lines.append(f'{inner}<DefaultButton>true</DefaultButton>')
     # Check (пометка toggle-кнопки командной панели) — платформа эмитит только true.
     # Ключ 'checked' (не 'check': 'check' — тип-ключ CheckBoxField, был бы конфликт диспетчера типов)
-    if el.get('checked') is True:
+    if get_dsl_bool(el, ['checked'], False):
         lines.append(f'{inner}<Check>true</Check>')
 
     # Picture
@@ -4892,7 +7205,7 @@ def emit_button(lines, el, name, eid, indent, in_cmd_bar=False):
     # Companion
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'button')
+    emit_events(lines, el, name, inner, 'Button')
 
     lines.append(f'{indent}</Button>')
 
@@ -4911,7 +7224,7 @@ def emit_picture_decoration(lines, el, name, eid, indent):
     # Префикс "abs:" → встроенная картинка <xr:Abs>; иначе именованная/стилевая <xr:Ref>.
     if el.get('src'):
         src_str = str(el['src'])
-        lt = 'true' if el.get('loadTransparent') is True else 'false'
+        lt = 'true' if get_dsl_bool(el, ['loadTransparent'], False) else 'false'
         lines.append(f'{inner}<Picture>')
         if src_str.startswith('abs:'):
             lines.append(f'{inner}\t<xr:Abs>{esc_xml_text(src_str[4:])}</xr:Abs>')
@@ -4923,7 +7236,7 @@ def emit_picture_decoration(lines, el, name, eid, indent):
             lines.append(f'{inner}\t<xr:TransparentPixel x="{tpx.get("x")}" y="{tpx.get("y")}"/>')
         lines.append(f'{inner}</Picture>')
 
-    if el.get('hyperlink') is True:
+    if get_dsl_bool(el, ['hyperlink'], False):
         lines.append(f'{inner}<Hyperlink>true</Hyperlink>')
     emit_layout(lines, el, inner)
     # EnableDrag — фактическое значение (декорация-картинка перетаскиваема; декомпилятор ловит generic-ом)
@@ -4937,7 +7250,7 @@ def emit_picture_decoration(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'picture')
+    emit_events(lines, el, name, inner, 'PictureDecoration')
 
     lines.append(f'{indent}</PictureDecoration>')
 
@@ -4957,7 +7270,7 @@ def emit_picture_field(lines, el, name, eid, indent):
     emit_column_pics(lines, el, inner)
     if el.get('titleLocation'):
         lines.append(f'{inner}<TitleLocation>{map_title_loc(el["titleLocation"])}</TitleLocation>')
-    if el.get('hyperlink') is True:
+    if get_dsl_bool(el, ['hyperlink'], False):
         lines.append(f'{inner}<Hyperlink>true</Hyperlink>')
 
     emit_layout(lines, el, inner)
@@ -4985,7 +7298,7 @@ def emit_picture_field(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'picField')
+    emit_events(lines, el, name, inner, 'PictureField')
 
     lines.append(f'{indent}</PictureField>')
 
@@ -5024,7 +7337,7 @@ def emit_simple_field(lines, el, name, eid, indent, xml_tag, type_key):
     emit_companion_panel(lines, 'ContextMenu', f'{name}КонтекстноеМеню', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}РасширеннаяПодсказка', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, type_key)
+    emit_events(lines, el, name, inner, xml_tag)
 
     lines.append(f'{indent}</{xml_tag}>')
 
@@ -5046,7 +7359,7 @@ def emit_gantt_chart(lines, el, name, eid, indent):
     # Вложенная таблица диаграммы Ганта (стандартный Table — переиспользуем emit_element)
     if el.get('ganttTable'):
         emit_element(lines, el['ganttTable'], inner)
-    emit_events(lines, el, name, inner, 'ganttChart')
+    emit_events(lines, el, name, inner, 'GanttChartField')
     lines.append(f'{indent}</GanttChartField>')
 
 
@@ -5061,8 +7374,7 @@ def emit_calendar(lines, el, name, eid, indent):
     emit_common_flags(lines, el, inner)
 
     if el.get('titleLocation'):
-        loc_map = {'none': 'None', 'left': 'Left', 'right': 'Right', 'top': 'Top', 'bottom': 'Bottom', 'auto': 'Auto'}
-        loc = loc_map.get(str(el['titleLocation']), str(el['titleLocation']))
+        loc = map_title_loc(el['titleLocation'])
         lines.append(f'{inner}<TitleLocation>{loc}</TitleLocation>')
 
     emit_layout(lines, el, inner)
@@ -5086,7 +7398,7 @@ def emit_calendar(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'calendar')
+    emit_events(lines, el, name, inner, 'CalendarField')
 
     lines.append(f'{indent}</CalendarField>')
 
@@ -5094,13 +7406,14 @@ def emit_calendar(lines, el, name, eid, indent):
 def emit_command_bar(lines, el, name, eid, indent):
     lines.append(f'{indent}<CommandBar name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'CommandBar', name)
 
     emit_title(lines, el, name, inner)
 
     if el.get('commandSource'):
         lines.append(f'{inner}<CommandSource>{el["commandSource"]}</CommandSource>')
 
-    if el.get('autofill') is True:
+    if get_dsl_bool(el, ['autofill'], False):
         lines.append(f'{inner}<Autofill>true</Autofill>')
 
     # CommandBar хранит HorizontalLocation фактически (включая Auto); ≠ дополнениям (Auto=скип)
@@ -5125,6 +7438,7 @@ def emit_command_bar(lines, el, name, eid, indent):
 def emit_popup(lines, el, name, eid, indent):
     lines.append(f'{indent}<Popup name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'Popup', name)
 
     emit_title(lines, el, name, inner, auto=True)
     emit_common_flags(lines, el, inner)
@@ -5157,6 +7471,7 @@ def emit_popup(lines, el, name, eid, indent):
 def emit_button_group(lines, el, name, eid, indent):
     lines.append(f'{indent}<ButtonGroup name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'ButtonGroup', name)
 
     emit_title(lines, el, name, inner)
 
@@ -5312,7 +7627,28 @@ def is_dl_empty_value(v):
     return sv == '' or sv == '_' or sv.lower() == 'null'
 
 
+# Вид значения для ветвлений эмиттеров значений (параметры, пустые значения): примитив любого
+# написания (Число(15,2), numeric, String(10)) → decimal / string / date / dateTime / time, прочее —
+# через синонимы навыка. Квалификаторы значению не нужны и отбрасываются.
+def get_value_kind_type(type_str):
+    if not type_str:
+        return type_str
+    prim = parse_primitive_type(type_str, 0, 0, 0)
+    if prim and not prim.get('error'):
+        if prim['kind'] == 'Number':
+            return 'decimal'
+        if prim['kind'] == 'String':
+            return 'string'
+        if prim['fractions'] == 'Date':
+            return 'date'
+        if prim['fractions'] == 'Time':
+            return 'time'
+        return 'dateTime'
+    return resolve_type_str(type_str)
+
+
 def emit_dl_value(lines, type_str, val, indent, value_list_allowed=False):
+    type_str = get_value_kind_type(type_str)
     if is_dl_empty_value(val):
         # Дин-список: пустое значение платформа ВСЕГДА пишет как xsi:nil (даже при известном типе).
         if value_list_allowed:
@@ -5339,14 +7675,14 @@ def emit_dl_value(lines, type_str, val, indent, value_list_allowed=False):
     elif re.match(r'^string', t):
         lines.append(f'{indent}<dcssch:value xsi:type="xs:string">{esc_xml_text(val_str)}</dcssch:value>')
     elif re.match(r'^(CatalogRef|DocumentRef|EnumRef|ChartOfAccountsRef|ChartOfCharacteristicTypesRef|ChartOfCalculationTypesRef|BusinessProcessRef|TaskRef|ExchangePlanRef)\.', t):
-        lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(val_str)}</dcssch:value>')
+        lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val_str))}</dcssch:value>')
     else:
         if re.match(r'^\d{4}-\d{2}-\d{2}T', val_str):
             lines.append(f'{indent}<dcssch:value xsi:type="xs:dateTime">{esc_xml_text(val_str)}</dcssch:value>')
         elif val_str in ('true', 'false'):
             lines.append(f'{indent}<dcssch:value xsi:type="xs:boolean">{esc_xml_text(val_str)}</dcssch:value>')
         elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', val_str) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', val_str):
-            lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(val_str)}</dcssch:value>')
+            lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val_str))}</dcssch:value>')
         else:
             lines.append(f'{indent}<dcssch:value xsi:type="xs:string">{esc_xml_text(val_str)}</dcssch:value>')
 
@@ -5397,7 +7733,7 @@ def emit_dl_input_parameters(lines, ip, indent):
                         elif isinstance(v, (int, float)):
                             lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="xs:decimal">{v}</dcscor:value>')
                         else:
-                            lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(str(v))}</dcscor:value>')
+                            lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(v))}</dcscor:value>')
                     lines.append(f'{indent}\t\t\t</dcscor:item>')
                 lines.append(f'{indent}\t\t</dcscor:value>')
         elif 'choiceParameterLinks' in item:
@@ -5446,6 +7782,7 @@ def _test_empty_value(v):
 
 
 def emit_empty_value(lines, type_str, indent, tag_prefix='', value_list_allowed=False):
+    type_str = get_value_kind_type(type_str)
     if value_list_allowed:
         return
     t = type_str or ''
@@ -5512,17 +7849,17 @@ def emit_data_parameters(lines, items, indent, block_view_mode=None):
             dp = {'parameter': parsed['parameter']}
             if parsed['value'] is not None:
                 dp['value'] = parsed['value']
-            if parsed['use'] is False:
+            if not get_dsl_bool(parsed, ['use'], True):
                 dp['use'] = False
             if parsed['userSettingID']:
                 dp['userSettingID'] = parsed['userSettingID']
             if parsed['viewMode']:
                 dp['viewMode'] = parsed['viewMode']
         lines.append(f'{indent}\t<dcscor:item xsi:type="dcsset:SettingsParameterValue">')
-        if dp.get('use') is False:
+        if (not get_dsl_bool(dp, ['use'], True)):
             lines.append(f'{indent}\t\t<dcscor:use>false</dcscor:use>')
         lines.append(f'{indent}\t\t<dcscor:parameter>{esc_xml_text(str(dp.get("parameter", "")))}</dcscor:parameter>')
-        vtype = str(dp.get('valueType') or '')
+        vtype = get_value_kind_type(str(dp.get('valueType') or ''))
         val = dp.get('value')
         if isinstance(val, list):
             # Список значений параметра (valueListAllowed) — отдельный <dcscor:value> на каждое.
@@ -5530,12 +7867,13 @@ def emit_data_parameters(lines, items, indent, block_view_mode=None):
             for v in val:
                 v_str = ('true' if v else 'false') if isinstance(v, bool) else str(v)
                 if re.match(r'^[a-zA-Z]+:', avtype):
-                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="{avtype}">{esc_xml_text(v_str)}</dcscor:value>')
+                    av_str = normalize_design_time_value(v_str) if avtype == 'dcscor:DesignTimeValue' else v_str
+                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="{avtype}">{esc_xml_text(av_str)}</dcscor:value>')
                 elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', v_str) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', v_str):
-                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(v_str)}</dcscor:value>')
+                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(v_str))}</dcscor:value>')
                 else:
                     lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(v_str)}</dcscor:value>')
-        elif dp.get('nilValue') is True:
+        elif get_dsl_bool(dp, ['nilValue'], False):
             lines.append(f'{indent}\t\t<dcscor:value xsi:nil="true"/>')
         elif _test_empty_value(val) and vtype:
             emit_empty_value(lines, vtype, f'{indent}\t\t', tag_prefix='dcscor:', value_list_allowed=False)
@@ -5575,7 +7913,7 @@ def emit_data_parameters(lines, items, indent, block_view_mode=None):
             elif re.match(r'^string', vtype):
                 lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(str(val))}</dcscor:value>')
             elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', str(val)) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', str(val)):
-                lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(str(val))}</dcscor:value>')
+                lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val))}</dcscor:value>')
             else:
                 lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(str(val))}</dcscor:value>')
         if dp.get('viewMode'):
@@ -5611,12 +7949,12 @@ def emit_dl_parameter(lines, p, parsed, indent):
     if parsed.get('type'):
         emit_dl_value_type(lines, parsed['type'], ci)
     # value (дефолт nil; при valueListAllowed пустое — опускаем)
-    vla = bool(parsed.get('valueListAllowed'))
+    vla = to_dsl_bool(parsed.get('valueListAllowed'), 'valueListAllowed', False)
     pv = parsed.get('value')
     if isinstance(pv, list):
         for v in pv:
             emit_dl_value(lines, parsed.get('type', ''), v, ci, False)
-    elif parsed.get('value_explicit') and pv is not None and str(pv) == '' and (str(parsed.get('type', '')) == '' or re.match(r'^string', str(parsed.get('type', '')))):
+    elif parsed.get('value_explicit') and pv is not None and str(pv) == '' and (str(parsed.get('type', '')) == '' or re.match(r'^string', get_value_kind_type(str(parsed.get('type', ''))))):
         # Явный пустой СТРОКОВЫЙ параметр (value:"" от декомпилятора) → типизированный пустой
         # <dcssch:value xsi:type="xs:string"/>, НЕ nil. Решается ФОРМОЙ value (""→typed-empty,
         # null/отсутствие→nil), независимо от valueListAllowed; декомпилятор различает ""/null.
@@ -5630,7 +7968,7 @@ def emit_dl_parameter(lines, p, parsed, indent):
     # useRestriction — ВСЕГДА; дефолт true; false только при явном useRestriction:false.
     ur = True
     if is_obj and 'useRestriction' in p:
-        ur = bool(p['useRestriction'])
+        ur = to_dsl_bool(p['useRestriction'], 'useRestriction', False)
     lines.append(f'{ci}<dcssch:useRestriction>{"true" if ur else "false"}</dcssch:useRestriction>')
     # expression
     expr = str(p['expression']) if (is_obj and p.get('expression')) else None
@@ -5645,17 +7983,17 @@ def emit_dl_parameter(lines, p, parsed, indent):
         lines.append(f'{ci}<dcssch:valueListAllowed>true</dcssch:valueListAllowed>')
     # availableAsField=false (hidden или явный)
     aaf = None
-    if parsed.get('hidden') is True:
+    if get_dsl_bool(parsed, ['hidden'], False):
         aaf = False
     if is_obj and 'availableAsField' in p:
-        aaf = bool(p['availableAsField'])
+        aaf = to_dsl_bool(p['availableAsField'], 'availableAsField', False)
     if aaf is False:
         lines.append(f'{ci}<dcssch:availableAsField>false</dcssch:availableAsField>')
     # inputParameters
     if is_obj and p.get('inputParameters'):
         emit_dl_input_parameters(lines, p['inputParameters'], ci)
     # denyIncompleteValues
-    if is_obj and p.get('denyIncompleteValues') is True:
+    if is_obj and get_dsl_bool(p, ['denyIncompleteValues'], False):
         lines.append(f'{ci}<dcssch:denyIncompleteValues>true</dcssch:denyIncompleteValues>')
     # use
     if is_obj and p.get('use'):
@@ -5681,9 +8019,9 @@ def emit_dl_parameters(lines, params, indent):
             parsed = {'name': str(p.get('name', '')), 'type': resolved_type,
                       'value': p.get('value') if 'value' in p else None,
                       'value_explicit': ('value' in p), 'title': None}
-            if p.get('valueListAllowed') is True:
+            if get_dsl_bool(p, ['valueListAllowed'], False):
                 parsed['valueListAllowed'] = True
-            if p.get('hidden') is True:
+            if get_dsl_bool(p, ['hidden'], False):
                 parsed['hidden'] = True
         emit_dl_parameter(lines, p, parsed, indent)
 
@@ -5744,7 +8082,7 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
             ctype = 'd4p1:GanttChart' if 'GanttChart' in str(attr.get('type', '')) else 'd4p1:Chart'
             emit_chart_settings(lines, attr['chart'], inner, ctype)
 
-        if attr.get('main') is True:
+        if get_dsl_bool(attr, ['main'], False):
             lines.append(f'{inner}<MainAttribute>true</MainAttribute>')
         # Доступ по ролям: просмотр/редактирование (порядок схемы: View → Edit, после MainAttribute)
         if attr.get('view') is not None:
@@ -5752,11 +8090,11 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
         if attr.get('edit') is not None:
             emit_xr_flag(lines, 'Edit', attr.get('edit'), inner)
         main_saved = False
-        if attr.get('main') is True and attr.get('type'):
+        if get_dsl_bool(attr, ['main'], False) and attr.get('type'):
             t = str(attr['type'])
             main_saved = bool(re.match(r'^(CatalogObject|DocumentObject|ChartOfAccountsObject|ChartOfCalculationTypesObject|ChartOfCharacteristicTypesObject|ExchangePlanObject|BusinessProcessObject|TaskObject)\.', t)) or ('RecordManager.' in t)
         # Явный ключ savedData побеждает (в т.ч. False → суппресс авто-вывода main_saved); нет ключа → авто.
-        emit_saved = (attr['savedData'] is True) if 'savedData' in attr else main_saved
+        emit_saved = get_dsl_bool(attr, ['savedData'], False) if 'savedData' in attr else main_saved
         if emit_saved:
             lines.append(f'{inner}<SavedData>true</SavedData>')
         # Save: сохранение значения реквизита в пользовательских настройках. true → <Field>имя</Field>;
@@ -5808,7 +8146,7 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
             if fld not in ua_fields:
                 ua_fields.append(fld)
         for col in (attr.get('columns') or []):
-            if col.get('useAlways') is True:
+            if get_dsl_bool(col, ['useAlways'], False):
                 fld = f'{attr_name}.{col["name"]}'
                 if fld not in ua_fields:
                     ua_fields.append(fld)
@@ -5874,10 +8212,10 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
                 mq = 'true' if has_query else 'false'
             lines.append(f'{si}<ManualQuery>{mq}</ManualQuery>')
             # DynamicDataRead: дефолт true; false только при явном отключении
-            ddr = 'false' if s.get('dynamicDataRead') is False else 'true'
+            ddr = 'false' if (not get_dsl_bool(s, ['dynamicDataRead'], True)) else 'true'
             lines.append(f'{si}<DynamicDataRead>{ddr}</DynamicDataRead>')
             if has_query:
-                qtext = resolve_query_value(str(s['query']), QUERY_BASE_DIR)
+                qtext = resolve_text_from_file(str(s['query']), QUERY_BASE_DIR)
                 lines.append(f'{si}<QueryText>{esc_xml_text(qtext)}</QueryText>')
             # Явные поля набора (редко): override title/dataPath
             if s.get('fields'):
@@ -5885,7 +8223,7 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
                     # Тип поля набора: DataSetFieldField (дефолт) vs DataSetFieldNestedDataSet
                     # (поле-вложенный набор = реквизит табличной части; маркер nested).
                     # folder = папка-группировка полей (DataSetFieldFolder, без <field>); nested = вложенный набор.
-                    is_folder = bool(fld.get('folder'))
+                    is_folder = to_dsl_bool(fld.get('folder'), 'folder', False)
                     ftype = 'DataSetFieldNestedDataSet' if fld.get('nested') else ('DataSetFieldFolder' if is_folder else 'DataSetFieldField')
                     lines.append(f'{si}<Field xsi:type="dcssch:{ftype}">')
                     # dataPath: явный (включая "" → self-closing) побеждает; иначе fallback на field.
@@ -6018,7 +8356,7 @@ def emit_parameters(lines, params, indent):
 
         emit_type(lines, str(param.get('type', '')), inner)
 
-        if param.get('key') is True:
+        if get_dsl_bool(param, ['key'], False):
             lines.append(f'{inner}<KeyParameter>true</KeyParameter>')
 
         lines.append(f'{indent}\t</Parameter>')
@@ -6052,17 +8390,39 @@ def emit_commands(lines, cmds, indent):
         if cmd.get('tooltip'):
             emit_mltext(lines, inner, 'ToolTip', cmd['tooltip'])
 
-        # Доступность команды по ролям (после ToolTip, до Action)
+        # Порядок детей — как пишет платформа (XSD FormCommand, корпус без обратных случаев):
+        # Title ToolTip Use Shortcut Picture Action FunctionalOptions Representation ModifiesSavedData
+        # CurrentRowUse AssociatedTableElementId
         if cmd.get('use') is not None:
             emit_xr_flag(lines, 'Use', cmd.get('use'), inner)
 
-        if cmd.get('action'):
-            lines.append(f'{inner}<Action>{cmd["action"]}</Action>')
+        if cmd.get('shortcut'):
+            lines.append(f'{inner}<Shortcut>{cmd["shortcut"]}</Shortcut>')
 
-        if cmd.get('modifiesSavedData') is True:
-            lines.append(f'{inner}<ModifiesSavedData>true</ModifiesSavedData>')
+        emit_command_picture(lines, cmd.get('picture'), cmd.get('loadTransparent'), inner)
+
+        # Обработчик; в расширении — с видом вызова (callType), или несколько: actions [{handler, callType}]
+        if cmd.get('actions'):
+            acts = cmd['actions'] if isinstance(cmd['actions'], list) else [cmd['actions']]
+            for act in acts:
+                ct = normalize_call_type(act.get('callType'), str(cmd.get('name', '')), 'Action')
+                ct_attr = f' callType="{ct}"' if ct else ''
+                lines.append(f'{inner}<Action{ct_attr}>{act.get("handler") if act.get("handler") is not None else ""}</Action>')
+                register_handler(str(act.get('handler')) if act.get('handler') is not None else '', 'command')
+        elif cmd.get('action'):
+            ct = normalize_call_type(cmd.get('callType'), str(cmd.get('name', '')), 'Action')
+            ct_attr = f' callType="{ct}"' if ct else ''
+            lines.append(f'{inner}<Action{ct_attr}>{cmd["action"]}</Action>')
+            register_handler(str(cmd['action']), 'command')
 
         emit_functional_options(lines, cmd.get('functionalOptions'), inner)
+
+        # Значение — к перечислению команды (Text/Picture/TextPicture/Auto) приводит normalize_enum_tags
+        if cmd.get('representation'):
+            lines.append(f'{inner}<Representation>{cmd["representation"]}</Representation>')
+
+        if get_dsl_bool(cmd, ['modifiesSavedData'], False):
+            lines.append(f'{inner}<ModifiesSavedData>true</ModifiesSavedData>')
 
         if cmd.get('currentRowUse'):
             lines.append(f'{inner}<CurrentRowUse>{cmd["currentRowUse"]}</CurrentRowUse>')
@@ -6074,14 +8434,6 @@ def emit_commands(lines, cmds, indent):
                      or _cmd_norm.get('используемаятаблица'))
         if cmd_table:
             lines.append(f'{inner}<AssociatedTableElementId xsi:type="xs:string">{esc_xml_text(str(cmd_table))}</AssociatedTableElementId>')
-
-        if cmd.get('shortcut'):
-            lines.append(f'{inner}<Shortcut>{cmd["shortcut"]}</Shortcut>')
-
-        emit_command_picture(lines, cmd.get('picture'), cmd.get('loadTransparent'), inner)
-
-        if cmd.get('representation'):
-            lines.append(f'{inner}<Representation>{cmd["representation"]}</Representation>')
 
         lines.append(f'{indent}\t</Command>')
     lines.append(f'{indent}</Commands>')
@@ -6108,8 +8460,9 @@ def emit_command_interface(lines, ci, indent):
         return
     inner = f'{indent}\t'
     panels = [
-        ('CommandBar', ('commandBar', 'команднаяПанель', 'КоманднаяПанель')),
+        # Порядок панелей — как в выгрузке: панель навигации раньше командной (607 из 607 форм корпуса)
         ('NavigationPanel', ('navigationPanel', 'панельНавигации', 'ПанельНавигации')),
+        ('CommandBar', ('commandBar', 'команднаяПанель', 'КоманднаяПанель')),
     ]
     present = []
     for tag, syns in panels:
@@ -6195,6 +8548,19 @@ PROP_MAP = {
 }
 
 
+# Порядок дочерних тегов корня формы — по корпусу (БП и ERP, 8.3.24, 17036 форм, противоречий нет).
+# Свойства формы пишутся в этом порядке, а не в порядке ввода, — иначе выгрузка из базы их переставит.
+FORM_ROOT_TAG_ORDER = 'Title Width Height WindowOpeningMode EnterKeyBehavior AutoSaveDataInSettings SaveDataInSettings SaveWindowSettings SettingsStorage AutoTitle AutoURL Group HorizontalAlign ChildItemsWidth VerticalAlign HorizontalSpacing VerticalSpacing AutoFillCheck Customizable Enabled ChildrenAlign CommandBarLocation VerticalScroll ScalingMode ConversationsRepresentation MobileDeviceCommandBarContent CommandSet AutoTime UsePostingMode RepostOnWrite ReportResult DetailsData ReportFormType ShowTitle ShowCloseButton GroupList CollapseItemsByImportanceVariant UseForFoldersAndItems VariantAppearance AutoShowState CustomSettingsFolder ReportResultViewMode ViewModeApplicationOnSetReportResult Scale AutoCommandBar Events ChildItems Attributes Commands Parameters CommandInterface BaseForm'
+
+
+# Ранг тега корня формы; незнакомый тег — после всех знакомых свойств (перед AutoCommandBar).
+def get_form_root_rank(tag):
+    order = FORM_ROOT_TAG_ORDER.split(' ')
+    if tag not in order:
+        return order.index('AutoCommandBar') - 0.5
+    return order.index(tag)
+
+
 def emit_properties(lines, props, indent):
     if not props:
         return
@@ -6213,7 +8579,7 @@ def emit_properties(lines, props, indent):
             val = 'true' if p_value else 'false'
         else:
             val = str(p_value)
-        lines.append(f'{indent}<{xml_name}>{val}</{xml_name}>')
+        lines.append(f'{indent}<{xml_name}>{esc_xml_text(val)}</{xml_name}>')
 
 
 
@@ -6247,6 +8613,42 @@ def format_rank(ver):
     """"2.20" → 220, "2.9" → 209. Строковое сравнение неверно ("2.9" > "2.17")."""
     m = re.match(r'^(\d+)\.(\d+)$', ver or '')
     return int(m.group(1)) * 100 + int(m.group(2)) if m else 0
+
+
+def detect_compatibility_mode(d):
+    """Режим совместимости конфигурации (None — не определён). От него зависит xmlns:dcssch в шапке:
+    при режиме < 8.3.19 платформа не объявляет его никогда и не выгружает поля/параметры динамического
+    списка (в базе они хранятся). Подъём останавливается на корне внешней обработки/отчёта: её форму
+    режим базы не меняет, а Configuration.xml выше по дереву (src/cf рядом с src/epf) — чужой.
+    <CompatibilityMode> лежит ~11-12 КБ от начала — читаем 64 КБ."""
+    while d:
+        ext_path = d + ".xml"
+        if os.path.isfile(ext_path):
+            with open(ext_path, "r", encoding="utf-8-sig") as f:
+                ext_head = f.read(2000)
+            if re.search(r'<(ExternalDataProcessor|ExternalReport)[ >]', ext_head):
+                return None
+        cfg_path = os.path.join(d, "Configuration.xml")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8-sig") as f:
+                head = f.read(65536)
+            m = re.search(r'<CompatibilityMode>([^<]+)</CompatibilityMode>', head)
+            # Расширение: своего CompatibilityMode нет, форму ведёт его собственный режим. В основной
+            # конфигурации этот тег — режим для её расширений, не её собственный: только для расширения.
+            if not m and '<ConfigurationExtensionPurpose>' in head:
+                m = re.search(r'<ConfigurationExtensionCompatibilityMode>([^<]+)</ConfigurationExtensionCompatibilityMode>', head)
+            return m.group(1).strip() if m else None
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
+def compat_mode_rank(mode):
+    """"Version8_3_27" → 80327, "Version8_5_1" → 80501."""
+    m = re.match(r'^Version(\d+)_(\d+)(?:_(\d+))?$', mode or '')   # и двухчастный Version8_1
+    return int(m.group(1)) * 10000 + int(m.group(2)) * 100 + int(m.group(3) or 0) if m else 0
 
 
 def _normalize_elements(defn):
@@ -6338,6 +8740,92 @@ def _normalize_elements(defn):
     return defn
 
 
+def object_child_order():
+    """Порядок групп в <ChildObjects> объекта по виду. Это xs:sequence <Вид>ChildObjects из MDClasses XSD,
+    сверенный выгрузкой платформы: выгрузка сама ставит группы в этот порядок, так что вставка не на место
+    даёт дифф при следующей выгрузке. Единого порядка нет — у документа Form стоит до TabularSection."""
+    return {
+        "Catalog":                    ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "Document":                   ["Attribute", "Form", "TabularSection", "Template", "Command"],
+        "ExchangePlan":               ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "ChartOfCharacteristicTypes": ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "ChartOfAccounts":            ["Attribute", "TabularSection", "AccountingFlag", "ExtDimensionAccountingFlag", "Form", "Template", "Command"],
+        "ChartOfCalculationTypes":    ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "BusinessProcess":            ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "Task":                       ["Attribute", "TabularSection", "Form", "Template", "AddressingAttribute", "Command"],
+        "DataProcessor":              ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "Report":                     ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "ExternalDataProcessor":      ["Attribute", "TabularSection", "Form", "Template"],
+        "ExternalReport":             ["Attribute", "TabularSection", "Form", "Template"],
+        "Enum":                       ["EnumValue", "Form", "Template", "Command"],
+        "InformationRegister":        ["Resource", "Attribute", "Dimension", "Form", "Template", "Command"],
+        "AccumulationRegister":       ["Resource", "Attribute", "Dimension", "Form", "Template", "Command"],
+        "AccountingRegister":         ["Dimension", "Resource", "Attribute", "Form", "Template", "Command"],
+        "CalculationRegister":        ["Resource", "Attribute", "Dimension", "Recalculation", "Form", "Template", "Command"],
+        "DocumentJournal":            ["Column", "Form", "Template", "Command"],
+        "Table":                      ["Field", "Form", "Command", "Template"],
+        "ExternalDataSource":         ["Table", "Cube", "Function"],
+        "Cube":                       ["DimensionTable", "Dimension", "Resource", "Form", "Command", "Template"],
+        "DimensionTable":             ["Field", "Form", "Command", "Template"],
+        "FilterCriterion":            ["Form", "Command"],
+        "SettingsStorage":            ["Form", "Template"],
+        "TabularSection":             ["Attribute"],
+    }
+
+
+def insert_into_own_child_objects_by_canon(text, fragment, tag, obj_type):
+    """Вставка ОДНОГО узла <tag> (fragment — с отступом прямого ребёнка) в СОБСТВЕННЫЙ <ChildObjects>
+    объекта на место по канону вида — как find_child_anchor, только по тексту: за последним своим тегом,
+    иначе перед первой группой, идущей по канону позже, иначе перед закрывающим тегом. Свой контейнер
+    открывается первым (свойства объекта <ChildObjects> не содержат) и закрывается последним: вложенные
+    <ChildObjects> табличных частей лежат внутри него, поиск «первого </ChildObjects>» уводил вставку в ТЧ.
+    Прямые дети — по глубине вложенности, не по отступу. Строку с одним тегом дополняем целой строкой,
+    перевод строки — из самого файла. None — своего <ChildObjects> у объекта нет."""
+    eol = "\r\n" if "\r\n" in text else "\n"
+    frag = fragment.rstrip().lstrip("\r\n").replace("\r\n", "\n").replace("\n", eol)
+    m_open = re.search(r'<ChildObjects\b[^>]*?(/?)>', text)
+    if not m_open:
+        return None
+
+    def line_indent(p):
+        # Отступ строки до позиции p; None — перед p на строке есть что-то кроме пробелов
+        ls = text.rfind("\n", 0, p) + 1
+        return text[ls:p] if not text[ls:p].strip() else None
+
+    if m_open.group(1):
+        # Контейнер самозакрытый — детей у него нет, раскрыть с единственным узлом
+        ind = line_indent(m_open.start()) or ""
+        return text[:m_open.start()] + "<ChildObjects>" + eol + frag + eol + ind + "</ChildObjects>" + text[m_open.end():]
+    m_close = None
+    for m_close in re.finditer(r'</ChildObjects\s*>', text):
+        pass
+    if m_close is None or m_close.start() < m_open.end():
+        return None
+    starts = []
+    depth = 0
+    for m in re.finditer(r'<(/?)([\w:.-]+)[^>]*?(/?)>', text[m_open.end():m_close.start()]):
+        if m.group(1):
+            depth -= 1
+            continue
+        if depth == 0:
+            starts.append((m_open.end() + m.start(), m.group(2).rsplit(':', 1)[-1]))
+        if not m.group(3):
+            depth += 1
+    pos = m_close.start()
+    last_idx = max((i for i, s in enumerate(starts) if s[1] == tag), default=-1)
+    order = object_child_order().get(obj_type) or []
+    if last_idx >= 0:
+        if last_idx + 1 < len(starts):
+            pos = starts[last_idx + 1][0]
+    elif tag in order:
+        later = order[order.index(tag) + 1:]
+        pos = next((p for p, t in starts if t in later), pos)
+    if line_indent(pos) is not None:
+        ls = text.rfind("\n", 0, pos) + 1
+        return text[:ls] + frag + eol + text[ls:]
+    return text[:pos] + frag.lstrip() + text[pos:]
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -6387,6 +8875,14 @@ def main():
     out_path_resolved = args.OutputPath if os.path.isabs(args.OutputPath) else os.path.join(os.getcwd(), args.OutputPath)
     assert_edit_allowed(out_path_resolved, "editable")
     format_version = detect_format_version(os.path.dirname(out_path_resolved))
+    global _format_version, _ext_name_prefix, _form_owner
+    _format_version = format_version
+    _ext_name_prefix = get_extension_name_prefix(os.path.dirname(out_path_resolved))
+    compat_mode = detect_compatibility_mode(os.path.dirname(out_path_resolved))
+    # Режим ниже 8.3.19: dcssch в шапке — только при использовании, поля/параметры списка не выгружаются.
+    # Нераспознанный режим (DontUse и т.п. — ранг 0) — как текущая платформа, то есть не старый.
+    compat_rank = compat_mode_rank(compat_mode)
+    is_compat_pre_8319 = 0 < compat_rank < 80319
 
     # Объявления пространств имён — одной переменной: место эмиссии её только подставляет.
     # Правки шапки (как xmlns:pal в формате 2.21) делаются здесь, в одном месте.
@@ -6519,6 +9015,10 @@ def main():
         global QUERY_BASE_DIR
         QUERY_BASE_DIR = os.path.dirname(os.path.abspath(json_path))
 
+    global _defn
+    normalize_main_flag(defn.get('attributes'))
+    _defn = defn
+
     # --- 1b. Pre-pass: synonyms, main attribute inference, heuristics, autoCmdBar extraction ---
     def _normalize_synonyms(el):
         if not isinstance(el, dict):
@@ -6561,10 +9061,10 @@ def main():
                     return True
         return False
 
-    def _apply_dlist_table_heuristic(el, list_name, has_main_table):
+    def _apply_dlist_table_heuristic(el, list_name, has_main_table, has_key_type=False):
         if not isinstance(el, dict):
             return
-        if el.get('table') is not None and str(el.get('path', '')) == list_name:
+        if el.get('table') is not None and str(el.get('path', '')).lower() == list_name.lower():
             # Маркер дин-список-таблицы → emit_table эмитит блок свойств
             el['_dynList'] = True
             if 'tableAutofill' not in el:
@@ -6574,11 +9074,13 @@ def main():
             # RowPictureDataPath: умный дефолт <Список>.DefaultPicture, если ключ ОТСУТСТВУЕТ.
             # Декомпилятор опускает при rpdp == smart-default; реальное отсутствие → ""-маркер (не
             # перезатирается). Гейт has_main_table снят: дин-список без mainTable тоже несёт RowPictureDataPath.
-            if 'rowPictureDataPath' not in el:
+            # Но не при явном keyType: строка без ссылки, DefaultPicture платформа отвергает («Неверный путь
+            # к данным»); в корпусе у таких списков RowPictureDataPath нет ни разу.
+            if 'rowPictureDataPath' not in el and not has_key_type:
                 el['rowPictureDataPath'] = f'{list_name}.DefaultPicture'
         if isinstance(el.get('children'), list):
             for child in el['children']:
-                _apply_dlist_table_heuristic(child, list_name, has_main_table)
+                _apply_dlist_table_heuristic(child, list_name, has_main_table, has_key_type)
 
     def _is_object_like_type(t):
         if not t:
@@ -6622,13 +9124,13 @@ def main():
 
     # 1b.3: Infer main attribute
     if isinstance(defn.get('attributes'), list):
-        has_explicit_main = any(a.get('main') is True for a in defn['attributes'] if isinstance(a, dict))
+        has_explicit_main = any(get_dsl_bool(a, ['main'], False) for a in defn['attributes'] if isinstance(a, dict))
         if not has_explicit_main:
             candidates = []
             for a in defn['attributes']:
                 if not isinstance(a, dict):
                     continue
-                if 'main' in a and a.get('main') is False:
+                if 'main' in a and (not get_dsl_bool(a, ['main'], True)):
                     continue
                 if _is_object_like_type(str(a.get('type', ''))):
                     candidates.append(a)
@@ -6646,14 +9148,18 @@ def main():
                 continue
             settings = attr.get('settings') or {}
             has_mt = bool(isinstance(settings, dict) and settings.get('mainTable'))
+            # Явный ключ набора (FieldValue/RowKey/RowNumber) без основной таблицы: ссылки в строке нет —
+            # нет и DefaultPicture. С mainTable ссылка остаётся.
+            key_type = str(settings.get('keyType') or '') if isinstance(settings, dict) else ''
+            has_key_type = key_type != '' and key_type.lower() != 'auto' and not has_mt
             for el in defn['elements']:
-                _apply_dlist_table_heuristic(el, attr.get('name', ''), has_mt)
+                _apply_dlist_table_heuristic(el, attr.get('name', ''), has_mt, has_key_type)
 
     # 1b.5: Compute main AutoCommandBar Autofill (B3)
     def _compute_main_acb_autofill():
         if main_acb_def is not None:
             if 'autofill' in main_acb_def:
-                return bool(main_acb_def.get('autofill'))
+                return to_dsl_bool(main_acb_def.get('autofill'), 'autofill', False)
             return True
         if isinstance(defn.get('elements'), list):
             for el in defn['elements']:
@@ -6686,6 +9192,10 @@ def main():
     for k, v in props_src.items():
         if k != 'title':
             props_clone[k] = v
+    # Шапка корня (свойства, CommandSet, MobileDeviceCommandBarContent) собирается блоками и пишется
+    # в порядке корпуса: свойства из ввода идут вперемешку с CommandSet
+    main_lines = lines
+    lines = []
     emit_properties(lines, props_clone, '\t')
 
     # CommandSet (excluded commands)
@@ -6711,6 +9221,18 @@ def main():
                 lines.append(f'\t\t\t<xr:Value xsi:type="xs:string">{esc_xml_text(str(nm))}</xr:Value>')
             lines.append('\t\t</xr:Item>')
         lines.append('\t</MobileDeviceCommandBarContent>')
+    hdr_blocks = []
+    for ln in '\n'.join(lines).split('\n'):
+        if ln == '':
+            continue
+        m = re.match(r'^\t<([A-Za-z]+)', ln)
+        if m:
+            hdr_blocks.append({'Tag': m.group(1), 'Lines': [ln]})
+        else:
+            hdr_blocks[-1]['Lines'].append(ln)
+    lines = main_lines
+    for b in sorted(hdr_blocks, key=lambda b: get_form_root_rank(b['Tag'])):
+        lines.extend(b['Lines'])
 
     # AutoCommandBar (always present, id=-1)
     acb_autofill = _compute_main_acb_autofill()
@@ -6744,13 +9266,25 @@ def main():
         lines.append(f'\t<AutoCommandBar name="{acb_name}" id="-1"{acb_di_attr}/>')
 
     # Events
+    # As for elements; a list — the conventional name (ПриСозданииНаСервере)
+    _form_owner = get_form_owner_kind(next((a.get('type') for a in (defn.get('attributes') or []) if get_dsl_bool(a, ['main'], False)), ''))
     if defn.get('events'):
-        for evt_name in defn['events']:
-            if evt_name not in KNOWN_FORM_EVENTS:
-                print(f"[WARN] Unknown form event '{evt_name}'. Known: {', '.join(KNOWN_FORM_EVENTS)}")
+        # An event outside the catalog has no conventional name — it is given explicitly
+        if isinstance(defn['events'], list):
+            for v in defn['events']:
+                n = resolve_event_name('Form', v.get('event') if isinstance(v, dict) else v, 'Form events')
+                h = ('' if v.get('handler') is None else str(v.get('handler'))) if isinstance(v, dict) else ''
+                if not h and not get_event_entry('Form', n):
+                    print(f"[ERROR] Form event '{n}': specify the handler name — there is no naming convention for this event", file=sys.stderr)
+                    sys.exit(1)
+        pairs = get_event_pairs(defn, '', 'Form')
+        test_event_pairs(pairs, 'Form', '')
+        for evt_name, evt_handler, _ in pairs:
+            register_handler(evt_handler, 'form', 'Form', evt_name)
         lines.append('\t<Events>')
-        for evt_name, evt_handler in defn['events'].items():
-            lines.append(f'\t\t<Event name="{evt_name}">{evt_handler}</Event>')
+        for evt_name, evt_handler, call_type in sort_event_pairs(pairs, 'Form'):
+            ct_attr = f' callType="{call_type}"' if call_type else ''
+            lines.append(f'\t\t<Event name="{evt_name}"{ct_attr}>{evt_handler}</Event>')
         lines.append('\t</Events>')
 
     # ChildItems (elements)
@@ -6763,11 +9297,11 @@ def main():
     # Attributes
     emit_attributes(lines, defn.get('attributes'), '\t', conditional_appearance=defn.get('conditionalAppearance'))
 
+    # Commands (по корпусу — раньше Parameters)
+    emit_commands(lines, defn.get('commands'), '\t')
+
     # Parameters
     emit_parameters(lines, defn.get('parameters'), '\t')
-
-    # Commands
-    emit_commands(lines, defn.get('commands'), '\t')
 
     # CommandInterface (командный интерфейс формы — последний дочерний Form)
     emit_command_interface(lines, defn.get('commandInterface'), '\t')
@@ -6783,8 +9317,26 @@ def main():
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
 
-    content = '\r\n'.join(lines)
+    content = sort_element_tag_order(normalize_enum_tags('\r\n'.join(lines)))
+    # Режим ниже 8.3.19: платформа объявляет dcssch только там, где он есть в теле. Тело собрано —
+    # теперь видно, нужен ли он; иначе снимаем объявление из корня (как сделала бы выгрузка).
+    if is_compat_pre_8319:
+        root_start = content.find('<Form ')
+        root_end = content.find('>', root_start) if root_start >= 0 else -1
+        if root_end >= 0 and content.find('dcssch:', root_end) < 0:
+            content = content[:root_end].replace(
+                ' xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema"', '') + content[root_end:]
+    report_unknown_events()
     write_utf8_bom(out_path, content)
+
+    # Режим ниже 8.3.19: поля, вычисляемые поля и параметры динамического списка платформа хранит в
+    # базе, но в выгрузку XML не пишет. Загрузка их принимает молча — предупреждаем здесь.
+    if is_compat_pre_8319:
+        dyn_rx = (r'(?s)<Attribute name="([^"]+)"(?:(?!</Attribute>|<Attribute ).)*?'
+                  r'<Settings xsi:type="DynamicList">(?:(?!</Settings>).)*?<(?:Field|CalculatedField|Parameter)[ >]')
+        for m in re.finditer(dyn_rx, content):
+            print(f"[WARN] Dynamic list '{m.group(1)}': Field/CalculatedField/Parameter under compatibility "
+                  f"mode {compat_mode} (< 8.3.19) are kept in the infobase but not written to the XML dump")
 
     # --- 4. Auto-register form in parent object XML ---
     # Infer parent from OutputPath: .../TypePlural/ObjectName/Forms/FormName/Ext/Form.xml
@@ -6805,26 +9357,16 @@ def main():
             # схлопнется в LF при чтении и файл будет переписан в LF (#44/#46/#47).
             with open(object_xml_path, 'r', encoding='utf-8-sig', newline='') as f:
                 raw_text = f.read()
-            # Перевод строки вставки берём из самого файла, а не из канона:
-            # правка существующего файла сохраняет его стиль.
-            eol = '\r\n' if '\r\n' in raw_text else '\n'
-
             # Check if already registered
             if f'<Form>{form_name}</Form>' not in raw_text:
-                # Insert before </ChildObjects>
-                if '</ChildObjects>' in raw_text:
-                    # Отступ вставки берём у закрывающего тега +1 уровень: подстановка
-                    # по голому '</ChildObjects>' удваивала бы уже присутствующий отступ
-                    # строки (получалось 5 табов вместо 3 — PS-порт через DOM даёт 3).
-                    raw_text = re.sub(r'([ \t]*)</ChildObjects>',
-                                      lambda m: m.group(1) + '\t' + f'<Form>{form_name}</Form>' + eol + m.group(1) + '</ChildObjects>',
-                                      raw_text, count=1)
-                elif '<ChildObjects/>' in raw_text:
-                    replacement = ('<ChildObjects>' + eol + f'\t\t\t<Form>{form_name}</Form>' + eol + '\t\t</ChildObjects>')
-                    raw_text = raw_text.replace('<ChildObjects/>', replacement, 1)
-
-                write_utf8_bom(object_xml_path, raw_text)
-                print(f"     Registered: <Form>{form_name}</Form> in {object_name}.xml")
+                # В свой ChildObjects объекта (не во вложенный у ТЧ), на место по канону вида;
+                # перевод строки вставки — из самого файла
+                m_kind = re.search(r'<MetaDataObject\b[^>]*>\s*<(\w+)', raw_text)
+                new_text = insert_into_own_child_objects_by_canon(
+                    raw_text, f'\t\t\t<Form>{form_name}</Form>', 'Form', m_kind.group(1) if m_kind else '')
+                if new_text is not None and new_text != raw_text:
+                    write_utf8_bom(object_xml_path, new_text)
+                    print(f"     Registered: <Form>{form_name}</Form> in {object_name}.xml")
 
     # --- 5. Summary ---
     el_count = _next_id
@@ -6836,6 +9378,8 @@ def main():
         print(f"     Commands: {len(defn['commands'])}")
     if defn.get('parameters'):
         print(f"     Parameters: {len(defn['parameters'])}")
+    for line in update_form_module(out_path, args.OutputPath):
+        print(line)
 
 
 if __name__ == '__main__':
