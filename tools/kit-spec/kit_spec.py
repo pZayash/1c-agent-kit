@@ -284,7 +284,7 @@ def change_report(specs, name):
 
 def load_local_rules(specs):
     """specs/rules.local.json — потребительский whitelist посторонних
-    файлов/каталогов в changes. -> (rules, warn)."""
+    файлов/каталогов в changes и library. -> (rules, warn)."""
     path = specs.dir / 'rules.local.json'
     if not path.is_file():
         return {}, None
@@ -387,11 +387,17 @@ def validate_library(specs):
     lib = specs.library_dir
     if not lib.is_dir():
         return warns
+    local, w = load_local_rules(specs)
+    if w:
+        warns.append(w)
+    tol_files = local.get('tolerated_files') or []
+    tol_dirs = local.get('tolerated_dirs') or []
     for p in sorted(lib.iterdir()):
         if p.name.startswith('.'):
             continue
         if p.is_file():
-            if p.name not in ('README.md', 'project.md', 'rules.local.json'):
+            if p.name not in ('README.md', 'project.md', 'rules.local.json') \
+                    and not _globs(p.name, tol_files):
                 warns.append(f'specs/{p.name}: файл не в capability-каталоге '
                              '(non-capability child)')
             continue
@@ -401,7 +407,8 @@ def validate_library(specs):
             if specs.layout == 'new' and p.name != 'changes':
                 warns.append(f'specs/{p.name}: зарезервированное имя')
             continue
-        if not (p / 'spec.md').is_file():
+        if not (p / 'spec.md').is_file() \
+                and not _globs(p.name, tol_dirs):
             warns.append(f'specs/{p.name}: каталог без spec.md '
                          '(capability или лишнее?)')
     return warns

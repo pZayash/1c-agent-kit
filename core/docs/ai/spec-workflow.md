@@ -51,8 +51,10 @@ python harness/tools/kit-spec/kit_spec.py clean-legacy    # rm .openspec.yaml (d
 нужен только для уже-мигрированных деревьев с остатком.
 
 Посторонние файлы в change — WARN validate (kit-семейство
-`executor-*.md` тихо). Легитимные конвенции потребителя глушатся через
-`specs/rules.local.json` (коммитится в репо проекта):
+`executor-*.md` тихо); на уровне library — WARN «файл не в
+capability-каталоге» / «каталог без spec.md». Легитимные конвенции
+потребителя глушатся через `specs/rules.local.json` (коммитится в репо
+проекта; действует и на `changes/<id>/`, и на детей `specs/`):
 
 ```json
 {"tolerated_files": ["review-*.md", "notes-*.md"],

@@ -548,6 +548,17 @@ class ValidateStrayTest(TempConsumer):
         warns = ks.validate_library(specs)
         self.assertFalse([w for w in warns if 'rules.local.json' in w], warns)
 
+    def test_rules_local_tolerates_library_dir(self):
+        (self.tmp / 'specs' / 'rules.local.json').write_text(json.dumps({
+            'tolerated_dirs': ['Follow-up'],
+            'tolerated_files': ['notes-*.md']}))
+        (self.tmp / 'specs' / 'Follow-up').mkdir()
+        (self.tmp / 'specs' / 'notes-x.md').write_text('x')
+        specs = ks.Specs(str(self.tmp / 'specs'), 'new')
+        warns = ks.validate_library(specs)
+        self.assertFalse([w for w in warns
+                          if 'Follow-up' in w or 'notes-x.md' in w], warns)
+
 
 class MigratePreFlightTest(MigrateTest):
     def test_no_partial_moves_on_collision(self):
