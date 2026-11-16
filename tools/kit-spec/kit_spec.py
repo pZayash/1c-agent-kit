@@ -20,12 +20,17 @@ Layout (канон):
 (layout openspec/specs + openspec/changes/archive) с подсказкой migrate-root.
 migrate-root переносит openspec/ -> specs/ и оставляет junction-shim
 openspec/{specs,changes}, чтобы старые ссылки работали (shim в .gitignore).
+Нестандартные openspec/<dir> не переносятся: остаются на месте под shim
+для истории (список — openspec/.kit-spec-keep; WARN до разбора оператором).
+--include-dir <name> — осознанный перенос такого каталога в specs/<name>.
 
 Commands:
   init                      scaffold specs/ (+маркер, README); --force поверх
                             чужого непустого specs/
-  migrate-root [--apply]    openspec/ -> specs/ + shim junctions; без --apply
-                            только план
+  migrate-root [--apply] [--include-dir N]
+                            openspec/ -> specs/ + shim junctions; без --apply
+                            только план; чужие openspec/<dir> — keep для
+                            истории, --include-dir переносит в specs/<name>
   new <id> [--with-delta C] scaffold change из templates/
   instructions <artifact> --change <id>
                             JSON {rules, template, outputPath} для скилла
@@ -55,6 +60,7 @@ WIN = sys.platform == 'win32'
 
 SPEC_FORMAT = 1
 MARKER = '.kit-spec.json'
+KEEP_FILE = '.kit-spec-keep'  # openspec/<dir>, оставленные migrate-root
 RESERVED = {'changes', 'readme.md'}
 ARTIFACTS = ('proposal', 'design', 'tasks')
 KNOWN_CHANGE_FILES = {a + '.md' for a in ARTIFACTS} | {
@@ -197,6 +203,15 @@ def resolve_specs(root, explicit=None):
                 warns.append('рядом с specs/ немигрированный openspec/ с '
                              'содержимым — он невидим для команд; '
                              'kit_spec.py migrate-root --apply')
+            kept = kept_legacy_dirs(legacy)
+            if kept:
+                warns.append('openspec/{'
+                             + ', '.join(kept) + '} — остаток легаси, '
+                             'оставлен migrate-root для истории; разбор '
+                             'оператором: перенеси содержимое куда надо '
+                             '(в specs/ — migrate-root --include-dir <name> '
+                             'до миграции, иначе вручную), затем удали '
+                             'openspec/<name> и строку в .kit-spec-keep')
             return Specs(canon, 'new'), warns, None
     if legacy.is_dir():
         warns.append('легаси-корень openspec/ (read-only) — миграция: '
@@ -444,12 +459,32 @@ def is_shim_child(p):
     return False
 
 
+def kept_list(old):
+    """Имена из openspec/.kit-spec-keep (raw; каталог может быть удалён)."""
+    p = Path(old) / KEEP_FILE
+    if not p.is_file():
+        return set()
+    try:
+        return {l.strip() for l in
+                p.read_text(encoding='utf-8').splitlines() if l.strip()}
+    except OSError:
+        return set()
+
+
+def kept_legacy_dirs(old):
+    """Оставленные migrate-root openspec/<dir>, которые ещё на месте."""
+    return sorted(n for n in kept_list(old) if (Path(old) / n).is_dir())
+
+
 def legacy_has_content(old):
-    """openspec/ содержит реальное содержимое (не только shim)."""
+    """openspec/ содержит реальное содержимое (не только shim и kept)."""
     if not old.is_dir():
         return False
+    keep = kept_list(old)
     for p in old.iterdir():
         if p.name in ('specs', 'changes') and is_shim_child(p):
+            continue
+        if p.name == KEEP_FILE or p.name in keep:
             continue
         return True
     return False
@@ -627,6 +662,8 @@ def cmd_list(a):
 
 
 def cmd_status(a):
+    if not a.name:
+        return cmd_list(a)
     root = Path(a.root).resolve()
     specs, warns, err = resolve_specs(root, a.spec_root)
     for w in warns:
@@ -805,24 +842,34 @@ def make_dir_junction(target, link):
         raise e
 
 
-def plan_migrate(root):
-    """-> (moves, loose, errs): moves=[(src,dst)], loose=[(src,dst)].
+def plan_migrate(root, include_dirs=()):
+    """-> (moves, loose, kept, errs): moves/loose=[(src,dst)], kept=[Path].
 
+    kept — нестандартные openspec/<dir>, остающиеся на месте под shim
+    (история, разбор оператором); include_dirs переносит их в specs/<name>.
     Все коллизии/ошибки собираются ДО любого move: --apply отказывает
     целиком, а не после частичной миграции."""
-    moves, loose, errs = [], [], []
+    moves, loose, kept, errs = [], [], [], []
     old = root / 'openspec'
     new = root / 'specs'
     if not old.is_dir():
         errs.append('openspec/ не найден')
-        return moves, loose, errs
+        return moves, loose, kept, errs
     if not legacy_has_content(old):
-        return moves, loose, errs  # пустой или только shim — нечего мигрировать
+        # пустой или только shim (+kept) — нечего мигрировать
+        return moves, loose, kept, errs
+    for name in sorted(set(include_dirs or ())):
+        if name in ('specs', 'changes'):
+            errs.append(f'--include-dir {name}: служебный каталог, '
+                        'переносится всегда')
+        elif not (old / name).is_dir():
+            errs.append(f'--include-dir {name}: openspec/{name} — '
+                        'нет такого каталога')
     if new.exists():
         m = read_marker(new)
         if m is None and any(new.iterdir()):
             errs.append('specs/ непустой без маркера — коллизия, разбор вручную')
-            return moves, loose, errs
+            return moves, loose, kept, errs
     o_specs = old / 'specs'
     o_changes = old / 'changes'
     if o_specs.is_dir() and not is_reparse(o_specs):
@@ -855,8 +902,10 @@ def plan_migrate(root):
         if p.is_file():
             loose.append((p, new / p.name))
         elif p.is_dir():
-            errs.append(f'нестандартный каталог в openspec/: {p.name} — '
-                        'ручной разбор')
+            if p.name in set(include_dirs or ()):
+                moves.append((p, new / p.name))
+            else:
+                kept.append(p)
     seen = {}
     for s, d in moves + loose:
         if str(d) in seen:
@@ -881,7 +930,7 @@ def plan_migrate(root):
                     pass
             errs.append(f'цель существует: {d.relative_to(root)} '
                         f'(из {s.relative_to(root)}) — не перезаписываю')
-    return moves, loose, errs
+    return moves, loose, kept, errs
 
 
 def cmd_migrate_root(a):
@@ -890,10 +939,13 @@ def cmd_migrate_root(a):
     if old.is_dir() and not legacy_has_content(old):
         print('migrate-root: openspec/ уже shim или пуст — нечего мигрировать')
         return 0
-    moves, loose, errs = plan_migrate(root)
+    moves, loose, kept, errs = plan_migrate(
+        root, getattr(a, 'include_dir', None) or ())
     if errs:
         for e in errs:
             print(f'FAIL: {e}')
+        print('разреши коллизии (перенеси/удали цель или источник), затем '
+              'повтори migrate-root --apply')
         return 1
     if not moves and not loose:
         print('migrate-root: openspec/ без мигрируемого содержимого '
@@ -912,12 +964,17 @@ def cmd_migrate_root(a):
         elif s.name == 'config.yaml':
             print('    NOTE: config.yaml — конфиг openspec CLI; если там '
                   'проектные правила — перенеси в docs/ai/, сам файл не канон')
+    for p in kept:
+        print(f'  keep {p.relative_to(root)} — не спек-контент, останется '
+              'под shim для истории (разбор оператором; перенести осознанно: '
+              f'--include-dir {p.name})')
     if legacy_files:
         print(f'  rm легаси .openspec.yaml ×{len(legacy_files)} в changes/ '
               '(clean-legacy)')
     print('  shim openspec/changes -> specs/changes; '
           'openspec/specs/<cap> -> specs/<cap> (мигрированные)')
-    print('  .gitignore += openspec/; маркер specs/.kit-spec.json')
+    print('  .gitignore += openspec/{specs,changes}/; '
+          'маркер specs/.kit-spec.json')
     if not a.apply:
         print('dry-run: --apply для выполнения')
         return 0
@@ -948,8 +1005,11 @@ def cmd_migrate_root(a):
         d = old / rel
         if d.is_dir() and not is_reparse(d) and not any(d.iterdir()):
             d.rmdir()
-    # openspec/ должен опустеть до shim (junction-остатки — уже готовый shim)
-    leftover = [p for p in old.iterdir() if not is_reparse(p)]
+    # openspec/ должен опустеть до kept-каталогов (+готовый shim)
+    kept_names = sorted(p.name for p in kept)
+    leftover = [p for p in old.iterdir()
+                if not is_shim_child(p) and p.name != KEEP_FILE
+                and p.name not in kept_names]
     if leftover:
         print('FAIL: openspec/ не пуст после moves: '
               + ', '.join(p.name for p in leftover))
@@ -957,17 +1017,25 @@ def cmd_migrate_root(a):
               'и удали openspec/, затем создай shim сам или повтори '
               'migrate-root после разбора')
         return 1
-    if not any(old.iterdir()):
-        old.rmdir()
-        old.mkdir()
+    if kept_names:
+        (old / KEEP_FILE).write_text('\n'.join(kept_names) + '\n',
+                                     encoding='utf-8')
+        print('keep: ' + ', '.join(f'openspec/{n}' for n in kept_names)
+              + f' — список в openspec/{KEEP_FILE}; WARN до разбора '
+              'оператором')
+    if is_reparse(old / 'changes'):
+        print('shim openspec/{specs,changes} уже существует — оставлен')
+    else:
         try:
             # openspec/specs — real dir + per-cap junctions: старые ссылки
             # openspec/specs/<cap> работают, specs/changes не торчит наружу
             if caps:
-                (old / 'specs').mkdir()
+                (old / 'specs').mkdir(exist_ok=True)
                 for cap in caps:
-                    make_dir_junction(new / cap, old / 'specs' / cap)
-            make_dir_junction(new / 'changes', old / 'changes')
+                    if not (old / 'specs' / cap).exists():
+                        make_dir_junction(new / cap, old / 'specs' / cap)
+            if not (old / 'changes').exists():
+                make_dir_junction(new / 'changes', old / 'changes')
         except OSError as e:
             print(f'FAIL: shim не создан ({e}). Содержимое уже в specs/ — '
                   'вручную: mklink /J openspec\\changes specs\\changes и '
@@ -982,34 +1050,44 @@ def cmd_migrate_root(a):
         else:
             print('shim: openspec/changes -> specs/changes '
                   '(capability не было — openspec/specs не создан)')
-    else:
-        print('shim openspec/{specs,changes} уже существует — оставлен')
     readme = new / 'README.md'
     if not readme.exists():
         readme.write_text(GENERATED_README, encoding='utf-8')
     gi = root / '.gitignore'
-    entry = 'openspec/'
+    # гранулярно: только shim-ветки, kept-каталоги должны остаться видимыми
+    entries = ('openspec/specs/', 'openspec/changes/')
     text = gi.read_text(encoding='utf-8') if gi.is_file() else ''
-    if entry not in [l.strip() for l in text.splitlines()]:
-        with gi.open('a', encoding='utf-8') as f:
-            if text and not text.endswith('\n'):
-                f.write('\n')
-            f.write('\n# kit-spec: junction shim (не трекать)\nopenspec/\n')
-        print('.gitignore += openspec/')
-    tracked = ''
+    lines = [l.strip() for l in text.splitlines()]
+    if 'openspec/' in lines:
+        if kept_names:
+            print('WARN: .gitignore игнорирует openspec/ целиком — kept-'
+                  'каталоги не попадут в git; сузь до openspec/{specs,'
+                  'changes}/')
+    else:
+        missing = [e for e in entries if e not in lines]
+        if missing:
+            with gi.open('a', encoding='utf-8') as f:
+                if text and not text.endswith('\n'):
+                    f.write('\n')
+                f.write('\n# kit-spec: junction shim (не трекать)\n'
+                        + '\n'.join(missing) + '\n')
+            print('.gitignore += ' + ', '.join(missing))
+    shim_tracked = []
     try:
         r = subprocess.run(['git', 'ls-files', 'openspec'], cwd=str(root),
                            capture_output=True, text=True, timeout=15)
         if r.returncode == 0:
-            tracked = r.stdout.strip()
+            shim_tracked = [l for l in r.stdout.splitlines()
+                            if l.startswith(('openspec/specs/',
+                                             'openspec/changes/'))]
     except (OSError, subprocess.SubprocessError):
         pass
-    if tracked:
-        print('WARN: openspec/ есть в git-индексе — перед коммитом: '
-              'git rm -r --cached openspec  (иначе junction-содержимое '
-              'может попасть в индекс как blobs)')
+    if shim_tracked:
+        print('WARN: openspec/{specs,changes} есть в git-индексе — перед '
+              'коммитом: git rm -r --cached openspec/specs openspec/changes '
+              '(иначе junction-содержимое попадёт в индекс как blobs)')
     print('OK migrate-root. Коммит: moves видны как delete+add '
-          '(rename detection по схожести); openspec/ — gitignored shim.')
+          '(rename detection по схожести); openspec/ — shim + kept.')
     return 0
 
 
@@ -1065,6 +1143,9 @@ def main(argv=None):
     ps = sub.add_parser('migrate-root', help='openspec/ -> specs/ + shim')
     common(ps)
     ps.add_argument('--apply', action='store_true')
+    ps.add_argument('--include-dir', action='append', default=[],
+                    metavar='N', help='перенести openspec/N в specs/N '
+                    '(осознанно; иначе каталог остаётся для истории)')
     ps.set_defaults(fn=cmd_migrate_root)
 
     ps = sub.add_parser('new', help='scaffold change')
@@ -1087,9 +1168,9 @@ def main(argv=None):
     ps.add_argument('--json', action='store_true')
     ps.set_defaults(fn=cmd_list)
 
-    ps = sub.add_parser('status', help='статус change')
+    ps = sub.add_parser('status', help='статус change (без name — как list)')
     common(ps)
-    ps.add_argument('name')
+    ps.add_argument('name', nargs='?')
     ps.add_argument('--json', action='store_true')
     ps.set_defaults(fn=cmd_status)
 

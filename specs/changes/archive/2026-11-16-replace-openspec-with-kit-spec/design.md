@@ -86,8 +86,10 @@ WARN). Дети `.*` — service names по конвенции kit-layout, иг�
    выполняет (переименования отловит rename detection).
 
 Windows: `mklink /J` (админ не нужен — примитив из kit_layout). POSIX: symlink.
-Целевой `specs/` непустой без маркера → FAIL (коллизия). `openspec/`
-содержит нестандартное — FAIL со списком (ручной разбор).
+Целевой `specs/` непустой без маркера → FAIL (коллизия). Нестандартные
+`openspec/<dir>` — не FAIL: остаются на месте под shim для истории,
+список пишется в `openspec/.kit-spec-keep` (WARN до разбора оператором);
+осознанный перенос — `--include-dir <name>` → `specs/<name>`.
 
 ## 3. Контракт команд
 

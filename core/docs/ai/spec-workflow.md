@@ -31,6 +31,10 @@ junction-shim: `openspec/changes` → `specs/changes` и точечные
 `openspec/specs/<cap>` → `specs/<cap>` для мигрированных capability — старые
 ссылки продолжают работать;
 shim в `.gitignore`).
+Нестандартные `openspec/<dir>` миграция не переносит: остаются на месте
+под shim для истории (список — `openspec/.kit-spec-keep`; WARN на каждой
+команде до разбора оператором). Осознанный перенос такого каталога:
+`migrate-root --apply --include-dir <name>` → `specs/<name>`.
 
 ## Инструмент
 

@@ -560,6 +560,65 @@ class ValidateStrayTest(TempConsumer):
                           if 'Follow-up' in w or 'notes-x.md' in w], warns)
 
 
+class MigrateKeepTest(MigrateTest):
+    """Нестандартный openspec/<dir> — keep для истории, не FAIL."""
+
+    def setUp(self):
+        super().setUp()
+        fu = self.tmp / 'openspec' / 'Follow-up'
+        fu.mkdir()
+        (fu / 'note.md').write_text('keep me\n')
+
+    def test_plan_keeps_foreign_dir(self):
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=False, include_dir=[])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('keep openspec', out)
+        self.assertIn('Follow-up', out)
+
+    def test_apply_keeps_dir_and_marks(self):
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=True, include_dir=[])
+        self.assertEqual(rc, 0, out)
+        o = self.tmp / 'openspec'
+        self.assertTrue((o / 'Follow-up' / 'note.md').is_file())
+        self.assertEqual((o / '.kit-spec-keep').read_text().strip(),
+                         'Follow-up')
+        self.assertTrue((o / 'changes' / 'c1' / 'tasks.md').is_file())
+        self.assertFalse(ks.legacy_has_content(o))
+        # gitignore гранулярный: kept-каталог остаётся видимым для git
+        gi = '\n' + (self.tmp / '.gitignore').read_text()
+        self.assertIn('openspec/specs/', gi)
+        self.assertNotIn('\nopenspec/\n', gi + '\n')
+        # оператор получает WARN до разбора
+        _, warns, err = ks.resolve_specs(self.tmp)
+        self.assertIsNone(err)
+        self.assertTrue(any('Follow-up' in w for w in warns), warns)
+
+    def test_keep_idempotent(self):
+        run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+            apply=True, include_dir=[])
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=True, include_dir=[])
+        self.assertEqual(rc, 0)
+        self.assertIn('нечего', out)
+
+    def test_include_dir_moves(self):
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=True, include_dir=['Follow-up'])
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((self.tmp / 'specs' / 'Follow-up' /
+                         'note.md').is_file())
+        self.assertFalse((self.tmp / 'openspec' / 'Follow-up').exists())
+        self.assertFalse((self.tmp / 'openspec' / '.kit-spec-keep').exists())
+
+    def test_include_dir_missing(self):
+        rc, out = run(ks.cmd_migrate_root, root=str(self.tmp), spec_root=None,
+                      apply=True, include_dir=['nope'])
+        self.assertEqual(rc, 1)
+        self.assertIn('нет такого каталога', out)
+
+
 class MigratePreFlightTest(MigrateTest):
     def test_no_partial_moves_on_collision(self):
         # цель занята в marker'd specs/ -> отказ ДО первого move
