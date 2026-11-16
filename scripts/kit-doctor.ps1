@@ -262,7 +262,7 @@ if (Test-Path -LiteralPath $harness) {
     # 9b. kit-lint suite (WARN only in doctor; in kit CI these are gates):
     #     core purity, cross-layer links, stack structural rules.
     if ($py) {
-        foreach ($chk in @("check_core_purity.py", "check_cross_layer_links.py", "kit_lint.py")) {
+        foreach ($chk in @("check_core_purity.py", "check_cross_layer_links.py", "kit_lint.py", "check_upstream_freshness.py")) {
             $script = Join-Path $harness "tools\kit-lint\$chk"
             if (-not (Test-Path -LiteralPath $script)) { continue }
             $cOut = & $py.Source $script $harness 2>&1

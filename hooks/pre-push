@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Kit repo pre-push: напоминание о дрейфе вендорных источников
+# (tools/kit-lint/check_upstream_freshness.py, реестр — upstream-sources.json).
+#
+# Push НЕ блокируется — находки печатаются как предупреждение.
+# Сделать гейтом: заменить `|| true` на `|| exit 1`.
+#
+# Включение (один раз на клон, локальный git config):
+#   git config core.hooksPath hooks
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+PY="$(command -v python || command -v python3 || true)"
+[[ -n "$PY" ]] || exit 0
+
+"$PY" "$repo_root/tools/kit-lint/check_upstream_freshness.py" \
+      "$repo_root" --online || true
+exit 0

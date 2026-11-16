@@ -232,7 +232,7 @@ if [[ -e "$HARNESS_ROOT" ]]; then
   # 9b. kit-lint suite (WARN only in doctor; in kit CI these are gates):
   #     core purity, cross-layer links, stack structural rules.
   if [[ -n "$PY" ]]; then
-    for chk in check_core_purity.py check_cross_layer_links.py kit_lint.py; do
+    for chk in check_core_purity.py check_cross_layer_links.py kit_lint.py check_upstream_freshness.py; do
       script="$HARNESS_ROOT/tools/kit-lint/$chk"
       [[ -f "$script" ]] || continue
       clog="$(mktemp)"

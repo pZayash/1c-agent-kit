@@ -1,0 +1,32 @@
+{
+  "comment": "Реестр вендорных источников kit для check_upstream_freshness.py. kind=git-sync: внешний git-репозиторий, синкаемый sync-скриптом; kind=pypi-pin: пакет PyPI, минимум запинен в install-скриптах; kind=github-release-pin: версия артефакта запинена в файле (--online); kind=github-watch: адаптированная копия без sync, checked_at — дата последнего переноса (--online, зарезервировано).",
+  "sources": [
+    {
+      "id": "cc-1c-skills",
+      "kind": "git-sync",
+      "sync_state": "tools/cc-1c-skills-sync/last-sync.json",
+      "clone": "tools/cc-1c-skills",
+      "remote_ref": "origin/main",
+      "warn_age_days": 30,
+      "sync_hint": "python tools/cc-1c-skills-sync/sync.py"
+    },
+    {
+      "id": "answer42",
+      "kind": "pypi-pin",
+      "package": "answer42",
+      "pin_files": [
+        "stacks/1c/tools/answer42/answer42.sh",
+        "stacks/1c/tools/answer42/answer42.ps1"
+      ],
+      "bump_hint": "поднять >=<ver> в pin_files и минимум в docs/ai/answer42.md"
+    },
+    {
+      "id": "bsl-language-server",
+      "kind": "github-release-pin",
+      "repo": "1c-syntax/bsl-language-server",
+      "pin_file": "stacks/1c/tools/bsl-check/BSLLS_VERSION",
+      "include_prereleases": true,
+      "bump_hint": "bash stacks/1c/tools/bsl-check/update-bsl-language-server.sh --latest и commit BSLLS_VERSION"
+    }
+  ]
+}

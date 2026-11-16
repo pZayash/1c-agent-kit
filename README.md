@@ -264,7 +264,12 @@ no-op и зелёный verify опаснее явной ошибки.
 смонтированному у потребителя пути; FAIL, если из `core/` резолв попадает
 в `stacks/` или цель не существует. Рядом —
 `check_core_purity.py` (бан 1С-лексики в `core/cursor/{skills,rules}` вне
-секций `#### stack:`).
+секций `#### stack:`). Рядом —
+`check_upstream_freshness.py` (дрейф вендорных источников: возраст sync и
+расхождение с remote по реестру `upstream-sources.json`; `--online` —
+сверка с ls-remote/PyPI). Запускается из kit-doctor (WARN, offline) и как
+неблокирующее напоминание из `hooks/pre-push` (нужен `git config
+core.hooksPath hooks`).
 
 ### kit-agent: хуки и guard-правила для агентов
 
