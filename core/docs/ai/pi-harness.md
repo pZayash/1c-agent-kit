@@ -16,7 +16,8 @@
 | MCP | — | через `tools/mcp-call/mcp-call.sh` ([mcp-config.md](mcp-config.md)) |
 
 Линки ставит `bootstrap-kit` (шаг `link-pi-roots`), проверяет
-`verify-kit-links`. Вручную:
+`bash harness/scripts/kit-doctor.sh .` +
+`python harness/tools/kit-layout/kit_layout.py verify .`. Вручную:
 
 ```bash
 DRY_RUN=1 bash harness/scripts/link-pi-roots.sh .

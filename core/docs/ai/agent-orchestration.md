@@ -97,8 +97,9 @@ bb thread spawn --project <projectId> --parent-self \
 - Бриф идёт **целиком в промпт** (`--prompt-file`) **плюс** дополнение о
   взаимодействии с оркестратором. Отдельный скилл
   [orchestrated-child](../../cursor/skills/orchestrated-child/SKILL.md) дочке
-  копировать не нужно: overlay kit линкует `harness/cursor/skills/*` в
-  `.cursor/skills/` потребителя при `bootstrap-kit`.
+  копировать не нужно: overlay kit линкует `harness/core/cursor/skills/*`
+  (и `harness/stacks/<s>/cursor/skills/*`) в `.cursor/skills/` потребителя при
+  `bootstrap-kit`.
 - Модель дочки выбирает оркестратор; оператор может выдать ему свои указания.
 
 ### Окружение worktree

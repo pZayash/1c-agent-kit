@@ -72,6 +72,76 @@ sha256, gitignored) и lock `.kit/lock`. Локальные манифесты
 из kit. В `.gitignore` — только `.kit/fallback.txt` и `.kit/lock`;
 паттерн `.kit*` — **никогда** (съест `.kit.json`).
 
+## Миграция на слои (ec5ff15)
+
+`ec5ff15` разложил kit на `core/` + `stacks/<id>/` и удалил
+`scripts/verify-kit-links.{sh,ps1}`. **У потребителя** смонтированные пути
+(`tools/*`, `.cursor/*`, `docs/ai/*`, `.pi/*`) не меняются — двигается только
+**источник внутри kit** (`harness/…`). Таблицы «было → замена»:
+
+### Пути внутри kit
+
+| Было (до `ec5ff15`) | Стало / замена |
+| --- | --- |
+| `harness/tools/bsl-check` | [stacks/1c/tools/bsl-check](stacks/1c/tools/bsl-check/README.md) |
+| `harness/tools/load-changed-files` | [stacks/1c/tools/load-changed-files](stacks/1c/tools/load-changed-files/) |
+| `harness/tools/mcp-call` | [stacks/1c/tools/mcp-call](stacks/1c/tools/mcp-call/README.md) |
+| `harness/tools/answer42` | [stacks/1c/tools/answer42](stacks/1c/tools/answer42/README.md) |
+| `harness/tools/rights-xml-lint` | `harness/stacks/1c/tools/rights-xml-lint` |
+| `harness/tools/docs-links` | [core/tools/docs-links](core/tools/docs-links/README.md) |
+| `harness/tools/sandbox` | `harness/core/tools/sandbox` |
+| `harness/tools/git-partial-stage.py` | `harness/core/tools/git-partial-stage.py` |
+| `harness/docs/ai/*` (общий канон) | `harness/core/docs/ai/*` |
+| `harness/docs/ai/*` (1С-специфика) | `harness/stacks/1c/docs/ai/*` |
+| `harness/docs/ai/README.md` (удалён) | [core/docs/ai/README.md](core/docs/ai/README.md) |
+| `harness/cursor/{skills,rules,commands}` | `harness/core/cursor/…` / `harness/stacks/1c/cursor/…` |
+| `harness/skills/*` (cc-1c vendor) | `harness/stacks/1c/skills/*` |
+| `harness/scripts/verify-kit-links.{sh,ps1}` | `kit-doctor.sh .` + `kit_layout.py verify .` |
+
+Разделение `cursor/` и `docs/ai/`: стеко-нейтральное — `core/`, 1С-скиллы +
+компаньоны `<name>-1c` — `stacks/1c/`. Не нашёл файл в `core/` — ищи в
+`harness/stacks/1c/` (история — `git log --follow`). Готовые замены для
+`verify-kit-links`:
+
+```bash
+bash harness/scripts/kit-doctor.sh .                        # агрегированная диагностика
+python harness/tools/kit-layout/kit_layout.py verify .      # все ресурсы раскладки
+```
+
+`harness/tools/{kit-layout,kit-agent,kit-lint,kit-spec,section-patch,
+skill-frontmatter,cc-1c-skills-sync}` — **kit-internal, остались на месте**
+(не монтируются потребителю).
+
+### Миграция потребителя
+
+1. **`.kit.json` обязателен для стеков.** Без него kit раскладывает core-only
+   (`stacks: []`) + WARN: 1С-скиллы/тулзы не появятся, старые ссылки снимет
+   orphan-sweep. Минимум для 1С:
+
+   ```json
+   {"version": 1, "stacks": ["1c"], "source_root": "conf/"}
+   ```
+
+   Полная схема — [§ .kit.json](#kitjson--выбор-стеков-у-потребителя).
+2. **Bump gitlink — только ПОСЛЕ `bootstrap-kit`.** Раскладка читает рабочее
+   дерево `harness/`, а не индекс: коммит gitlink сам по себе ссылок не
+   обновляет, а на старом движке (до `ec5ff15`) `stacks/1c/tools/*` не
+   линкуются вовсе. Обратный порядок = коммит пина, у которого у потребителя
+   нет 1С-тулзов.
+3. **Порядок безопасного обновления** (пин → раскладка → проверка → коммит):
+
+   ```bash
+   git -C harness fetch origin && git -C harness checkout <pin>  # 1. пин
+   bash harness/scripts/bootstrap-kit.sh .                       # 2. раскладка
+   bash harness/scripts/kit-doctor.sh .                          # 3. диагностика
+   python harness/tools/kit-layout/kit_layout.py verify .        #    все ресурсы
+   git add harness && git commit -m 'chore(kit): bump harness'   # 4. gitlink
+   ```
+
+   `kit-doctor` — read-only; WARN про gitlink/fallback допустим, `[FAIL]` —
+   стоп (см. § Pitfalls). `verify` без `bootstrap` даёт
+   `FAIL CONFLICT`/pending — это норма до шага 2.
+
 ## Stack authoring
 
 Новый стек = `stacks/<s>/` + `stack.json` + каноничные каталоги — **ноль

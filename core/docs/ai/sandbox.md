@@ -136,8 +136,8 @@ bash tools/sandbox/run.sh bash scripts/…
 
 **Не через sandbox:** сборка/запуск 1С на Windows-хосте, `git`/`rtk git`
 (отдельные правила allowlist; `git` в образ **не** входит), а также
-**namespace-зависимые** операции kit: `bootstrap-kit`, `kit_layout.py`,
-`verify-kit-links`, `kit-doctor`. В контейнере Windows-ссылки читаются как
+**namespace-зависимые** операции kit: `bootstrap-kit`, `kit_layout.py`
+(`plan`/`apply`/`verify`), `kit-doctor`. В контейнере Windows-ссылки читаются как
 `/mnt/host/...` (FOREIGN-NS): раньше это был тихий no-op + зелёный `verify`,
 теперь engine даёт `ERROR ... foreign/sandbox namespace` (exit 2). Раскладку
 и verify запускай на хосте (Git Bash / PowerShell), который её создал.
@@ -208,7 +208,7 @@ bash tools/sandbox/run.sh pip install -r tools/sandbox/requirements.txt
 | Approve на `run.sh … && …` | Цепочка ломает матч allowlist | Отдельные Shell-вызовы или один `run.sh bash -c '…'` |
 | `No module named 'lxml'` | Нет пакета | `pip install -r tools/sandbox/requirements.txt` |
 | `run.sh: docker: command not found` | Docker выключен | Сообщить пользователю |
-| `bsl-check.py` not found | Win junction → `/mnt/host` в sandbox | `harness/tools/bsl-check/check-bsl.py` |
+| `bsl-check.py` not found | Win junction → `/mnt/host` в sandbox | `harness/stacks/1c/tools/bsl-check/check-bsl.py` |
 | `kit_layout.py`: `ERROR ... foreign/sandbox namespace` | Windows-раскладка, запуск из контейнера | запусти на хосте (Git Bash/PowerShell), не через `run.sh` |
 | `kit-agent session-start` пуст в контейнере | git нет / namespace в порядке | норма; при foreign-ns печатается `[!] kit-layout ... namespace` |
 | `kit-doctor`: `[FAIL] foreign namespace` | ссылки созданы в другом OS/namespace | то же |

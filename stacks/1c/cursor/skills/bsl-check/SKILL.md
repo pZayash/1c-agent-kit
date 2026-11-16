@@ -34,7 +34,7 @@ description: >-
 После правок файлов на диске:
 
 ```bash
-bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py conf/.../Module.bsl
+bash tools/sandbox/run.sh python harness/stacks/1c/tools/bsl-check/check-bsl.py conf/.../Module.bsl
 ```
 
 Windows Docker: не `tools/bsl-check/…` — junction в sandbox мёртвый. Linux/слот:
@@ -43,7 +43,7 @@ Windows Docker: не `tools/bsl-check/…` — junction в sandbox мёртвы�
 Проверка текста **без записи** в дерево (stdin):
 
 ```bash
-bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py --stdin --path Module.bsl < file.bsl
+bash tools/sandbox/run.sh python harness/stacks/1c/tools/bsl-check/check-bsl.py --stdin --path Module.bsl < file.bsl
 ```
 
 Если известен логический путь модуля, передай его в `--path`, например
@@ -52,12 +52,12 @@ bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py --stdin --
 Первичный прогон (только ошибки), затем полный режим:
 
 ```bash
-bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py --min-severity Error conf/Path/To/Module.bsl
-bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py conf/Path/To/Module.bsl
+bash tools/sandbox/run.sh python harness/stacks/1c/tools/bsl-check/check-bsl.py --min-severity Error conf/Path/To/Module.bsl
+bash tools/sandbox/run.sh python harness/stacks/1c/tools/bsl-check/check-bsl.py conf/Path/To/Module.bsl
 ```
 
 По умолчанию порог для кода возврата — `Warning`; см. `--min-severity` в
-`python harness/tools/bsl-check/check-bsl.py --help`.
+`python harness/stacks/1c/tools/bsl-check/check-bsl.py --help`.
 
 ## Обновление BSLLS (бинарь не в git)
 
@@ -70,8 +70,8 @@ Runtime в **кэше хоста** (`KIT_BSLLS_ROOT/<пин>/`), не в каж�
 ```bash
 # Общий кэш на хосте (User env, не repo .env):
 # KIT_BSLLS_ROOT=D:\tools\bslls
-bash harness/tools/bsl-check/update-bsl-language-server.sh
-python harness/tools/bsl-check/check-bsl.py --which
+bash harness/stacks/1c/tools/bsl-check/update-bsl-language-server.sh
+python harness/stacks/1c/tools/bsl-check/check-bsl.py --which
 ```
 
 Без `--latest` (бамп пина, не «как у всех»). Не качай в sidecar / worktree.
@@ -82,9 +82,9 @@ python harness/tools/bsl-check/check-bsl.py --which
 **Бамп пина** (этот хост, потом commit `BSLLS_VERSION` в kit `harness/`):
 
 ```bash
-bash harness/tools/bsl-check/update-bsl-language-server.sh --version 1.1.0-rc.3
+bash harness/stacks/1c/tools/bsl-check/update-bsl-language-server.sh --version 1.1.0-rc.3
 # GitHub Latest = stable, RC пропускает:
-# bash harness/tools/bsl-check/update-bsl-language-server.sh --latest
+# bash harness/stacks/1c/tools/bsl-check/update-bsl-language-server.sh --latest
 ```
 
 После — smoke на одном `.bsl` (не `--help` / `--which`: они BSLLS не запускают).
@@ -93,7 +93,7 @@ Windows + Docker sandbox: junction `tools/bsl-check` внутри контейн
 ссылка на `/mnt/host/c/...`. Звать физический путь kit:
 
 ```bash
-bash tools/sandbox/run.sh python harness/tools/bsl-check/check-bsl.py --min-severity Error conf/Path/To/Module.bsl
+bash tools/sandbox/run.sh python harness/stacks/1c/tools/bsl-check/check-bsl.py --min-severity Error conf/Path/To/Module.bsl
 ```
 
 Agent-slot: rebuild образа, linux-дерево копируется на `docker build`.

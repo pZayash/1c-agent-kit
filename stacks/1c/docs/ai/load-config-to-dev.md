@@ -19,7 +19,7 @@
 
 Навык: **`/load-changed-files`**.
 
-Ядро скрипта — `harness/tools/load-changed-files/` (kit). Корневой
+Ядро скрипта — `harness/stacks/1c/tools/load-changed-files/` (kit). Корневой
 `load-changed-files.sh` потребителя — thin wrapper.
 
 Настройки: `.env` (`IB_CONNECTION`, `DESIGNER_PATH`, `CONFIG_PATH`,
@@ -195,7 +195,7 @@ error`), причина остановки, что грузилось (файл�
 При partial-загрузке `conf/` скрипт делает preflight объектов на поддержке
 (`Ext/ParentConfigurations.bin`). `parent_config.py` резолвится по порядку:
 `PARENT_CONFIG_PY` → `scripts/parent_config.py` потребителя → канон
-`harness/tools/load-changed-files/parent_config.py` (kit). Если файла нет
+`harness/stacks/1c/tools/load-changed-files/parent_config.py` (kit). Если файла нет
 нигде — preflight пропускается с `WARN`, загрузка продолжается. Альтернатива —
 `-F` (full-resync без preflight).
 
@@ -416,7 +416,7 @@ echo $! > .tmp/load.pid
 - Фоном stdin неинтерактивный: промпт «закрыть конфигуратор?» недоступен
   (`exit 2`) — закрывай заранее или запускай с `--allow-close-designer`.
 - Штатного `--detach`/`--watch` в движке **нет** (rg по
-  `harness/tools/load-changed-files/` пуст) — фон только руками, как выше;
+  `harness/stacks/1c/tools/load-changed-files/` пуст) — фон только руками, как выше;
   самодетач движка — возможное будущее расширение.
 
 ## Кэш хешей conf: тихий пропуск файла
