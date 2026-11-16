@@ -1315,13 +1315,16 @@ run_python() {
 # означает «есть [ERROR]-находки» — вернуть из $(…) 1 значило бы остановить
 # загрузку из-за отсутствия Python.
 LINT_NO_PYTHON_CODE=4
+# PYTHONIOENCODING=utf-8: сообщения линтера — кириллица; без этого на Windows
+# stdout питона уходит в cp1251/legacy-кодировку консоли и в лог попадает
+# мохнатый мусор вместо «[ERROR] child-объект Template определён inline».
 run_python_soft() {
     if command -v python >/dev/null 2>&1; then
-        python "$@"
+        PYTHONIOENCODING=utf-8 python "$@"
     elif command -v python3 >/dev/null 2>&1; then
-        python3 "$@"
+        PYTHONIOENCODING=utf-8 python3 "$@"
     elif command -v py >/dev/null 2>&1; then
-        py -3 "$@"
+        PYTHONIOENCODING=utf-8 py -3 "$@"
     else
         printf '%s\n' "нет интерпретатора Python (python/python3/py -3)"
         return $LINT_NO_PYTHON_CODE
