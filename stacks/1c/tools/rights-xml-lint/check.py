@@ -18,7 +18,24 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+# Корень для относительных путей. После переезда kit на слои скрипт живёт в
+# `harness/stacks/1c/tools/rights-xml-lint`, поэтому `parents[2]` — это сам kit,
+# а не репозиторий потребителя (пути вида `cfe.xml/...` резолвились в
+# `harness/stacks/1c/cfe.xml/...` → «not found»). Порядок: cwd потребителя →
+# legacy-глубина (parents[2]) → новая глубина (parents[3]).
+_HERE = Path(__file__).resolve()
+_BASES = (Path.cwd(), _HERE.parents[2], _HERE.parents[3])
+
+
+def _resolve(raw: str) -> Path:
+    p = Path(raw)
+    if p.is_absolute():
+        return p
+    for base in _BASES:
+        candidate = base / p
+        if candidate.exists():
+            return candidate
+    return _BASES[0] / p
 
 # Виды метаданных, на которые платформа допускает права (8.3).
 # Собрано по правилам платформы + сверено со всеми Rights.xml УНФ (26 видов
@@ -70,9 +87,7 @@ def main() -> int:
 
     files: list[Path] = []
     for raw in args.paths:
-        p = Path(raw)
-        if not p.is_absolute():
-            p = ROOT / p
+        p = _resolve(raw)
         if p.is_dir():
             files.extend(sorted(p.rglob("Rights.xml")))
         elif p.is_file():
