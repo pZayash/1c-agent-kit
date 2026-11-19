@@ -39,9 +39,13 @@ class DocsLinksTest(unittest.TestCase):
     def audit(self, files: dict[str, str], config: dict | None = None):
         root = self.make_root(files, config)
         cfg = docs_links.deep_merge(docs_links.DEFAULT_CONFIG, docs_links.load_config(root, None))
-        # Тестовый каталог лежит внутри рабочего репозитория: отключаем git-список,
-        # чтобы инструмент обходил только файлы теста.
-        with mock.patch.object(docs_links, "list_tracked", return_value=None):
+        # Тестовый каталог лежит внутри рабочего репозитория: отключаем git-списки,
+        # чтобы инструмент обходил только файлы теста (иначе цель «вне git»
+        # классифицируется как untracked-target, а не broken).
+        with (
+            mock.patch.object(docs_links, "list_tracked", return_value=None),
+            mock.patch.object(docs_links, "list_tracked_paths", return_value=None),
+        ):
             return docs_links.analyze(root, cfg)
 
     def kinds(self, audit) -> dict[str, list[str]]:

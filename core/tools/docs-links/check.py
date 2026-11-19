@@ -259,11 +259,18 @@ def is_stub(root: Path, rel: str, config: dict) -> bool:
 
 
 def slug(text: str) -> str:
+    """Якорь заголовка по правилам GitHub (и preview в VS Code).
+
+    Пунктуация **удаляется**, каждый пробельный символ → отдельный `-`:
+    `(Office/PDF) — не в git` → `officepdf--не-в-git` (двойной дефис — след
+    эм-дэша между пробелами). Схлопывание `\s+` → `-` давало один дефис и
+    краснило корректные ссылки GitHub-стиля.
+    """
     text = re.sub(r"<[^>]+>", "", text)
     text = re.sub(r"[`*_~]", "", text)
     text = text.strip().lower()
     text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
-    return re.sub(r"\s+", "-", text)
+    return re.sub(r"\s", "-", text)
 
 
 def heading_anchors(path: Path) -> set[str]:
