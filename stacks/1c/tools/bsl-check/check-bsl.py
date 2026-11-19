@@ -18,10 +18,27 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
 
-# tools/bsl-check → parents[2] = repo root.
-# harness/stacks/1c/tools/bsl-check → parents[2] = harness, root is parents[3].
-_p2 = Path(__file__).resolve().parents[2]
-REPO_ROOT = _p2.parent if _p2.name == "harness" else _p2
+# Корень потребителя ищем по маркерам, а не по глубине: после миграции kit
+# на слои скрипт живёт в harness/{core,stacks/<s>}/tools/… и parents[2] уже
+# не корень репо. Признаки корня: `.kit.json` (kit-layout) → каталог `harness`
+# (его родитель) → `.git`. Без этого относительные пути падали в «File not
+# found», а абсолютные — в SameFileError (копирование файла в себя).
+def consumer_root(start: Path) -> Path:
+    """Корень репозитория-потребителя для контекста скрипта."""
+    chain = (start, *start.parents)
+    for candidate in chain:
+        if (candidate / ".kit.json").is_file():
+            return candidate
+    for candidate in chain:
+        if candidate.name == "harness":
+            return candidate.parent
+    for candidate in chain:
+        if (candidate / ".git").exists():
+            return candidate
+    return start
+
+
+REPO_ROOT = consumer_root(Path(__file__).resolve().parent)
 TOOL_DIR = Path(__file__).resolve().parent
 is_windows = platform.system() == "Windows"
 CONFIG_PATH = TOOL_DIR / "bsl-language-server.json"
