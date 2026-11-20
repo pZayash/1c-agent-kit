@@ -38,6 +38,11 @@ bash tools/sandbox/run.sh python tools/docs-links/check.py report --all
 # Для хука/CI: только находки по изменённым файлам, exit 1 при ошибках
 bash tools/sandbox/run.sh python tools/docs-links/check.py check --strict --files docs/ai/x.md
 
+# Тот же фильтр списком из файла (по одному пути в строке; `-` — stdin):
+# вариант для большой дельты — `--files` едет в argv и упирается в лимит
+# командной строки ОС (WinError 206 / E2BIG)
+bash tools/sandbox/run.sh python tools/docs-links/check.py check --list-file .tmp/targets.list
+
 # Оглавление памяти: memory/INDEX.md (по месяцам, H1 + теги)
 bash tools/sandbox/run.sh python tools/docs-links/check.py index
 
@@ -97,6 +102,7 @@ bash tools/sandbox/run.sh python tools/docs-links/check.py index \
 `error`. Выключается `"untracked_targets": false`.
 
 Формат строки в `check`:
+
 ```text
 docs-links: <файл>[:<строка>]: <severity>: <сообщение>
 ```

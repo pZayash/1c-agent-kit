@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
 import unittest
 import uuid
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -146,6 +149,38 @@ class DocsLinksTest(unittest.TestCase):
         self.assertIn("## 2026-09", text)
         self.assertIn("## topic", text)
         self.assertIn("[Тематическое](topic/inner.md)", text)
+
+    def test_list_file_filters_check_output(self):
+        """--list-file: фильтр находок как --files, но список читается из файла."""
+        audit = self.audit(
+            {
+                "ENTRY.md": "[A](docs/a.md)\n[B](docs/b.md)\n",
+                "docs/a.md": "[Битая](missing-a.md)\n",
+                "docs/b.md": "[Битая](missing-b.md)\n",
+            }
+        )
+        list_path = Path(tempfile.mktemp(suffix=".list", dir=audit.root))
+        list_path.write_text("docs/a.md\n", encoding="utf-8")
+        args = SimpleNamespace(files=None, list_file=str(list_path), strict=False)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = docs_links.check(audit, args)
+        out = buf.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("docs/a.md", out)
+        self.assertNotIn("docs/b.md", out)
+
+    def test_list_file_unreadable_returns_2(self):
+        """Нечитаемый --list-file — ошибка использования (rc 2), не «чисто»."""
+        audit = self.audit({"ENTRY.md": "# Вход\n"})
+        args = SimpleNamespace(
+            files=None,
+            list_file=str(audit.root / "no-such.list"),
+            strict=False,
+        )
+        with redirect_stdout(io.StringIO()):
+            code = docs_links.check(audit, args)
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

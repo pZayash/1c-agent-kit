@@ -498,8 +498,19 @@ def report(audit: Audit, args: argparse.Namespace) -> int:
 
 def check(audit: Audit, args: argparse.Namespace) -> int:
     selected = audit.findings
-    if args.files:
-        changed = {norm(f) for f in args.files}
+    selected_paths = list(args.files or [])
+    if args.list_file:
+        try:
+            if args.list_file == "-":
+                list_text = sys.stdin.read()
+            else:
+                list_text = Path(args.list_file).read_text(encoding="utf-8-sig")
+        except OSError as exc:
+            print(f"docs-links: {args.list_file}: не читается: {exc}", file=sys.stderr)
+            return 2
+        selected_paths.extend(list_text.splitlines())
+    if selected_paths:
+        changed = {norm(f.strip()) for f in selected_paths if f.strip()}
         selected = [f for f in selected if f.file in changed]
     for finding in selected:
         print(finding.format_line())
@@ -603,6 +614,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", default=".", help="корень репозитория (по умолчанию текущий)")
     parser.add_argument("--config", default=None, help="путь к .docs-links.json")
     parser.add_argument("--files", nargs="*", default=None, help="только эти файлы (для check)")
+    parser.add_argument(
+        "--list-file",
+        metavar="PATH",
+        help="файл со списком путей (по одному на строку), `-` — stdin; "
+        "семантика как у --files, но без лимита argv (для check)",
+    )
     parser.add_argument("--path", default=None, help="каталог записей (для index)")
     parser.add_argument("--out", default=None, help="файл индекса (для index)")
     parser.add_argument("--json", action="store_true", help="машиночитаемый отчёт (report)")
